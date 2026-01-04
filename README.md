@@ -1,4 +1,6 @@
 # OneTrainer Web UI
+While the ui for me does work 'ok' in Linux, i said 'what if'. here is that what if. still buggy and worked on, its been my driver a little over a month..the new modules added 'work' but still needs work
+
 
 A modern web-based interface for OneTrainer with real-time training monitoring, inference, and enhanced model support.
 
@@ -22,7 +24,7 @@ Tree view sample organization with expandable folders. Select any sample to prev
 
 ### LoRA / Adapters Configuration
 ![LoRA Adapters](docs/screenshots/lora-adapters.png)
-Configure PEFT adapters with LoRA, DoRA, and LyCORIS support. Set rank, alpha, dropout, and target layers with custom regex patterns for precise layer targeting.
+Configure PEFT adapters with LoRA, DoRA, and LyCORIS 3.4 support. Set rank, alpha, dropout, and target layers with custom regex patterns for precise layer targeting.
 
 ### Diffusion 4K & Resolution Presets
 ![Diffusion 4K](docs/screenshots/diffusion4k.png)
