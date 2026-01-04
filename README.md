@@ -2,6 +2,40 @@
 
 A modern web-based interface for OneTrainer with real-time training monitoring, inference, and enhanced model support.
 
+## Screenshots
+
+### Dashboard
+![Dashboard](docs/screenshots/dashboard.png)
+Real-time training dashboard with live loss charts (raw + smoothed), GPU monitoring showing temperature, VRAM usage, and power draw. Training console displays step-by-step progress with loss values, speed metrics, and ETA countdown.
+
+### Inference UI
+![Inference](docs/screenshots/inference.png)
+Full-featured image generation interface with core parameters (steps, CFG, seed), resolution presets, sampler selection, init image support, refine/upscale options, ControlNet integration, video settings, FreeU, and LoRA stacking.
+
+### Training Concepts
+![Concepts](docs/screenshots/concepts.png)
+Card-based concept manager for organizing training data. Each concept card shows a preview with enable/disable toggles, allowing quick activation of specific training subjects.
+
+### Sample Browser
+![Samples](docs/screenshots/samples.png)
+Tree view sample organization with expandable folders. Select any sample to preview images with their captions. Supports multiple dataset workspaces.
+
+### LoRA / Adapters Configuration
+![LoRA Adapters](docs/screenshots/lora-adapters.png)
+Configure PEFT adapters with LoRA, DoRA, and LyCORIS support. Set rank, alpha, dropout, and target layers with custom regex patterns for precise layer targeting.
+
+### Diffusion 4K & Resolution Presets
+![Diffusion 4K](docs/screenshots/diffusion4k.png)
+Enable Diffusion-4K Wavelet Loss for high-frequency detail preservation (arXiv:2503.18352). Quick resolution presets for 1024, 2048, and 4096 training.
+
+### Aspect Ratio Bucketing
+![Buckets](docs/screenshots/buckets.png)
+Advanced bucketing configuration with aspect ratio presets, bucket balancing modes (oversample/undersample), quantization settings, and real-time config summary preview.
+
+### Qwen VL Captioner
+![Captioner](docs/screenshots/captioner.png)
+Automatic image captioning using Qwen2-VL-7B. Customize prompts, enable summary or one-sentence modes, control max tokens, and batch process entire folders.
+
 ## New Features
 
 ### Web Interface
