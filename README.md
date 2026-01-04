@@ -1,4 +1,4 @@
-# OneTrainer Web UI
+# OneTrainer Web UI -- Really early 'Alpha release'. 
 While the ui for me does work 'ok' in Linux, i said 'what if'. here is that what if. still buggy and worked on, its been my driver a little over a month..the new modules added 'work' but still needs work
 
 
