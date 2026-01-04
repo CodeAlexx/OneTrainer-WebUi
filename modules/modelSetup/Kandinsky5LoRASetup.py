@@ -10,7 +10,7 @@ from torch import nn
 
 from modules.model.Kandinsky5Model import Kandinsky5Model
 from modules.modelSetup.BaseModelSetup import BaseModelSetup
-from modules.module.LoRAModule import LoRAModuleWrapper
+from modules.module.LoRAModule import create_peft_wrapper
 from modules.util.config.TrainConfig import TrainConfig
 from modules.util.dtype_util import create_autocast_context
 from modules.util.NamedParameterGroup import NamedParameterGroupCollection
@@ -123,46 +123,6 @@ class Kandinsky5LoRASetup(BaseModelSetup):
         # Quantize layers (NF4, INT8, etc.) if configured
         quantize_layers(model.transformer, self.train_device, model.transformer_train_dtype, config)
 
-    def _inject_lora(
-            self,
-            model: Kandinsky5Model,
-            config: TrainConfig,
-    ):
-        """Inject LoRA adapters into the transformer."""
-        if model.transformer is None:
-            return
-
-        # Target modules for LoRA in DiffusionTransformer3D
-        # - self_attention, cross_attention, feed_forward
-        # Filter pattern for layer targeting
-        module_filter = []
-        if config.layer_filter:
-            module_filter = config.layer_filter.split(',')
-        else:
-            # Default: target attention and feedforward layers
-            module_filter = ['self_attention', 'cross_attention', 'feed_forward']
-
-        print(f"Injecting LoRA with rank={config.lora_rank}, alpha={config.lora_alpha}")
-        print(f"  Layer filter: {module_filter}")
-
-        # Create LoRA wrapper using the standard API - store on model like other setups
-        model.transformer_lora = LoRAModuleWrapper(
-            orig_module=model.transformer,
-            prefix="transformer",
-            config=config,
-            module_filter=module_filter,
-        )
-
-        # Hook to module
-        model.transformer_lora.hook_to_module()
-
-        # Convert LoRA to training dtype
-        lora_dtype = config.lora_weight_dtype.torch_dtype() if config.lora_weight_dtype else torch.bfloat16
-        model.transformer_lora.to(dtype=lora_dtype)
-
-        trainable_params = sum(p.numel() for p in model.transformer_lora.parameters() if p.requires_grad)
-        print(f"LoRA injected: {trainable_params:,} trainable parameters (dtype={lora_dtype})")
-
     def setup_model(
             self,
             model: Kandinsky5Model,
@@ -171,12 +131,20 @@ class Kandinsky5LoRASetup(BaseModelSetup):
         # 1. Freeze everything first
         model.requires_grad_(False)
 
-        # 2. Inject LoRA into transformer
-        self._inject_lora(model, config)
+        # 2. Inject LoRA into transformer using standard factory
+        if model.transformer is not None:
+            layer_filter = config.layer_filter.split(',') if config.layer_filter else None
+            model.transformer_lora = create_peft_wrapper(
+                model.transformer, "lora_transformer", config, layer_filter
+            )
 
-        # 3. Enable gradients for LoRA parameters only
-        if model.transformer_lora is not None:
-            model.transformer_lora.requires_grad_(True)
+            # 3. Enable gradients for LoRA parameters only
+            if model.transformer_lora is not None:
+                model.transformer_lora.requires_grad_(True)
+                model.transformer_lora.hook_to_module()
+
+                trainable_params = sum(p.numel() for p in model.transformer_lora.parameters() if p.requires_grad)
+                print(f"LoRA injected: {trainable_params:,} trainable parameters")
 
         # 4. Initialize model parameters for optimizer
         from modules.util.optimizer_util import init_model_parameters
