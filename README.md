@@ -36,6 +36,14 @@ Advanced bucketing configuration with aspect ratio presets, bucket balancing mod
 ![Captioner](docs/screenshots/captioner.png)
 Automatic image captioning using Qwen2-VL-7B. Customize prompts, enable summary or one-sentence modes, control max tokens, and batch process entire folders.
 
+### Video Editor
+![Video Editor](docs/screenshots/video-editor.png)
+Timeline-based video editor with multi-track support, playback controls, In/Out point selection, clip properties, effects panel, and video export.
+
+### Preset Card Selector
+![Preset Selector](docs/screenshots/preset-selector.png)
+Visual preset browser with model type filtering (Kandinsky, Qwen, Flux, SDXL, Chroma, etc.), search, tags for LoRA/Finetune/VRAM requirements, and favorites.
+
 ## New Features
 
 ### Web Interface
