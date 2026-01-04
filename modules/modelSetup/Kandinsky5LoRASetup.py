@@ -18,21 +18,11 @@ from modules.util.NamedParameterGroup import NamedParameterGroupCollection
 from modules.util.quantization_util import quantize_layers
 from modules.util.TrainProgress import TrainProgress
 from modules.util.checkpointing_util import enable_checkpointing
-from modules.util.musubi_block_swap import MusubiBlockSwapManager
 
 # Import K5 block types for checkpointing
 import sys
 sys.path.insert(0, 'models/kandinsky-5-code')
 from kandinsky.models.dit import TransformerEncoderBlock, TransformerDecoderBlock
-
-# RAMtorch support for CPU RAM weight streaming (optional)
-RAMTORCH_AVAILABLE = False
-try:
-    from ramtorch.helpers import replace_linear_with_ramtorch
-    RAMTORCH_AVAILABLE = True
-except ImportError:
-    pass
-
 
 class Kandinsky5LoRASetup(BaseModelSetup):
     """Setup for Kandinsky 5 LoRA training."""
@@ -90,36 +80,6 @@ class Kandinsky5LoRASetup(BaseModelSetup):
                 )
                 print("Gradient checkpointing + layer offload enabled for Kandinsky 5 transformer")
 
-        # Musubi block swap for training (alternative to layer offload conductor)
-        # Enable if layer offload is configured and conductor didn't activate
-        blocks_to_swap = getattr(config, 'musubi_blocks_to_swap', 0)
-        if blocks_to_swap == 0 and config.gradient_checkpointing.enabled():
-            # Auto-enable: swap ~half the visual blocks for significant VRAM savings
-            blocks_to_swap = model.transformer.num_visual_blocks // 2 if model.transformer else 0
-
-        if blocks_to_swap > 0 and model.transformer is not None:
-            model.transformer.musubi_manager = MusubiBlockSwapManager.build(
-                depth=model.transformer.num_visual_blocks,
-                blocks_to_swap=blocks_to_swap,
-                swap_device="cpu",
-            )
-            if model.transformer.musubi_manager is not None:
-                # Activate the manager to register backward hooks
-                model.transformer.musubi_manager.activate(
-                    model.transformer.visual_transformer_blocks,
-                    self.train_device,
-                    grad_enabled=True
-                )
-                print(f"Musubi block swap enabled for K5 training: {blocks_to_swap} blocks swapped to CPU")
-
-        # RAMtorch: Disabled for now - interferes with LoRA injection
-        # Need to apply RAMtorch AFTER LoRA, or patch LoRA to support RAMtorch Linear
-        # if RAMTORCH_AVAILABLE and model.transformer is not None:
-        #     blocks_to_offload = list(model.transformer.visual_transformer_blocks)[:16]
-        #     for block in blocks_to_offload:
-        #         replace_linear_with_ramtorch(block, device="cuda")
-        #     print(f"RAMtorch enabled for K5 transformer (streaming {len(blocks_to_offload)} visual blocks from CPU RAM)")
-
         # Quantize layers (NF4, INT8, etc.) if configured
         quantize_layers(model.transformer, self.train_device, model.transformer_train_dtype, config)
 
@@ -143,8 +103,12 @@ class Kandinsky5LoRASetup(BaseModelSetup):
                 model.transformer_lora.requires_grad_(True)
                 model.transformer_lora.hook_to_module()
 
+                # Convert LoRA to training dtype
+                lora_dtype = config.lora_weight_dtype.torch_dtype() if config.lora_weight_dtype else torch.bfloat16
+                model.transformer_lora.to(dtype=lora_dtype)
+
                 trainable_params = sum(p.numel() for p in model.transformer_lora.parameters() if p.requires_grad)
-                print(f"LoRA injected: {trainable_params:,} trainable parameters")
+                print(f"LoRA injected: {trainable_params:,} trainable parameters (dtype={lora_dtype})")
 
         # 4. Initialize model parameters for optimizer
         from modules.util.optimizer_util import init_model_parameters
