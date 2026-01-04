@@ -1,0 +1,28 @@
+# OneTrainer Web UI Requirements
+# Install with: pip install -r web_ui/requirements.txt
+
+# Core web framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# WebSocket support
+websockets>=12.0
+
+# Data validation
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# System monitoring
+psutil>=5.9.0
+
+# CORS middleware (included in FastAPI but explicit for clarity)
+starlette>=0.27.0
+
+# Optional: Enhanced ASGI server
+# gunicorn>=21.0.0
+
+# Optional: Testing
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
+# httpx>=0.25.0  # For testing FastAPI endpoints

@@ -1,0 +1,60 @@
+{
+  "__version": 10,
+
+  "model_type": "KANDINSKY_5",
+  "training_method": "LORA",
+  "base_model_name": "/home/alex/OneTrainer/models/kandinsky-5-video-pro",
+  "output_model_destination": "./output/kandinsky5_disney_lora",
+  "output_dtype": "BFLOAT_16",
+  "output_model_format": "SAFETENSORS",
+
+  "optimizer": "ADAMW_8BIT",
+  "learning_rate_scheduler": "CONSTANT",
+  "learning_rate": 1e-4,
+  "learning_rate_warmup_steps": 100,
+  "epochs": 50,
+  "batch_size": 1,
+  "gradient_accumulation_steps": 1,
+
+  "train_dtype": "BFLOAT_16",
+  "fallback_train_dtype": "BFLOAT_16",
+  "resolution": "512",
+  "gradient_checkpointing": "ON",
+
+  "lora_rank": 16,
+  "lora_alpha": 16,
+  "dropout_probability": 0.0,
+  "peft_type": "LORA",
+
+  "text_encoder": {
+    "train": false
+  },
+  "transformer": {
+    "train": true
+  },
+
+  "vae": {
+    "weight_dtype": "FLOAT_16"
+  },
+
+  "concept_file_name": "training_concepts/disney_wan.json",
+  "latent_caching": true,
+  "clear_cache_before_training": true,
+
+  "aspect_ratio_bucketing": true,
+  "bucket_quantization": 16,
+
+  "dataloader_threads": 1,
+  "train_device": "cuda",
+  "temp_device": "cpu",
+
+  "sample_after_optimizer_step": false,
+  "samples_per_epoch": 0,
+
+  "save_after_optimizer_step": true,
+  "save_filename_prefix": "kandinsky5_disney",
+
+  "debug_mode": false,
+  "debug_dir": "debug",
+  "tensorboard": false
+}

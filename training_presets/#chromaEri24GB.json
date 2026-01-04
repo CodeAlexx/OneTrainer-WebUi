@@ -1,0 +1,81 @@
+{
+  "base_model_name": "lodestones/Chroma1-HD",
+  "batch_size": 2,
+  "learning_rate": 0.0003,
+  "model_type": "CHROMA_1",
+  "resolution": "512",
+  "transformer": {
+    "train": true,
+    "weight_dtype": "BFLOAT_16"
+  },
+  "text_encoder": {
+    "train": false,
+    "weight_dtype": "BFLOAT_16"
+  },
+  "training_method": "LORA",
+  "vae": {
+    "weight_dtype": "FLOAT_32"
+  },
+  "train_dtype": "BFLOAT_16",
+  "weight_dtype": "BFLOAT_16",
+  "output_dtype": "BFLOAT_16",
+  "timestep_distribution": "INVERTED_PARABOLA",
+  "noising_weight": 7.7,
+  "layer_filter": "attn,ff.net",
+  "layer_filter_preset": "attn-mlp",
+  "quantization": {
+    "layer_filter": "transformer_block",
+    "layer_filter_preset": "blocks"
+  },
+  "sample_after_unit": "EPOCH",
+  "sample_after": 100,
+  "concepts": [
+    {
+      "name": "eri",
+      "path": "/home/alex/a_zimage/eri2",
+      "seed": 635223741,
+      "enabled": true,
+      "type": "STANDARD",
+      "include_subdirectories": false,
+      "image_variations": 1,
+      "text_variations": 1,
+      "balancing": 1,
+      "balancing_strategy": "REPEATS",
+      "loss_weight": 1,
+      "image": {
+        "enable_crop_jitter": true,
+        "enable_random_flip": false,
+        "enable_fixed_flip": false,
+        "enable_random_rotate": false,
+        "enable_fixed_rotate": false,
+        "random_rotate_max_angle": 0,
+        "enable_random_brightness": false,
+        "enable_fixed_brightness": false,
+        "random_brightness_max_strength": 0,
+        "enable_random_contrast": false,
+        "enable_fixed_contrast": false,
+        "random_contrast_max_strength": 0,
+        "enable_random_saturation": false,
+        "enable_fixed_saturation": false,
+        "random_saturation_max_strength": 0,
+        "enable_random_hue": false,
+        "enable_fixed_hue": false,
+        "random_hue_max_strength": 0,
+        "enable_resolution_override": false,
+        "resolution_override": "512",
+        "enable_random_circular_mask_shrink": false,
+        "enable_random_mask_rotate_crop": false
+      },
+      "text": {
+        "prompt_source": "sample",
+        "prompt_path": "",
+        "enable_tag_shuffling": false,
+        "tag_delimiter": ",",
+        "keep_tags_count": 1,
+        "tag_dropout_enable": false,
+        "tag_dropout_mode": "FULL",
+        "tag_dropout_probability": 0
+      }
+    }
+  ]
+}

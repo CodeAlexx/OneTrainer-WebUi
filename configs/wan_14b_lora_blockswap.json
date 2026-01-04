@@ -1,0 +1,68 @@
+{
+  "__version": 10,
+
+  "model_type": "WAN_T2V",
+  "training_method": "LORA",
+  "base_model_name": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+  "output_model_destination": "./output/wan_disney_lora",
+  "output_dtype": "BFLOAT_16",
+  "output_model_format": "SAFETENSORS",
+
+  "optimizer": "ADAMW_8BIT",
+  "learning_rate_scheduler": "CONSTANT",
+  "learning_rate": 1e-4,
+  "learning_rate_warmup_steps": 100,
+  "epochs": 50,
+  "batch_size": 1,
+  "gradient_accumulation_steps": 1,
+
+  "train_dtype": "BFLOAT_16",
+  "fallback_train_dtype": "BFLOAT_16",
+  "resolution": "480",
+  "gradient_checkpointing": "CPU_OFFLOADED",
+
+  "blocks_to_swap": 0,
+  "layer_offload_fraction": 0.8,
+  "enable_async_offloading": true,
+  "enable_activation_offloading": false,
+
+  "lora_rank": 16,
+  "lora_alpha": 16,
+  "dropout_probability": 0.0,
+  "peft_type": "LORA",
+  "lora_target_modules": "blocks",
+
+  "text_encoder": {
+    "train": false
+  },
+  "transformer": {
+    "train": true
+  },
+
+  "vae": {
+    "weight_dtype": "BFLOAT_16"
+  },
+
+  "concept_file_name": "training_concepts/disney_wan.json",
+  "latent_caching": true,
+  "clear_cache_before_training": true,
+
+  "aspect_ratio_bucketing": true,
+  "bucket_quantization": 16,
+
+  "dataloader_threads": 1,
+  "train_device": "cuda",
+  "temp_device": "cpu",
+
+  "sample_after_optimizer_step": false,
+  "samples_per_epoch": 0,
+
+  "save_after_optimizer_step": true,
+  "save_filename_prefix": "wan_disney",
+
+  "debug_mode": false,
+  "debug_dir": "debug",
+  "tensorboard": false,
+
+  "_comment": "Block swapping DISABLED - was causing crashes. Set blocks_to_swap > 0 to re-enable."
+}

@@ -1,0 +1,62 @@
+{
+    "base_model_name": "/home/alex/.cache/huggingface/hub/models--kandinskylab--Kandinsky-5.0-T2V-Lite-sft-5s/snapshots/0af037be85ccb8d24b7dbdcd612d3e0cc9e32cc2",
+    "batch_size": 1,
+    "learning_rate": 0.0001,
+    "model_type": "KANDINSKY_5",
+    "resolution": "320x192",
+    "transformer": {
+        "train": true,
+        "weight_dtype": "BFLOAT_16"
+    },
+    "text_encoder": {
+        "train": false,
+        "weight_dtype": "BFLOAT_16"
+    },
+    "training_method": "LORA",
+    "lora_rank": 16,
+    "lora_weight_dtype": "BFLOAT_16",
+    "vae": {
+        "weight_dtype": "BFLOAT_16"
+    },
+    "train_dtype": "BFLOAT_16",
+    "weight_dtype": "BFLOAT_16",
+    "output_dtype": "BFLOAT_16",
+    "timestep_distribution": "UNIFORM",
+    "workspace_dir": "/home/alex/kandinsky5_test",
+    "cache_dir": "/home/alex/kandinsky5_test/cache",
+    "debug_dir": "/home/alex/kandinsky5_test/debug",
+    "output_model_destination": "/home/alex/kandinsky5_test/model",
+    "backup_dir": "/home/alex/kandinsky5_test/backup",
+    "samples_dir": "/home/alex/kandinsky5_test/samples",
+    "epochs": 1,
+    "latent_caching": true,
+    "gradient_checkpointing": {
+        "enabled": true
+    },
+    "concepts": [
+        {
+            "name": "Disney Steamboat Willie",
+            "path": "/home/alex/disney/videos",
+            "seed": 42,
+            "enabled": true,
+            "type": "STANDARD",
+            "include_subdirectories": false,
+            "image_variations": 1,
+            "text_variations": 1,
+            "balancing": 1,
+            "balancing_strategy": "REPEATS",
+            "loss_weight": 1,
+            "image": {
+                "enable_crop_jitter": false,
+                "enable_random_flip": false,
+                "enable_fixed_flip": false,
+                "enable_random_rotate": false,
+                "enable_fixed_rotate": false
+            },
+            "text": {
+                "prompt_source": "sample",
+                "prompt_from_filename": false
+            }
+        }
+    ]
+}

@@ -1,0 +1,3 @@
+"""
+OneTrainer Web UI package.
+"""

@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-dark-border;
+  }
+
+  body {
+    @apply bg-dark-bg text-gray-100 font-sans antialiased;
+  }
+
+  input,
+  textarea,
+  select {
+    @apply bg-dark-surface border-dark-border text-gray-100;
+    @apply focus:outline-none focus:ring-2 focus:ring-primary;
+  }
+
+  button {
+    @apply transition-colors duration-150;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-dark-bg;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-dark-border rounded-lg;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-dark-hover;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply px-4 py-2 rounded-lg font-medium transition-colors;
+    @apply disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    @apply bg-primary hover:bg-primary-hover text-white;
+  }
+
+  .btn-success {
+    @apply bg-success hover:bg-green-600 text-white;
+  }
+
+  .btn-danger {
+    @apply bg-danger hover:bg-red-600 text-white;
+  }
+
+  .btn-secondary {
+    @apply bg-dark-surface hover:bg-dark-hover border border-dark-border;
+  }
+
+  .card {
+    @apply bg-dark-surface rounded-lg border border-dark-border p-4;
+  }
+
+  .input {
+    @apply bg-dark-surface border border-dark-border rounded-lg px-3 py-2;
+    @apply focus:ring-2 focus:ring-primary focus:border-transparent;
+  }
+
+  /* Select dropdown styling */
+  select {
+    @apply cursor-pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m6 8 4 4 4-4'/%3e%3c/svg%3e");
+    background-position: right 0.5rem center;
+    background-repeat: no-repeat;
+    background-size: 1.5em 1.5em;
+    padding-right: 2.5rem;
+  }
+
+  select option {
+    @apply bg-dark-surface text-gray-100 py-2;
+  }
+
+  /* Custom scrollable select for many options */
+  select.scrollable {
+    max-height: 300px;
+    overflow-y: auto;
+  }
+}
