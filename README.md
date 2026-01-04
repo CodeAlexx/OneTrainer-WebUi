@@ -4,7 +4,8 @@ While the ui for me does work 'ok' in Linux, i said 'what if'. here is that what
 
 A modern web-based interface for OneTrainer with real-time training monitoring, inference, and enhanced model support.
 changed from epoch based to both epoch OR steps based trainer. that means still use epochs or set steps. Epoch can be raised at run time if you feel you need more epochs. 
-
+Also Windows is unkown if this works on it. I have Ubuntu and do not have a windows machine for dev. As I get parts working better and feel its ready, i will then test on windows.
+I will have to add windows to a dev machine in the future for this to be possible. No eta on code as I work on it when i can. 
 
 ## Screenshots
 
