@@ -43,6 +43,8 @@ class ModelType(Enum):
     WAN_I2V = 'WAN_I2V'
     KANDINSKY_5 = 'KANDINSKY_5'
 
+    LTX_2 = 'LTX_2'
+
     def __str__(self):
         return self.value
 
@@ -132,6 +134,9 @@ class ModelType(Enum):
     def is_kandinsky_5(self):
         return self == ModelType.KANDINSKY_5
 
+    def is_ltx_2(self):
+        return self == ModelType.LTX_2
+
     def has_multiple_text_encoders(self):
         return self.is_stable_diffusion_3() \
             or self.is_stable_diffusion_xl() \
@@ -169,7 +174,8 @@ class ModelType(Enum):
             or self.is_hi_dream() \
             or self.is_wan() \
             or self.is_z_image() \
-            or self.is_kandinsky_5()
+            or self.is_kandinsky_5() \
+            or self.is_ltx_2()
 
 
 class PeftType(Enum):

@@ -31,6 +31,18 @@ from transformers.models.t5.modeling_t5 import T5Block
 
 from diffusers.models.transformers.transformer_wan import WanTransformerBlock
 
+# K5 block imports - add path first
+import sys
+import os
+_k5_path = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'kandinsky-5-code')
+if _k5_path not in sys.path:
+    sys.path.insert(0, _k5_path)
+try:
+    from kandinsky.models.dit import TransformerEncoderBlock as K5EncoderBlock, TransformerDecoderBlock as K5DecoderBlock
+except ImportError:
+    K5EncoderBlock = None
+    K5DecoderBlock = None
+
 init_compile()
 
 
@@ -404,4 +416,34 @@ def enable_checkpointing_for_wan_transformer(
 ) -> LayerOffloadConductor:
     return enable_checkpointing(model, config, config.compile, [
         (WanTransformerBlock, ["hidden_states", "encoder_hidden_states"]),
+    ])
+
+
+def enable_checkpointing_for_ltx2_transformer(
+        model: nn.Module,
+        config: TrainConfig,
+) -> LayerOffloadConductor:
+    """Enable gradient checkpointing with layer offload for LTX-2 transformer."""
+    return enable_checkpointing(model, config, config.compile, [
+        (model.transformer_blocks, ["hidden_states", "encoder_hidden_states"]),
+    ])
+
+def enable_checkpointing_for_k5_transformer(
+        model: nn.Module,
+        config: TrainConfig,
+) -> LayerOffloadConductor:
+    """
+    Enable gradient checkpointing with layer offload for Kandinsky 5 transformer.
+
+    K5 has two block types:
+    - TransformerEncoderBlock: text processing (param: x)
+    - TransformerDecoderBlock: visual processing (params: visual_embed, text_embed)
+    """
+    if K5EncoderBlock is None or K5DecoderBlock is None:
+        print("Warning: K5 block types not available, skipping checkpointing")
+        return None
+
+    return enable_checkpointing(model, config, False, [  # compile=False due to K5's custom ops
+        (K5EncoderBlock, ["x"]),
+        (K5DecoderBlock, ["visual_embed", "text_embed"]),
     ])

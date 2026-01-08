@@ -20,6 +20,7 @@ from modules.dataLoader.WuerstchenBaseDataLoader import WuerstchenBaseDataLoader
 from modules.dataLoader.ZImageBaseDataLoader import ZImageBaseDataLoader
 from modules.dataLoader.WanBaseDataLoader import WanBaseDataLoader
 from modules.dataLoader.Kandinsky5DataLoader import Kandinsky5DataLoader
+from modules.dataLoader.LTX2BaseDataLoader import LTX2BaseDataLoader
 from modules.model.BaseModel import BaseModel
 from modules.modelLoader.BaseModelLoader import BaseModelLoader
 from modules.modelLoader.ChromaEmbeddingModelLoader import ChromaEmbeddingModelLoader
@@ -59,6 +60,7 @@ from modules.modelLoader.ZImageModelLoader import ZImageFineTuneModelLoader, ZIm
 from modules.modelLoader.WanFineTuneModelLoader import WanFineTuneModelLoader
 from modules.modelLoader.WanLoRAModelLoader import WanLoRAModelLoader
 from modules.modelLoader.Kandinsky5ModelLoader import Kandinsky5ModelLoader
+from modules.modelLoader.LTX2ModelLoader import LTX2FineTuneModelLoader, LTX2LoRAModelLoader
 from modules.modelSampler import BaseModelSampler
 from modules.modelSampler.ChromaSampler import ChromaSampler
 from modules.modelSampler.FluxSampler import FluxSampler
@@ -76,6 +78,7 @@ from modules.modelSampler.WuerstchenSampler import WuerstchenSampler
 from modules.modelSampler.ZImageSampler import ZImageSampler
 from modules.modelSampler.WanSampler import WanSampler
 from modules.modelSampler.Kandinsky5Sampler import Kandinsky5Sampler
+from modules.modelSampler.LTX2Sampler import LTX2Sampler
 from modules.modelSaver.BaseModelSaver import BaseModelSaver
 from modules.modelSaver.ChromaEmbeddingModelSaver import ChromaEmbeddingModelSaver
 from modules.modelSaver.ChromaFineTuneModelSaver import ChromaFineTuneModelSaver
@@ -115,6 +118,8 @@ from modules.modelSaver.WanFineTuneModelSaver import WanFineTuneModelSaver
 from modules.modelSaver.WanLoRAModelSaver import WanLoRAModelSaver
 from modules.modelSaver.Kandinsky5FineTuneModelSaver import Kandinsky5FineTuneModelSaver
 from modules.modelSaver.Kandinsky5LoRAModelSaver import Kandinsky5LoRAModelSaver
+from modules.modelSaver.LTX2FineTuneModelSaver import LTX2FineTuneModelSaver
+from modules.modelSaver.LTX2LoRAModelSaver import LTX2LoRAModelSaver
 from modules.modelSetup.BaseModelSetup import BaseModelSetup
 from modules.modelSetup.ChromaEmbeddingSetup import ChromaEmbeddingSetup
 from modules.modelSetup.ChromaFineTuneSetup import ChromaFineTuneSetup
@@ -156,6 +161,7 @@ from modules.modelSetup.WanFineTuneSetup import WanFineTuneSetup
 from modules.modelSetup.WanLoRASetup import WanLoRASetup
 from modules.modelSetup.Kandinsky5FineTuneSetup import Kandinsky5FineTuneSetup
 from modules.modelSetup.Kandinsky5LoRASetup import Kandinsky5LoRASetup
+from modules.modelSetup.LTX2LoRASetup import LTX2LoRASetup, LTX2FineTuneSetup
 from modules.module.EMAModule import EMAModuleWrapper
 from modules.util.callbacks.TrainCallbacks import TrainCallbacks
 from modules.util.commands.TrainCommands import TrainCommands
@@ -231,6 +237,8 @@ def create_model_loader(
                 return WanFineTuneModelLoader()
             if model_type.is_kandinsky_5():
                 return Kandinsky5ModelLoader()
+            if model_type.is_ltx_2():
+                return LTX2FineTuneModelLoader()
         case TrainingMethod.FINE_TUNE_VAE:
             if model_type.is_stable_diffusion():
                 return StableDiffusionFineTuneModelLoader()
@@ -265,6 +273,8 @@ def create_model_loader(
                 return WanLoRAModelLoader()
             if model_type.is_kandinsky_5():
                 return Kandinsky5ModelLoader()
+            if model_type.is_ltx_2():
+                return LTX2LoRAModelLoader()
         case TrainingMethod.EMBEDDING:
             if model_type.is_stable_diffusion():
                 return StableDiffusionEmbeddingModelLoader()
@@ -322,6 +332,8 @@ def create_model_saver(
                 return WanFineTuneModelSaver()
             if model_type.is_kandinsky_5():
                  return Kandinsky5FineTuneModelSaver()
+            if model_type.is_ltx_2():
+                return LTX2FineTuneModelSaver()
         case TrainingMethod.FINE_TUNE_VAE:
             if model_type.is_stable_diffusion():
                 return StableDiffusionFineTuneModelSaver()
@@ -356,6 +368,8 @@ def create_model_saver(
                 return WanLoRAModelSaver()
             if model_type.is_kandinsky_5():
                 return Kandinsky5LoRAModelSaver()
+            if model_type.is_ltx_2():
+                return LTX2LoRAModelSaver()
         case TrainingMethod.EMBEDDING:
             if model_type.is_stable_diffusion():
                 return StableDiffusionEmbeddingModelSaver()
@@ -418,6 +432,8 @@ def create_model_setup(
                 return WanFineTuneSetup(train_device, temp_device, debug_mode)
             if model_type.is_kandinsky_5():
                 return Kandinsky5FineTuneSetup()
+            if model_type.is_ltx_2():
+                return LTX2FineTuneSetup(train_device, temp_device, debug_mode)
         case TrainingMethod.FINE_TUNE_VAE:
             if model_type.is_stable_diffusion():
                 return StableDiffusionFineTuneVaeSetup(train_device, temp_device, debug_mode)
@@ -452,6 +468,8 @@ def create_model_setup(
                 return WanLoRASetup(train_device, temp_device, debug_mode)
             if model_type.is_kandinsky_5():
                 return Kandinsky5LoRASetup(train_device, temp_device, debug_mode)
+            if model_type.is_ltx_2():
+                return LTX2LoRASetup(train_device, temp_device, debug_mode)
         case TrainingMethod.EMBEDDING:
             if model_type.is_stable_diffusion():
                 return StableDiffusionEmbeddingSetup(train_device, temp_device, debug_mode)
@@ -516,6 +534,8 @@ def create_model_sampler(
                 return WanSampler(train_device, temp_device, model, model_type)
             if model_type.is_kandinsky_5():
                 return Kandinsky5Sampler(train_device, temp_device, model)
+            if model_type.is_ltx_2():
+                return LTX2Sampler(train_device, temp_device, model, model_type)
         case TrainingMethod.FINE_TUNE_VAE:
             if model_type.is_stable_diffusion():
                 return StableDiffusionVaeSampler(train_device, temp_device, model, model_type)
@@ -571,6 +591,8 @@ def create_data_loader(
                 return WanBaseDataLoader(train_device, temp_device, config, model, train_progress, is_validation)
             if model_type.is_kandinsky_5():
                 return Kandinsky5DataLoader(train_device, temp_device, config, model, train_progress, is_validation)
+            if model_type.is_ltx_2():
+                return LTX2BaseDataLoader(train_device, temp_device, config, model, train_progress, is_validation)
         case TrainingMethod.FINE_TUNE_VAE:
             if model_type.is_stable_diffusion():
                 return StableDiffusionFineTuneVaeDataLoader(train_device, temp_device, config, model, train_progress, is_validation)
