@@ -120,6 +120,28 @@ def _map_model_type(normalized: str) -> str:
     raise ValueError(f"Unsupported model_type for this path: {normalized}")
 
 
+def _is_native_flux2_type(normalized: str) -> bool:
+    if not normalized:
+        return False
+    if normalized in {
+        "flux_2",
+        "flux2",
+        "flux",
+        "flux_2_dev",
+        "flux2_dev",
+        "flux_2_klein",
+        "flux2_klein",
+        "flux_2_klein_4b",
+        "flux_2_klein_9b",
+        "flux2_klein_4b",
+        "flux2_klein_9b",
+        "flux_2_klein_4b_base",
+        "flux_2_klein_9b_base",
+    }:
+        return True
+    return normalized.startswith("flux_2") or normalized.startswith("flux2")
+
+
 def _is_structured_config(config: dict[str, Any]) -> bool:
     for key in ("model", "data", "adapter", "memory", "sample", "checkpoint", "logging", "optimizer", "scheduler"):
         if isinstance(config.get(key), dict):
@@ -657,6 +679,23 @@ def train_command(args: list[str] | None = None) -> int:
     cfg = _load_config(config_path)
     if not isinstance(cfg, dict):
         raise ValueError("Config root must be a mapping/object")
+
+    normalized_model_type = _normalize_model_type(
+        cfg.get("model_type")
+        or (
+            cfg.get("model", {}).get("type")
+            if isinstance(cfg.get("model"), dict)
+            else None
+        )
+    )
+    if not _is_onetrainer_config(cfg) and _is_native_flux2_type(normalized_model_type):
+        from eritrainer.cli.native_flux2 import run_native_flux2_training
+
+        return run_native_flux2_training(
+            cfg,
+            source_path=config_path,
+            steps_override=getattr(ns, "steps", None),
+        )
 
     if _is_onetrainer_config(cfg):
         train_cfg = cfg
