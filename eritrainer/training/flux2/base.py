@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import Enum
+import inspect
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
@@ -606,12 +607,21 @@ class Flux2BaseTrainer(ABC):
         packed_latents, image_ids = self.model.pack_latents(noisy_latents)
         packed_text, text_ids = self.model.pack_text(text_embeddings)
         pooled_projections = kwargs.pop("pooled_projections", None)
+        guidance = kwargs.pop("guidance", None)
         if pooled_projections is None:
             if hasattr(self.model, "pooled_text_projection"):
                 pooled_projections = self.model.pooled_text_projection(packed_text)
             else:
                 # FLUX.2 transformer time_text_embed expects pooled text projections.
                 pooled_projections = packed_text.mean(dim=1)
+        if guidance is None:
+            guidance_scale = float(getattr(self.config, "guidance_scale", 1.0))
+            guidance = torch.full(
+                (packed_latents.shape[0],),
+                guidance_scale,
+                device=packed_latents.device,
+                dtype=packed_latents.dtype,
+            )
 
         # Get latent dimensions for unpacking.
         _, _, height, width = noisy_latents.shape
@@ -619,15 +629,22 @@ class Flux2BaseTrainer(ABC):
         # Forward through transformer
         # Note: FLUX.2 Klein uses different interface than FLUX.1
         # timesteps should be discrete integers, normalized to [0, 1] by /1000
+        transformer_call_kwargs: dict[str, Any] = {
+            "hidden_states": packed_latents,
+            "timestep": timesteps / 1000,  # Normalize discrete timestep
+            "guidance": guidance,
+            "encoder_hidden_states": packed_text,
+            "txt_ids": text_ids,
+            "img_ids": image_ids,
+            "return_dict": False,
+        }
+
+        transformer_params = inspect.signature(self.model.transformer.forward).parameters
+        if "pooled_projections" in transformer_params:
+            transformer_call_kwargs["pooled_projections"] = pooled_projections
+
         output = self.model.transformer(
-            hidden_states=packed_latents,
-            timestep=timesteps / 1000,  # Normalize discrete timestep
-            guidance=None,
-            encoder_hidden_states=packed_text,
-            pooled_projections=pooled_projections,
-            txt_ids=text_ids,
-            img_ids=image_ids,
-            return_dict=False,
+            **transformer_call_kwargs,
         )
 
         if isinstance(output, tuple):
@@ -720,6 +737,9 @@ class Flux2BaseTrainer(ABC):
             # This allocates buffers and positions layers on CPU/GPU
             if self.transformer_offload_conductor is not None:
                 self.move_transformer_to_train_device()
+            elif self.model.transformer is not None:
+                # No conductor path: keep native transformer on train device.
+                self.model.transformer.to(self.train_device)
 
             self.model.transformer.train()
 

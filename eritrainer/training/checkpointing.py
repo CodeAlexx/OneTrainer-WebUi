@@ -154,7 +154,7 @@ class OffloadCheckpointLayer(BaseCheckpointLayer):
                 self.dummy,
                 call_id,
                 *args,
-                use_reentrant=True
+                use_reentrant=False
             )
             return result
         else:

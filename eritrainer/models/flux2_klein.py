@@ -974,12 +974,13 @@ class Flux2KleinModel(BaseModel):
         # Pack text embeddings
         packed_text, txt_ids = self.pack_text(text_encoder_output)
         pooled_projections = self.pooled_text_projection(packed_text)
+        guidance = torch.ones(batch_size, device=device, dtype=self.transformer.dtype)
 
         # 8. Transformer forward (NO guidance for Klein)
         transformer_output = self.transformer(
             hidden_states=packed_latent.to(dtype=self.transformer.dtype),
             timestep=timestep_int / 1000,  # discrete timestep normalized
-            guidance=None,  # Klein has no guidance embeddings
+            guidance=guidance,
             encoder_hidden_states=packed_text.to(dtype=self.transformer.dtype),
             pooled_projections=pooled_projections.to(dtype=self.transformer.dtype),
             txt_ids=txt_ids,
@@ -1422,6 +1423,7 @@ class Flux2KleinSampler:
             # - txt_ids: text position IDs
             # - guidance: None for Klein (no CFG)
             timestep = sigma.expand(packed_latents.shape[0]).to(self.dtype)
+            guidance = torch.ones(packed_latents.shape[0], device=self.device, dtype=self.dtype)
 
             with torch.autocast(device_type='cuda', dtype=self.dtype):
                 velocity = self.model.transformer(
@@ -1431,7 +1433,7 @@ class Flux2KleinSampler:
                     pooled_projections=pooled_projections,
                     img_ids=img_ids,
                     txt_ids=txt_ids,
-                    guidance=None,
+                    guidance=guidance,
                     return_dict=False,
                 )[0]
 

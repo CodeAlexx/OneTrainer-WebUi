@@ -7,14 +7,17 @@ from typing import Optional
 import torch
 
 try:
-    from diffusers import FluxTransformer2DModel as _DiffusersFluxTransformer2DModel
+    from diffusers import Flux2Transformer2DModel as _DiffusersFlux2Transformer2DModel
 except Exception:  # pragma: no cover - optional dependency
-    _DiffusersFluxTransformer2DModel = None
+    try:
+        from diffusers import FluxTransformer2DModel as _DiffusersFlux2Transformer2DModel
+    except Exception:  # pragma: no cover - optional dependency
+        _DiffusersFlux2Transformer2DModel = None
 
 
-if _DiffusersFluxTransformer2DModel is not None:
+if _DiffusersFlux2Transformer2DModel is not None:
 
-    class Flux2Transformer2DModel(_DiffusersFluxTransformer2DModel):
+    class Flux2Transformer2DModel(_DiffusersFlux2Transformer2DModel):
         """Compatibility wrapper for FLUX.2 Klein weights."""
 
         @classmethod
