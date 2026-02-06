@@ -9,14 +9,19 @@ from eritrainer.cli.native_diffusion import (
     _build_video_training_pairs,
     _collect_ltx_component_paths,
     _load_media_tensor,
+    _maybe_load_transformer_override,
+    _maybe_sample,
     _normalize_quantization_mode,
+    _normalize_training_method,
     _qwen_pack_latents,
     _qwen_unpack_latents,
     _resolve_ltx_video_frame_count,
     is_native_diffusion_model_type,
 )
+from eritrainer.core.interfaces import ModelType
 
 import torch
+import torch.nn as nn
 
 import numpy as np
 
@@ -71,6 +76,15 @@ def test_native_quantization_aliases():
     assert _normalize_quantization_mode("int_w8a8") == "int8"
     assert _normalize_quantization_mode("w8a8_int") == "int8"
     assert _normalize_quantization_mode("fp8") == "fp8"
+
+
+def test_native_training_method_normalization():
+    assert _normalize_training_method("LORA") == "lora"
+    assert _normalize_training_method("fine_tune") == "fine_tune"
+    assert _normalize_training_method("finetune") == "fine_tune"
+    assert _normalize_training_method("full_finetune") == "fine_tune"
+    assert _normalize_training_method("fine_tune_vae") == "fine_tune_vae"
+    assert _normalize_training_method("embedding") == "embedding"
 
 
 def test_collect_ltx_component_paths_prefers_model_block_paths():
@@ -158,3 +172,154 @@ def test_load_media_tensor_decodes_and_pads_video_frames(monkeypatch):
     assert torch.allclose(loaded[:, 0], torch.full((3, 2, 2), -1.0))
     assert torch.allclose(loaded[:, 1], torch.full((3, 2, 2), 1.0))
     assert torch.allclose(loaded[:, 4], loaded[:, 1])
+
+
+def test_maybe_sample_expands_prompts_and_seeds(monkeypatch, tmp_path):
+    calls: list[dict] = []
+
+    class _DummySampler:
+        def sample(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "eritrainer.cli.native_diffusion.create_sampler",
+        lambda *_args, **_kwargs: _DummySampler(),
+    )
+
+    _maybe_sample(
+        {
+            "seed": 123,
+            "sample": {
+                "enabled": True,
+                "interval": 2,
+                "prompts": ["a", "b", "c"],
+                "seeds": [11, 22],
+            },
+        },
+        model_type=ModelType.SDXL,
+        model_path="/tmp/mock",
+        output_dir=tmp_path,
+        step=2,
+        train_device=torch.device("cpu"),
+        train_dtype=torch.float32,
+    )
+
+    assert len(calls) == 3
+    assert [int(call["seed"]) for call in calls] == [11, 22, 11]
+    assert all(str(call["output_path"]).endswith(".png") for call in calls)
+    assert calls[-1]["unload"] is True
+
+
+def test_maybe_sample_uses_default_resolution_when_not_overridden(monkeypatch, tmp_path):
+    calls: list[dict] = []
+
+    class _DummySampler:
+        def sample(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "eritrainer.cli.native_diffusion.create_sampler",
+        lambda *_args, **_kwargs: _DummySampler(),
+    )
+
+    _maybe_sample(
+        {
+            "seed": 7,
+            "sample": {
+                "enabled": True,
+                "interval": 1,
+                "prompts": ["portrait"],
+            },
+        },
+        model_type=ModelType.SDXL,
+        model_path="/tmp/mock",
+        output_dir=tmp_path,
+        step=1,
+        train_device=torch.device("cpu"),
+        train_dtype=torch.float32,
+        default_resolution=512,
+    )
+
+    assert len(calls) == 1
+    assert int(calls[0]["height"]) == 512
+    assert int(calls[0]["width"]) == 512
+
+
+def test_maybe_sample_ltx2_passes_video_args_and_uses_gif(monkeypatch, tmp_path):
+    calls: list[dict] = []
+
+    class _DummySampler:
+        def sample(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "eritrainer.cli.native_diffusion.create_sampler",
+        lambda *_args, **_kwargs: _DummySampler(),
+    )
+
+    _maybe_sample(
+        {
+            "seed": 99,
+            "sample": {
+                "enabled": True,
+                "interval": 1,
+                "prompts": ["video sample"],
+                "num_frames": 17,
+                "frame_rate": 12.0,
+            },
+        },
+        model_type=ModelType.LTX2,
+        model_path="/tmp/mock",
+        output_dir=tmp_path,
+        step=1,
+        train_device=torch.device("cpu"),
+        train_dtype=torch.float32,
+    )
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert int(call["num_frames"]) == 17
+    assert float(call["frame_rate"]) == 12.0
+    assert str(call["output_path"]).endswith(".gif")
+
+
+def test_maybe_load_transformer_override_treats_zimage_turbo_as_adapter(monkeypatch, tmp_path):
+    adapter_path = tmp_path / "zimage_turbo_training_adapter.safetensors"
+    adapter_path.write_bytes(b"fake")
+
+    class _DummyPipeline:
+        called: dict | None = None
+
+        def __init__(self, transformer):
+            self.transformer = transformer
+
+        @classmethod
+        def load_lora_into_transformer(cls, state_dict, transformer, adapter_name=None, **kwargs):
+            cls.called = {
+                "state_dict": state_dict,
+                "transformer": transformer,
+                "adapter_name": adapter_name,
+                "kwargs": kwargs,
+            }
+
+    module = nn.Module()
+    module.foo = nn.Module()
+    module.foo.assistant = nn.Module()
+    module.foo.assistant.lora_A = nn.Parameter(torch.ones(1))
+    module.foo.base = nn.Linear(2, 2, bias=False)
+
+    monkeypatch.setattr(
+        "safetensors.torch.load_file",
+        lambda *_args, **_kwargs: {"transformer.lora_A.weight": torch.zeros(1)},
+    )
+
+    _maybe_load_transformer_override(
+        module,
+        {"turbo_adapter_path": str(adapter_path), "assistant_lora_strength": 0.7},
+        pipeline=_DummyPipeline(module),
+        family="zimage",
+    )
+
+    assert _DummyPipeline.called is not None
+    assert _DummyPipeline.called["adapter_name"] == "assistant"
+    assert module.foo.assistant.lora_A.requires_grad is False

@@ -6,14 +6,11 @@ native training loop for FLUX.2/Klein variants using EriTrainer components.
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-import numpy as np
-import torch
-from PIL import Image
 
 from eritrainer.adapters import create_adapter
 from eritrainer.core.interfaces import ModelType
@@ -21,9 +18,14 @@ from eritrainer.models.flux2_klein import Flux2KleinModelLoader
 from eritrainer.sampling.sampler import create_sampler
 from eritrainer.training.flux2.image_trainer import Flux2ImageTrainer, Flux2ImageTrainerConfig
 
+import torch
+
+import numpy as np
+from PIL import Image
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 _FULL_TRAINING_METHODS = {"full", "full_finetune", "full_fine_tune", "fine_tune", "finetune"}
+_UNSUPPORTED_NATIVE_FLUX2_TRAINING_METHODS = {"embedding", "fine_tune_vae", "finetune_vae"}
 _ADAPTER_ALIASES = {
     "diag-oft": "diag_oft",
     "diagoft": "diag_oft",
@@ -47,6 +49,37 @@ _KNOWN_ADAPTER_KEYS = (
     "dylora",
     "full",
 )
+
+_CONSTANT_SCHEDULERS = {"", "none", "off", "constant", "constant_with_warmup", "adafactor"}
+_LINEAR_SCHEDULERS = {"linear"}
+_COSINE_SCHEDULERS = {"cosine"}
+_COSINE_RESTART_SCHEDULERS = {"cosine_with_restarts", "cosine_with_hard_restarts", "cosine_restarts"}
+_SCHEDULER_ALIASES = {
+    "": "constant",
+    "none": "constant",
+    "off": "constant",
+    "constant_with_warmup": "constant",
+    "cosine_with_hard_restart": "cosine_with_hard_restarts",
+    "cosine_restart": "cosine_with_restarts",
+    "learning_rate_scheduler": "constant",
+}
+_OPTIMIZER_ALIASES = {
+    "adamw": "adamw",
+    "adamw_8bit": "adamw",
+    "adamw8bit": "adamw",
+    "paged_adamw_8bit": "adamw",
+    "paged_adamw8bit": "adamw",
+    "schedule_free_adamw": "adamw",
+    "schedulefree_adamw": "adamw",
+    "adam": "adam",
+    "adam_8bit": "adam",
+    "adam8bit": "adam",
+    "paged_adam_8bit": "adam",
+    "paged_adam8bit": "adam",
+    "sgd": "sgd",
+    "adafactor": "adafactor",
+    "lion": "lion",
+}
 
 
 @dataclass
@@ -114,7 +147,7 @@ def _as_bool(value: Any, default: bool = False) -> bool:
         return default
     if isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return bool(value)
     normalized = str(value).strip().lower()
     if normalized in {"1", "true", "yes", "on"}:
@@ -122,6 +155,338 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     if normalized in {"0", "false", "no", "off", "none", "null"}:
         return False
     return default
+
+
+def _first_config_value(
+    primary: dict[str, Any],
+    secondary: dict[str, Any],
+    keys: tuple[str, ...],
+    default: Any = None,
+) -> Any:
+    for key in keys:
+        if key in primary and primary.get(key) is not None:
+            return primary.get(key)
+        if key in secondary and secondary.get(key) is not None:
+            return secondary.get(key)
+    return default
+
+
+def _normalize_optimizer_name(value: Any, default: str = "adamw") -> str:
+    normalized = _normalize_model_type(value or default)
+    normalized = _OPTIMIZER_ALIASES.get(normalized, normalized)
+
+    if normalized in _OPTIMIZER_ALIASES:
+        return _OPTIMIZER_ALIASES[normalized]
+    if "adafactor" in normalized:
+        return "adafactor"
+    if "lion" in normalized:
+        return "lion"
+    if normalized.startswith("sgd"):
+        return "sgd"
+    if normalized.startswith("adamw"):
+        return "adamw"
+    if normalized.startswith("adam"):
+        return "adam"
+    return default
+
+
+def _normalize_scheduler_name(value: Any, default: str = "constant") -> str:
+    normalized = _normalize_model_type(value or default)
+    normalized = _SCHEDULER_ALIASES.get(normalized, normalized)
+    if normalized in _CONSTANT_SCHEDULERS | _LINEAR_SCHEDULERS | _COSINE_SCHEDULERS | _COSINE_RESTART_SCHEDULERS:
+        return normalized
+    return default
+
+
+def _resolve_optimizer_steps(max_steps: int, grad_accum: int) -> int:
+    return max(1, math.ceil(float(max_steps) / float(max(1, grad_accum))))
+
+
+def _resolve_warmup_steps(
+    config: dict[str, Any],
+    scheduler_block: dict[str, Any],
+    total_optimizer_steps: int,
+) -> int:
+    warmup_raw = _first_config_value(
+        scheduler_block,
+        config,
+        ("warmup_steps", "lr_warmup_steps", "learning_rate_warmup_steps"),
+        0,
+    )
+    warmup_steps = int(float(warmup_raw or 0))
+    return max(0, min(warmup_steps, total_optimizer_steps))
+
+
+def _resolve_scheduler_min_factor(config: dict[str, Any], scheduler_block: dict[str, Any]) -> float:
+    min_factor_raw = _first_config_value(
+        scheduler_block,
+        config,
+        ("min_factor", "min_lr_factor", "lr_min_factor", "eta_min_ratio", "min_lr_ratio"),
+        0.0,
+    )
+    min_factor = float(min_factor_raw or 0.0)
+    return max(0.0, min(min_factor, 1.0))
+
+
+def _resolve_scheduler_cycles(config: dict[str, Any], scheduler_block: dict[str, Any]) -> float:
+    num_cycles_raw = _first_config_value(
+        scheduler_block,
+        config,
+        ("num_cycles", "lr_num_cycles", "cosine_num_cycles"),
+        1.0,
+    )
+    num_cycles = float(num_cycles_raw or 1.0)
+    return max(1.0, num_cycles)
+
+
+def _create_optimizer(
+    params: list[torch.nn.Parameter],
+    *,
+    config: dict[str, Any],
+    optimizer_block: dict[str, Any],
+    learning_rate: float,
+) -> tuple[torch.optim.Optimizer, str]:
+    optimizer_name_raw = _first_config_value(
+        optimizer_block,
+        config,
+        ("optimizer", "optimizer_type"),
+        "adamw",
+    )
+    optimizer_name = _normalize_optimizer_name(optimizer_name_raw)
+
+    weight_decay = float(_first_config_value(optimizer_block, config, ("weight_decay",), 0.0))
+    beta1 = float(_first_config_value(optimizer_block, config, ("beta1",), 0.9))
+    beta2 = float(_first_config_value(optimizer_block, config, ("beta2",), 0.999))
+    eps = float(_first_config_value(optimizer_block, config, ("eps", "epsilon"), 1e-8))
+    amsgrad = _as_bool(_first_config_value(optimizer_block, config, ("amsgrad",), False))
+
+    if optimizer_name == "adafactor":
+        from transformers import Adafactor
+
+        clip_threshold_raw = _first_config_value(optimizer_block, config, ("clip_threshold",), None)
+        adafactor_kwargs: dict[str, Any] = {
+            "lr": learning_rate,
+            "scale_parameter": _as_bool(_first_config_value(optimizer_block, config, ("scale_parameter",), False)),
+            "relative_step": _as_bool(_first_config_value(optimizer_block, config, ("relative_step",), False)),
+            "warmup_init": _as_bool(_first_config_value(optimizer_block, config, ("warmup_init",), False)),
+            "weight_decay": weight_decay,
+            "eps": (eps, 1e-3),
+        }
+        if clip_threshold_raw is not None:
+            adafactor_kwargs["clip_threshold"] = float(clip_threshold_raw)
+        return Adafactor(params, **adafactor_kwargs), optimizer_name
+
+    if optimizer_name == "adam":
+        return (
+            torch.optim.Adam(
+                params,
+                lr=learning_rate,
+                betas=(beta1, beta2),
+                eps=eps,
+                weight_decay=weight_decay,
+                amsgrad=amsgrad,
+            ),
+            optimizer_name,
+        )
+
+    if optimizer_name == "sgd":
+        momentum = float(_first_config_value(optimizer_block, config, ("momentum",), 0.0))
+        dampening = float(_first_config_value(optimizer_block, config, ("dampening",), 0.0))
+        nesterov = _as_bool(_first_config_value(optimizer_block, config, ("nesterov",), False))
+        if momentum <= 0.0:
+            nesterov = False
+        return (
+            torch.optim.SGD(
+                params,
+                lr=learning_rate,
+                weight_decay=weight_decay,
+                momentum=momentum,
+                dampening=dampening,
+                nesterov=nesterov,
+            ),
+            optimizer_name,
+        )
+
+    if optimizer_name == "lion":
+        lion_class = getattr(torch.optim, "Lion", None)
+        if lion_class is None:
+            try:
+                from lion_pytorch import Lion as lion_class
+            except Exception:
+                print("[native/flux2] warning: Lion optimizer unavailable, falling back to AdamW.")
+                optimizer_name = "adamw"
+                lion_class = None
+        if lion_class is not None:
+            return (
+                lion_class(
+                    params,
+                    lr=learning_rate,
+                    betas=(beta1, beta2),
+                    weight_decay=weight_decay,
+                ),
+                optimizer_name,
+            )
+
+    return (
+        torch.optim.AdamW(
+            params,
+            lr=learning_rate,
+            betas=(beta1, beta2),
+            eps=eps,
+            weight_decay=weight_decay,
+            amsgrad=amsgrad,
+        ),
+        "adamw",
+    )
+
+
+def _create_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    *,
+    config: dict[str, Any],
+    scheduler_block: dict[str, Any],
+    total_optimizer_steps: int,
+) -> tuple[torch.optim.lr_scheduler.LambdaLR | None, str]:
+    scheduler_name_raw = _first_config_value(
+        scheduler_block,
+        config,
+        ("scheduler", "lr_scheduler", "learning_rate_scheduler"),
+        "constant",
+    )
+    scheduler_name = _normalize_scheduler_name(scheduler_name_raw)
+    warmup_steps = _resolve_warmup_steps(config, scheduler_block, total_optimizer_steps)
+    min_factor = _resolve_scheduler_min_factor(config, scheduler_block)
+    num_cycles = _resolve_scheduler_cycles(config, scheduler_block)
+
+    use_constant_schedule = scheduler_name in _CONSTANT_SCHEDULERS
+    if use_constant_schedule and warmup_steps <= 0 and min_factor <= 0.0:
+        return None, scheduler_name
+
+    def _lr_lambda(last_epoch: int) -> float:
+        step = max(0, int(last_epoch) + 1)
+
+        if warmup_steps > 0 and step <= warmup_steps:
+            warmup_progress = float(step) / float(max(1, warmup_steps))
+            return max(min_factor, min(1.0, warmup_progress))
+
+        if total_optimizer_steps <= warmup_steps:
+            progress = 1.0
+        else:
+            progress = (float(step) - float(warmup_steps)) / float(max(1, total_optimizer_steps - warmup_steps))
+        progress = min(max(progress, 0.0), 1.0)
+
+        if scheduler_name in _LINEAR_SCHEDULERS:
+            base_factor = 1.0 - progress
+        elif scheduler_name in _COSINE_SCHEDULERS:
+            base_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+        elif scheduler_name in _COSINE_RESTART_SCHEDULERS:
+            if progress >= 1.0:
+                base_factor = 0.0
+            else:
+                cycle_position = (num_cycles * progress) % 1.0
+                base_factor = 0.5 * (1.0 + math.cos(math.pi * cycle_position))
+        else:
+            base_factor = 1.0
+
+        factor = min_factor + (1.0 - min_factor) * base_factor
+        return min(max(float(factor), min_factor), 1.0)
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_lambda)
+    return scheduler, scheduler_name
+
+
+def _collect_sample_prompts(sample_block: dict[str, Any]) -> list[str]:
+    prompt_values = sample_block.get("prompts")
+    if prompt_values is None:
+        prompt_values = sample_block.get("prompt")
+
+    if prompt_values is None:
+        return []
+    if isinstance(prompt_values, str):
+        text = prompt_values.strip()
+        return [text] if text else []
+
+    if isinstance(prompt_values, dict):
+        prompt_text = str(prompt_values.get("prompt") or prompt_values.get("text") or "").strip()
+        return [prompt_text] if prompt_text else []
+
+    prompts: list[str] = []
+    if isinstance(prompt_values, list | tuple | set):
+        for item in prompt_values:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    prompts.append(text)
+                continue
+            if isinstance(item, dict):
+                text = str(item.get("prompt") or item.get("text") or "").strip()
+                if text:
+                    prompts.append(text)
+    return prompts
+
+
+def _coerce_int_or_none(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
+def _collect_sample_seeds(sample_block: dict[str, Any], default_seed: int) -> list[int]:
+    seed_values = sample_block.get("seeds")
+    if seed_values is None:
+        seed_values = sample_block.get("seed")
+
+    if seed_values is None:
+        return [default_seed]
+
+    if isinstance(seed_values, list | tuple | set):
+        seeds: list[int] = []
+        for value in seed_values:
+            candidate = _coerce_int_or_none(value)
+            if candidate is not None:
+                seeds.append(candidate)
+        return seeds or [default_seed]
+
+    candidate = _coerce_int_or_none(seed_values)
+    return [candidate] if candidate is not None else [default_seed]
+
+
+def _resolve_sample_output_extension(sample_block: dict[str, Any], default: str) -> str:
+    ext = str(sample_block.get("output_ext") or sample_block.get("file_ext") or default).strip().lower()
+    if not ext:
+        ext = default
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    return ext
+
+
+def _optional_int(value: Any) -> int | None:
+    return _coerce_int_or_none(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def _normalize_adapter_type(value: Any, default: str = "lora") -> str:
@@ -189,7 +554,7 @@ def _as_target_modules(value: Any) -> list[str]:
         return []
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, list | tuple | set):
         out: list[str] = []
         for item in value:
             text = str(item).strip()
@@ -365,6 +730,7 @@ def _maybe_sample(
     step: int,
     train_device: torch.device,
     train_dtype: torch.dtype,
+    default_resolution: int | None = None,
 ) -> None:
     sample_block = config.get("sample", {}) if isinstance(config.get("sample"), dict) else {}
     if not sample_block.get("enabled", False):
@@ -374,33 +740,51 @@ def _maybe_sample(
     if interval <= 0 or step % interval != 0:
         return
 
-    prompts = sample_block.get("prompts") or []
+    prompts = _collect_sample_prompts(sample_block)
     if not prompts:
         return
 
-    prompt = str(prompts[0])
     negative_prompt = str(sample_block.get("negative_prompt", ""))
-    seed = int((sample_block.get("seeds") or [42])[0])
+    seeds = _collect_sample_seeds(sample_block, int(config.get("seed", 42)))
+    max_samples = int(sample_block.get("max_samples") or 0)
+    prompts_to_run = prompts if max_samples <= 0 else prompts[:max_samples]
+    output_ext = _resolve_sample_output_extension(sample_block, ".png")
+
+    sample_height = _optional_int(sample_block.get("height") or sample_block.get("sample_height")) or default_resolution
+    sample_width = _optional_int(sample_block.get("width") or sample_block.get("sample_width")) or default_resolution
+    sample_steps = _optional_int(
+        sample_block.get("num_inference_steps") or sample_block.get("sample_steps") or sample_block.get("steps")
+    )
+    sample_guidance = _optional_float(sample_block.get("guidance_scale") or sample_block.get("cfg_scale"))
 
     sampler = create_sampler(model_type, model={"path": model_path})
     samples_dir = output_dir / "samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
-    out_path = samples_dir / f"step_{step:06d}.png"
+    for prompt_index, prompt in enumerate(prompts_to_run):
+        seed = seeds[prompt_index % len(seeds)]
+        out_path = samples_dir / f"step_{step:06d}_p{prompt_index:02d}_s{seed}{output_ext}"
+        sample_kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "model_path": model_path,
+            "seed": seed,
+            "device": train_device,
+            "dtype": train_dtype,
+            "output_path": out_path,
+            "unload": prompt_index == len(prompts_to_run) - 1,
+        }
+        if sample_height is not None:
+            sample_kwargs["height"] = sample_height
+        if sample_width is not None:
+            sample_kwargs["width"] = sample_width
+        if sample_steps is not None:
+            sample_kwargs["num_inference_steps"] = sample_steps
+        if sample_guidance is not None:
+            sample_kwargs["guidance_scale"] = sample_guidance
 
-    sampler.sample(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        model_path=model_path,
-        height=int(sample_block.get("height", 1024)),
-        width=int(sample_block.get("width", 1024)),
-        num_inference_steps=int(sample_block.get("num_inference_steps", 20)),
-        guidance_scale=float(sample_block.get("guidance_scale", 4.0)),
-        seed=seed,
-        device=train_device,
-        dtype=train_dtype,
-        output_path=out_path,
-        unload=True,
-    )
+        sampler.sample(
+            **sample_kwargs,
+        )
 
 
 def run_native_flux2_training(
@@ -409,10 +793,18 @@ def run_native_flux2_training(
     source_path: Path,
     steps_override: int | None = None,
 ) -> int:
+    training_method = _normalize_model_type(config.get("training_method") or "lora")
+    if training_method in _UNSUPPORTED_NATIVE_FLUX2_TRAINING_METHODS:
+        raise ValueError(
+            f"Unsupported native FLUX.2 training_method '{training_method}'. "
+            "Use lora/fine_tune for FLUX.2 native training."
+        )
+
     model_block = config.get("model", {}) if isinstance(config.get("model"), dict) else {}
     memory_block = config.get("memory", {}) if isinstance(config.get("memory"), dict) else {}
     checkpoint_block = config.get("checkpoint", {}) if isinstance(config.get("checkpoint"), dict) else {}
     optimizer_block = config.get("optimizer", {}) if isinstance(config.get("optimizer"), dict) else {}
+    scheduler_block = config.get("scheduler", {}) if isinstance(config.get("scheduler"), dict) else {}
     adapter_type, adapter_block = _extract_adapter_config(config)
     full_finetune = adapter_type == "full"
 
@@ -436,7 +828,6 @@ def run_native_flux2_training(
 
     seed = int(config.get("seed", 42))
     random.seed(seed)
-    np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -527,24 +918,20 @@ def run_native_flux2_training(
             raise RuntimeError("No trainable transformer parameters found for full-finetune mode.")
         raise RuntimeError("No trainable adapter parameters were found after injection.")
 
-    optimizer_name = str(optimizer_block.get("optimizer") or config.get("optimizer") or "adamw").lower()
-    if optimizer_name == "adafactor":
-        from transformers import Adafactor
-
-        optimizer = Adafactor(
-            params,
-            lr=learning_rate,
-            scale_parameter=False,
-            relative_step=False,
-            warmup_init=False,
-            weight_decay=float(optimizer_block.get("weight_decay", 0.0)),
-        )
-    else:
-        optimizer = torch.optim.AdamW(
-            params,
-            lr=learning_rate,
-            weight_decay=float(optimizer_block.get("weight_decay", 0.0)),
-        )
+    optimizer, optimizer_name = _create_optimizer(
+        params,
+        config=config,
+        optimizer_block=optimizer_block,
+        learning_rate=learning_rate,
+    )
+    total_optimizer_steps = _resolve_optimizer_steps(max_steps, grad_accum)
+    lr_scheduler, scheduler_name = _create_lr_scheduler(
+        optimizer,
+        config=config,
+        scheduler_block=scheduler_block,
+        total_optimizer_steps=total_optimizer_steps,
+    )
+    print(f"[native/flux2] optimizer={optimizer_name} lr_scheduler={scheduler_name}")
 
     max_grad_norm = float(config.get("max_grad_norm", 1.0))
     save_every = int(checkpoint_block.get("save_every") or config.get("save_every") or 0)
@@ -566,6 +953,8 @@ def run_native_flux2_training(
             if max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
             optimizer.step()
+            if lr_scheduler is not None:
+                lr_scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
         if step == 1 or step % 10 == 0 or step == max_steps:
@@ -579,6 +968,7 @@ def run_native_flux2_training(
             step=step,
             train_device=train_device,
             train_dtype=train_dtype,
+            default_resolution=resolution,
         )
 
         if save_every > 0 and step % save_every == 0:

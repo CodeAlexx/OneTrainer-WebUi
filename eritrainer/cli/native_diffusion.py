@@ -12,6 +12,7 @@ Supports native adapter/full training for:
 
 from __future__ import annotations
 
+import inspect
 import math
 import random
 import subprocess
@@ -28,10 +29,18 @@ from eritrainer.cli.native_flux2 import (
     _build_training_pairs,
     _coerce_dtype,
     _collect_concept_dirs,
+    _collect_sample_prompts,
+    _collect_sample_seeds,
+    _create_lr_scheduler,
+    _create_optimizer,
     _extract_adapter_config,
     _load_caption,
     _normalize_model_type,
+    _optional_float,
+    _optional_int,
     _resolve_hf_local_path,
+    _resolve_optimizer_steps,
+    _resolve_sample_output_extension,
 )
 from eritrainer.core.interfaces import ModelType
 from eritrainer.memory.strategy import LayerOffloadStrategy, MemoryConfig
@@ -109,6 +118,7 @@ _LTX2_TYPES = {
 _FLOW_FAMILIES = {"sd3", "zimage", "qwen", "flux", "flux2", "ltx2"}
 _COND_LABEL_SUFFIXES = ("-condlabel", "_condlabel")
 _VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+_FULL_TRAINING_METHODS = {"full", "full_finetune", "full_fine_tune", "fine_tune", "finetune", "fine_tune_vae"}
 
 
 @dataclass
@@ -133,6 +143,17 @@ class _Batch:
     num_frames: int
     height: int
     width: int
+
+
+def _normalize_training_method(value: Any) -> str:
+    normalized = _normalize_model_type(value or "lora")
+    if normalized in {"finetune", "full", "full_finetune", "full_fine_tune"}:
+        return "fine_tune"
+    if normalized in {"fine_tune_vae", "finetune_vae", "vae"}:
+        return "fine_tune_vae"
+    if normalized in {"embedding", "lora"}:
+        return normalized
+    return "lora"
 
 
 def is_native_diffusion_model_type(model_type: str | None) -> bool:
@@ -1051,6 +1072,8 @@ def _maybe_sample(
     step: int,
     train_device: torch.device,
     train_dtype: torch.dtype,
+    default_resolution: int | None = None,
+    default_video_frames: int | None = None,
 ) -> None:
     sample_block = config.get("sample", {}) if isinstance(config.get("sample"), dict) else {}
     if not sample_block.get("enabled", False):
@@ -1060,44 +1083,90 @@ def _maybe_sample(
     if interval <= 0 or step % interval != 0:
         return
 
-    if model_type == ModelType.LTX2:
-        print("[native/diffusion] sampling skipped for LTX2 (video sample export not implemented in this path)")
-        return
-
-    prompts = sample_block.get("prompts") or []
+    prompts = _collect_sample_prompts(sample_block)
     if not prompts:
         return
 
-    sampler = create_sampler(model_type, model={"path": model_path})
-    prompt = str(prompts[0])
+    sampler_model: dict[str, Any] = {"path": model_path}
+    if model_type in {ModelType.ZIMAGE, ModelType.Z_IMAGE}:
+        assistant_path = config.get("assistant_lora_path") or config.get("turbo_adapter_path")
+        if assistant_path:
+            sampler_model["assistant_lora_path"] = str(assistant_path)
+
+        assistant_weight = config.get("assistant_lora_weight_name") or config.get("turbo_adapter_weight_name")
+        if assistant_weight:
+            sampler_model["assistant_lora_weight_name"] = str(assistant_weight)
+
+        assistant_strength = config.get("assistant_lora_inference_strength")
+        if assistant_strength is None:
+            assistant_strength = config.get("assistant_lora_strength")
+        if assistant_strength is None:
+            assistant_strength = config.get("turbo_adapter_strength")
+        if assistant_strength is not None:
+            sampler_model["assistant_lora_inference_strength"] = float(assistant_strength)
+
+        if "disable_assistant_lora" in config:
+            sampler_model["disable_assistant_lora"] = _as_bool(config.get("disable_assistant_lora"), False)
+
+    sampler = create_sampler(model_type, model=sampler_model)
     negative_prompt = str(sample_block.get("negative_prompt", ""))
-    seed = int((sample_block.get("seeds") or [42])[0])
+    seeds = _collect_sample_seeds(sample_block, int(config.get("seed", 42)))
+    max_samples = int(sample_block.get("max_samples") or 0)
+    prompts_to_run = prompts if max_samples <= 0 else prompts[:max_samples]
+    default_ext = ".gif" if model_type == ModelType.LTX2 else ".png"
+    output_ext = _resolve_sample_output_extension(sample_block, default_ext)
+    sample_height = _optional_int(sample_block.get("height") or sample_block.get("sample_height")) or default_resolution
+    sample_width = _optional_int(sample_block.get("width") or sample_block.get("sample_width")) or default_resolution
+    sample_steps = _optional_int(
+        sample_block.get("num_inference_steps") or sample_block.get("sample_steps") or sample_block.get("steps")
+    )
+    sample_guidance = _optional_float(sample_block.get("guidance_scale") or sample_block.get("cfg_scale"))
 
     sample_kwargs: dict[str, Any] = {}
     if model_type == ModelType.QWEN_IMAGE_EDIT:
         image_path = sample_block.get("image_path") or sample_block.get("conditioning_image")
         if image_path:
             sample_kwargs["image_path"] = image_path
+    if model_type == ModelType.LTX2:
+        sample_num_frames = _optional_int(
+            sample_block.get("num_frames")
+            or sample_block.get("frames")
+            or sample_block.get("video_frames")
+            or default_video_frames
+        )
+        sample_frame_rate = _optional_float(sample_block.get("frame_rate")) or 24.0
+        if sample_num_frames is not None:
+            sample_kwargs["num_frames"] = sample_num_frames
+        sample_kwargs["frame_rate"] = sample_frame_rate
 
     samples_dir = output_dir / "samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
-    out_path = samples_dir / f"step_{step:06d}.png"
+    for prompt_index, prompt in enumerate(prompts_to_run):
+        seed = seeds[prompt_index % len(seeds)]
+        out_path = samples_dir / f"step_{step:06d}_p{prompt_index:02d}_s{seed}{output_ext}"
+        call_kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "model_path": model_path,
+            "seed": seed,
+            "device": train_device,
+            "dtype": train_dtype,
+            "output_path": out_path,
+            "unload": prompt_index == len(prompts_to_run) - 1,
+            **sample_kwargs,
+        }
+        if sample_height is not None:
+            call_kwargs["height"] = sample_height
+        if sample_width is not None:
+            call_kwargs["width"] = sample_width
+        if sample_steps is not None:
+            call_kwargs["num_inference_steps"] = sample_steps
+        if sample_guidance is not None:
+            call_kwargs["guidance_scale"] = sample_guidance
 
-    sampler.sample(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        model_path=model_path,
-        height=int(sample_block.get("height", 1024)),
-        width=int(sample_block.get("width", 1024)),
-        num_inference_steps=int(sample_block.get("num_inference_steps", 20)),
-        guidance_scale=float(sample_block.get("guidance_scale", 4.0)),
-        seed=seed,
-        device=train_device,
-        dtype=train_dtype,
-        output_path=out_path,
-        unload=True,
-        **sample_kwargs,
-    )
+        sampler.sample(
+            **call_kwargs,
+        )
 
 
 def _get_train_module(pipeline: Any, family: str) -> torch.nn.Module:
@@ -1201,7 +1270,34 @@ def _move_non_offloaded_tensors_to_device(
             parent_module._buffers[local_name] = buffer.to(device=train_device, non_blocking=True)
 
 
-def _maybe_load_transformer_override(train_module: torch.nn.Module, config: dict[str, Any]) -> None:
+def _call_with_filtered_kwargs(fn, *args: Any, **kwargs: Any):
+    params = inspect.signature(fn).parameters
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
+        return fn(*args, **kwargs)
+    filtered_kwargs = {key: value for key, value in kwargs.items() if key in params}
+    return fn(*args, **filtered_kwargs)
+
+
+def _is_lora_adapter_state_dict(state_dict: dict[str, Any]) -> bool:
+    if not state_dict:
+        return False
+    return any("lora_" in key.lower() for key in state_dict)
+
+
+def _freeze_named_adapter_params(module: torch.nn.Module, adapter_name: str) -> None:
+    marker = f".{adapter_name}"
+    for name, param in module.named_parameters():
+        if marker in name and "lora_" in name:
+            param.requires_grad_(False)
+
+
+def _maybe_load_transformer_override(
+    train_module: torch.nn.Module,
+    config: dict[str, Any],
+    *,
+    pipeline: Any | None = None,
+    family: str | None = None,
+) -> None:
     override_path = config.get("turbo_adapter_path") or config.get("transformer_weights")
     if not override_path:
         return
@@ -1218,6 +1314,41 @@ def _maybe_load_transformer_override(train_module: torch.nn.Module, config: dict
             state_dict = load_file(str(path))
         else:
             state_dict = torch.load(str(path), map_location="cpu", weights_only=True)
+
+        if family == "zimage" and pipeline is not None and _is_lora_adapter_state_dict(state_dict):
+            pipeline_cls = pipeline.__class__
+            load_fn = getattr(pipeline_cls, "load_lora_into_transformer", None)
+            if load_fn is None:
+                print(
+                    "[native/diffusion] warning: Z-Image pipeline does not expose "
+                    "`load_lora_into_transformer`; turbo adapter was skipped."
+                )
+                return
+
+            load_kwargs: dict[str, Any] = {
+                "transformer": train_module,
+                "adapter_name": "assistant",
+                "_pipeline": None,
+                "low_cpu_mem_usage": False,
+            }
+            _call_with_filtered_kwargs(load_fn, state_dict, **load_kwargs)
+            _freeze_named_adapter_params(train_module, "assistant")
+
+            assistant_strength_raw = config.get("assistant_lora_strength")
+            if assistant_strength_raw is None:
+                assistant_strength_raw = config.get("turbo_adapter_strength")
+            assistant_strength = _optional_float(assistant_strength_raw)
+            with suppress(Exception):
+                if hasattr(train_module, "set_adapters"):
+                    if assistant_strength is None:
+                        train_module.set_adapters(["assistant"])
+                    else:
+                        train_module.set_adapters(["assistant"], [float(assistant_strength)])
+                elif hasattr(train_module, "set_adapter"):
+                    train_module.set_adapter("assistant")
+
+            print(f"[native/diffusion] loaded Z-Image assistant LoRA from {path}")
+            return
 
         missing, unexpected = train_module.load_state_dict(state_dict, strict=False)
         print(
@@ -1239,10 +1370,17 @@ def run_native_diffusion_training(
     memory_block = config.get("memory", {}) if isinstance(config.get("memory"), dict) else {}
     checkpoint_block = config.get("checkpoint", {}) if isinstance(config.get("checkpoint"), dict) else {}
     optimizer_block = config.get("optimizer", {}) if isinstance(config.get("optimizer"), dict) else {}
+    scheduler_block = config.get("scheduler", {}) if isinstance(config.get("scheduler"), dict) else {}
 
     normalized_model_type = _normalize_model_type(config.get("model_type") or model_block.get("type"))
     if not is_native_diffusion_model_type(normalized_model_type):
         raise ValueError(f"Unsupported native diffusion model type: {normalized_model_type}")
+    training_method = _normalize_training_method(config.get("training_method"))
+    if training_method == "embedding":
+        raise ValueError(
+            "Native embedding training is not implemented yet for diffusion backends. "
+            "Use adapter/fine_tune mode or run bridge mode explicitly."
+        )
 
     family = _resolve_family(normalized_model_type)
     native_model = _create_native_model(normalized_model_type)
@@ -1298,14 +1436,18 @@ def run_native_diffusion_training(
         ltx_component_paths, ltx_template_path = _collect_ltx_component_paths(config, model_block)
 
     adapter_type, adapter_block = _extract_adapter_config(config)
+    if training_method in _FULL_TRAINING_METHODS:
+        adapter_type, adapter_block = "full", {}
     full_finetune = adapter_type == "full"
-    if family == "ltx2" and not full_finetune:
+    if training_method == "fine_tune_vae" and family != "sd15":
         raise ValueError(
-            "LyCORIS/adapter training is temporarily disabled for LTX2. "
-            "Set adapter.type='full' to run full-finetune mode."
+            f"Native fine_tune_vae is currently only supported for sd15 family, got '{normalized_model_type}'."
         )
-    if full_finetune and quantization_mode == "int8" and family == "qwen":
-        raise ValueError("INT8 quantization is not supported for native full-finetune mode. Use an adapter mode.")
+    if full_finetune and quantization_mode in {"int8", "fp8"} and family == "qwen":
+        raise ValueError(
+            "Quantized Qwen modes (INT8/FP8) are not supported for native full-finetune mode. "
+            "Use an adapter mode."
+        )
 
     pairs = _build_training_pairs(config)
     allow_video_dataset = family == "ltx2"
@@ -1367,7 +1509,7 @@ def run_native_diffusion_training(
     train_module = native_model.get_train_module(pipeline)
     dispatched_train_module = _is_dispatched_module(train_module)
 
-    _maybe_load_transformer_override(train_module, config)
+    _maybe_load_transformer_override(train_module, config, pipeline=pipeline, family=family)
 
     print(f"[native/diffusion] caching latents+text embeddings for {len(pairs)} samples")
     cached = _cache_training_data(
@@ -1443,7 +1585,12 @@ def run_native_diffusion_training(
         )
         adapter.inject(train_module)
 
-    if adapter is not None and hasattr(adapter, "to") and not dispatched_train_module:
+    offload_active = bool(
+        memory_strategy is not None
+        and memory_strategy.conductor is not None
+        and memory_strategy.conductor.offload_activated()
+    )
+    if adapter is not None and hasattr(adapter, "to") and not dispatched_train_module and not offload_active:
         adapter.to(train_device, dtype=train_dtype)
 
     if adapter is not None:
@@ -1455,24 +1602,20 @@ def run_native_diffusion_training(
         mode = "full-finetune" if full_finetune else f"adapter ({adapter_type})"
         raise RuntimeError(f"No trainable parameters found for {mode} mode")
 
-    optimizer_name = str(optimizer_block.get("optimizer") or config.get("optimizer") or "adamw").lower()
-    if optimizer_name == "adafactor":
-        from transformers import Adafactor
-
-        optimizer = Adafactor(
-            params,
-            lr=learning_rate,
-            scale_parameter=False,
-            relative_step=False,
-            warmup_init=False,
-            weight_decay=float(optimizer_block.get("weight_decay", 0.0)),
-        )
-    else:
-        optimizer = torch.optim.AdamW(
-            params,
-            lr=learning_rate,
-            weight_decay=float(optimizer_block.get("weight_decay", 0.0)),
-        )
+    optimizer, optimizer_name = _create_optimizer(
+        params,
+        config=config,
+        optimizer_block=optimizer_block,
+        learning_rate=learning_rate,
+    )
+    total_optimizer_steps = _resolve_optimizer_steps(max_steps, grad_accum)
+    lr_scheduler, scheduler_name = _create_lr_scheduler(
+        optimizer,
+        config=config,
+        scheduler_block=scheduler_block,
+        total_optimizer_steps=total_optimizer_steps,
+    )
+    print(f"[native/diffusion] optimizer={optimizer_name} lr_scheduler={scheduler_name}")
 
     max_grad_norm = float(config.get("max_grad_norm", 1.0))
     save_every = int(
@@ -1507,6 +1650,8 @@ def run_native_diffusion_training(
             if max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
             optimizer.step()
+            if lr_scheduler is not None:
+                lr_scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
         if step == 1 or step % 10 == 0 or step == max_steps:
@@ -1520,6 +1665,8 @@ def run_native_diffusion_training(
             step=step,
             train_device=train_device,
             train_dtype=train_dtype,
+            default_resolution=resolution,
+            default_video_frames=ltx_video_frame_count if allow_video_dataset else None,
         )
 
         if save_every > 0 and step % save_every == 0:

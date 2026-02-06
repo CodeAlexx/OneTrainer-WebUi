@@ -14,6 +14,7 @@ from eritrainer.core.interfaces import ModelType
 class TrainingMethod(str, Enum):
     LORA = "lora"
     FINE_TUNE = "fine_tune"
+    FINE_TUNE_VAE = "fine_tune_vae"
     EMBEDDING = "embedding"
 
 
@@ -96,7 +97,11 @@ def _coerce_training_method(value: TrainingMethod | str) -> TrainingMethod:
     if isinstance(value, TrainingMethod):
         return value
 
-    normalized = str(value).lower()
+    normalized = str(value).strip().lower().replace("-", "_")
+    if normalized in {"finetune", "full", "full_finetune", "full_fine_tune"}:
+        normalized = TrainingMethod.FINE_TUNE.value
+    if normalized in {"vae", "vae_finetune", "fine_tune_vae", "finetune_vae"}:
+        normalized = TrainingMethod.FINE_TUNE_VAE.value
     try:
         return TrainingMethod(normalized)
     except ValueError as exc:

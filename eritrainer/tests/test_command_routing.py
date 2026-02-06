@@ -96,6 +96,19 @@ def test_convert_onetrainer_to_eritrainer_maps_qwen_edit_flags():
     assert converted["model_type"] == "qwen_image_edit"
 
 
+def test_convert_onetrainer_to_eritrainer_preserves_embedding_method():
+    cfg = {
+        "model_type": "STABLE_DIFFUSION_15",
+        "base_model_name": "/models/sd15",
+        "output_model_destination": "/tmp/out",
+        "concepts": [{"path": "/datasets/disney"}],
+        "training_method": "EMBEDDING",
+    }
+    converted = _convert_onetrainer_to_eritrainer(cfg, source_path=Path("test.json"))
+    assert converted["training_method"] == "embedding"
+    assert converted["adapter"]["type"] == "lora"
+
+
 def test_onetrainer_bridge_opt_in_uses_backend_key():
     cfg = {"backend": "onetrainer"}
     assert _onetrainer_bridge_opt_in(cfg)

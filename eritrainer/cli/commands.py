@@ -239,9 +239,17 @@ def _convert_onetrainer_to_eritrainer(config: dict[str, Any], source_path: Path)
     if not model_path:
         raise ValueError("Missing model path in OneTrainer config (`base_model_name`/`base_model`/`model_path`).")
 
-    training_method = str(config.get("training_method") or "").strip().lower()
+    training_method_raw = str(config.get("training_method") or "").strip().lower().replace("-", "_")
+    training_method = {
+        "lora": "lora",
+        "fine_tune": "fine_tune",
+        "finetune": "fine_tune",
+        "embedding": "embedding",
+        "fine_tune_vae": "fine_tune_vae",
+        "finetune_vae": "fine_tune_vae",
+    }.get(training_method_raw, "lora")
     peft_type = str(config.get("peft_type") or "lora").strip().lower()
-    adapter_type = "full" if "fine_tune" in training_method else peft_type
+    adapter_type = "full" if training_method in {"fine_tune", "fine_tune_vae"} else peft_type
     if adapter_type == "oft_2":
         adapter_type = "oft"
 
@@ -297,6 +305,7 @@ def _convert_onetrainer_to_eritrainer(config: dict[str, Any], source_path: Path)
             "alpha": float(config.get("lora_alpha", config.get("lora_rank", 16))),
             "dropout": float(config.get("dropout_probability", 0.0)),
         },
+        "training_method": training_method,
         "memory": {
             "gradient_checkpointing": gradient_checkpointing or "off",
             "enable_activation_offloading": _is_truthy(config.get("enable_activation_offloading")),
@@ -752,13 +761,21 @@ def _convert_eritrainer_to_onetrainer(
     if normalized_model_type in {"qwen", "qwen_image_edit", "zimage", "z_image"} or "flux" in normalized_model_type:
         dataloader_threads = 1
 
+    training_method_name = _to_enum_name(
+        str(config.get("training_method") or "lora"),
+        {
+            "lora": "LORA",
+            "fine_tune": "FINE_TUNE",
+            "finetune": "FINE_TUNE",
+            "embedding": "EMBEDDING",
+            "fine_tune_vae": "FINE_TUNE_VAE",
+            "finetune_vae": "FINE_TUNE_VAE",
+        },
+        "LORA",
+    )
     train_dict: dict[str, Any] = {
         "__version": 10,
-        "training_method": _to_enum_name(
-            str(config.get("training_method") or "lora"),
-            {"lora": "LORA", "fine_tune": "FINE_TUNE", "finetune": "FINE_TUNE", "embedding": "EMBEDDING"},
-            "LORA",
-        ),
+        "training_method": training_method_name,
         "model_type": onetrainer_model_type,
         "peft_type": peft_type,
         "base_model_name": resolved_model,
@@ -921,6 +938,10 @@ def _convert_eritrainer_to_onetrainer(
         train_dict["save_every"] = 0
         train_dict["save_every_unit"] = "NEVER"
         train_dict["sample_after_unit"] = "NEVER"
+
+    # Keep PEFT-only field aligned with training method semantics.
+    if training_method_name in {"FINE_TUNE", "FINE_TUNE_VAE"}:
+        train_dict["peft_type"] = "LORA"
 
     return train_dict
 
