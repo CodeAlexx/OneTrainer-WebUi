@@ -1,10 +1,23 @@
-"""LyCORIS adapter configuration and defaults."""
+"""Native LyCORIS adapter management for EriTrainer."""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List
+from pathlib import Path
+from typing import Any
+
+import torch
+import torch.nn as nn
+
+try:  # pragma: no cover - optional dependency guard
+    from lycoris import create_lycoris
+except Exception:  # pragma: no cover - optional dependency guard
+    create_lycoris = None
+
+
+logger = logging.getLogger(__name__)
 
 
 class AdapterType(str, Enum):
@@ -22,12 +35,101 @@ class AdapterType(str, Enum):
     FULL = "full"
 
 
-DEFAULT_TARGETS: Dict[str, List[str]] = {
-    "zimage": ["attention.to_q", "attention.to_k", "attention.to_v", "feed_forward.w1", "feed_forward.w2"],
-    "z_image": ["attention.to_q", "attention.to_k", "attention.to_v", "feed_forward.w1", "feed_forward.w2"],
-    "sdxl": ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out"],
-    "sd3": ["joint_transformer.attn", "joint_transformer.to_q", "joint_transformer.to_k"],
+_ALGO_MAP: dict[AdapterType, str] = {
+    AdapterType.LORA: "lora",
+    AdapterType.LOCON: "locon",
+    AdapterType.LOHA: "loha",
+    AdapterType.LOKR: "lokr",
+    AdapterType.OFT: "diag-oft",
+    AdapterType.BOFT: "boft",
+    AdapterType.DIAG_OFT: "diag-oft",
+    AdapterType.GLORA: "glora",
+    AdapterType.DYLORA: "dylora",
+    AdapterType.DORA: "lora",
+    AdapterType.FULL: "full",
+    # IA3 is not registered in create_lycoris() for this lycoris build; use LoRA path.
+    AdapterType.IA3: "lora",
 }
+
+
+_MODEL_ALIASES: dict[str, str] = {
+    "z_image": "zimage",
+    "sd_15": "sd15",
+    "sd_15_inpainting": "sd15_inpainting",
+    "sd_20": "sd20",
+    "sd_20_base": "sd20_base",
+    "sd_20_inpainting": "sd20_inpainting",
+    "sd_20_depth": "sd20_depth",
+    "sd_21": "sd21",
+    "sd_21_base": "sd21_base",
+    "sd3.5": "sd35",
+    "stable_diffusion_3": "sd3",
+    "stable_diffusion_35": "sd35",
+    "stable_diffusion_3.5": "sd35",
+    "flux2": "flux_2",
+    "flux_2_dev": "flux_2",
+    "flux2_klein": "flux_2_klein",
+    "flux2_klein_4b": "flux_2_klein_4b",
+    "flux2_klein_9b": "flux_2_klein_9b",
+    "flux_fill": "flux_fill_dev",
+    "hidream": "hi_dream_full",
+    "chroma": "chroma_1",
+}
+
+
+DEFAULT_TARGETS: dict[str, list[str]] = {
+    "zimage": ["attention.to_q", "attention.to_k", "attention.to_v", "feed_forward.w1", "feed_forward.w2"],
+    "qwen": ["attn.to_q", "attn.to_k", "attn.to_v", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"],
+    "qwen_image_edit": ["attn.to_q", "attn.to_k", "attn.to_v", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"],
+    "flux_dev": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "flux_fill_dev": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "flux_2": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "flux_2_klein": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "flux_2_klein_4b": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "flux_2_klein_9b": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "sd15": ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn2.to_q", "attn2.to_k", "attn2.to_v"],
+    "sd15_inpainting": ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn2.to_q", "attn2.to_k", "attn2.to_v"],
+    "sd20": ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn2.to_q", "attn2.to_k", "attn2.to_v"],
+    "sd20_base": ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn2.to_q", "attn2.to_k", "attn2.to_v"],
+    "sd20_inpainting": ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn2.to_q", "attn2.to_k", "attn2.to_v"],
+    "sd20_depth": ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn2.to_q", "attn2.to_k", "attn2.to_v"],
+    "sd21": ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn2.to_q", "attn2.to_k", "attn2.to_v"],
+    "sd21_base": ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn2.to_q", "attn2.to_k", "attn2.to_v"],
+    "sdxl": ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out"],
+    "sdxl_10_base": ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out"],
+    "sdxl_inpainting": ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out"],
+    "sd3": ["joint_transformer.attn", "joint_transformer.to_q", "joint_transformer.to_k"],
+    "sd35": ["joint_transformer.attn", "joint_transformer.to_q", "joint_transformer.to_k"],
+    "pixart_alpha": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "pixart_sigma": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "sana": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "hunyuan_video": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "hi_dream_full": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "chroma_1": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "ltx2": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "wuerstchen_2": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "stable_cascade_1": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+}
+
+
+def _normalize_model_type(value: str) -> str:
+    normalized = str(value).strip().lower().replace("-", "_")
+    return _MODEL_ALIASES.get(normalized, normalized)
+
+
+def _coerce_dtype(value: torch.dtype | str | None) -> torch.dtype | None:
+    if value is None:
+        return None
+    if isinstance(value, torch.dtype):
+        return value
+    normalized = str(value).strip().lower().replace("-", "").replace("_", "")
+    if normalized in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    if normalized in {"fp16", "float16", "half"}:
+        return torch.float16
+    if normalized in {"fp32", "float32", "float"}:
+        return torch.float32
+    return None
 
 
 @dataclass
@@ -53,7 +155,7 @@ class LoKrConfig:
 
 @dataclass
 class IA3Config:
-    feedforward_modules: List[str] = None
+    feedforward_modules: list[str] = None
     init_ia3_weights: float = 1.0
 
     def __post_init__(self) -> None:
@@ -86,23 +188,174 @@ class AdapterConfig:
     adapter_type: AdapterType
     rank: int
     alpha: float = 1.0
-    target_modules: List[str] = field(default_factory=list)
+    target_modules: list[str] = field(default_factory=list)
+    conv_rank: int | None = None
+    conv_alpha: float | None = None
+    dropout: float = 0.0
+    rank_dropout: float = 0.0
+    module_dropout: float = 0.0
+    factor: int = 2
+    decompose_both: bool = False
+    use_tucker: bool = False
+    full_matrix: bool = False
+    weight_decompose: bool = False
+    dora_on_output: bool = True
+    rs_lora: bool = False
+    block_size: int = 4
+    constraint: float = 0.0
+    rescaled: bool = False
+    multiplier: float = 1.0
 
 
 class LyCORISManager:
-    """Minimal LyCORIS manager placeholder for native training wiring."""
+    """Manage native LyCORIS adapter creation, optimization params and persistence."""
 
     def __init__(self, config: AdapterConfig, model_type: str) -> None:
         self.config = config
-        self.model_type = str(model_type).lower()
+        self.model_type = _normalize_model_type(model_type)
         self.target_modules = (
-            config.target_modules
+            list(config.target_modules)
             if config.target_modules
-            else DEFAULT_TARGETS.get(self.model_type, [])
+            else list(DEFAULT_TARGETS.get(self.model_type, []))
         )
+        self._network: Any | None = None
+        self._target_module: nn.Module | None = None
 
-    def get_targets(self) -> List[str]:
+    def _resolve_target_module(self, model_or_pipeline: Any) -> nn.Module:
+        candidates: list[Any] = []
+        if isinstance(model_or_pipeline, dict):
+            candidates.extend(
+                model_or_pipeline[key]
+                for key in ("module", "pipeline", "model", "unet", "transformer")
+                if key in model_or_pipeline
+            )
+        else:
+            candidates.append(model_or_pipeline)
+            candidates.extend(
+                getattr(model_or_pipeline, attr)
+                for attr in ("pipeline", "model", "unet", "transformer")
+                if hasattr(model_or_pipeline, attr)
+            )
+
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            for attr in ("unet", "transformer", "prior_prior"):
+                component = getattr(candidate, attr, None)
+                if isinstance(component, nn.Module):
+                    return component
+            if isinstance(candidate, nn.Module):
+                return candidate
+
+        raise TypeError("Could not resolve a trainable torch.nn.Module for LyCORIS attachment.")
+
+    def _algo_name(self) -> str:
+        return _ALGO_MAP.get(self.config.adapter_type, "lora")
+
+    def _network_kwargs(self) -> dict[str, Any]:
+        algo = self._algo_name()
+        kwargs: dict[str, Any] = {
+            "algo": algo,
+            "conv_dim": int(self.config.conv_rank or self.config.rank),
+            "conv_alpha": float(self.config.conv_alpha or self.config.alpha),
+            "dropout": float(self.config.dropout),
+            "rank_dropout": float(self.config.rank_dropout),
+            "module_dropout": float(self.config.module_dropout),
+            "block_size": int(self.config.block_size),
+        }
+
+        if algo == "lokr":
+            kwargs.update(
+                {
+                    "factor": int(self.config.factor),
+                    "decompose_both": bool(self.config.decompose_both),
+                    "use_tucker": bool(self.config.use_tucker),
+                    "full_matrix": bool(self.config.full_matrix),
+                    "dora_wd": bool(self.config.weight_decompose),
+                    "wd_on_output": bool(self.config.dora_on_output),
+                    "rs_lora": bool(self.config.rs_lora),
+                }
+            )
+        elif self.config.adapter_type == AdapterType.DORA:
+            kwargs["dora_wd"] = True
+            kwargs["wd_on_output"] = bool(self.config.dora_on_output)
+
+        if algo in {"diag-oft", "boft"}:
+            kwargs["constraint"] = float(self.config.constraint)
+            kwargs["rescaled"] = bool(self.config.rescaled)
+
+        return kwargs
+
+    def apply(self, model_or_pipeline: Any) -> Any:
+        if create_lycoris is None:
+            raise RuntimeError("LyCORIS is not installed. Install `lycoris` in the active environment.")
+
+        target_module = self._resolve_target_module(model_or_pipeline)
+        if self._network is not None and self._target_module is target_module:
+            return self._network
+
+        self._target_module = target_module
+        network = create_lycoris(
+            target_module,
+            multiplier=float(self.config.multiplier),
+            linear_dim=int(self.config.rank),
+            linear_alpha=float(self.config.alpha),
+            **self._network_kwargs(),
+        )
+        network.apply_to()
+        self._network = network
+        return network
+
+    def get_targets(self) -> list[str]:
         return list(self.target_modules)
+
+    def is_attached(self) -> bool:
+        return self._network is not None
+
+    def set_multiplier(self, multiplier: float) -> None:
+        if self._network is None:
+            return
+        self._network.set_multiplier(float(multiplier))
+
+    def prepare_optimizer_params(self, lr: float | None = None) -> list[dict[str, Any]]:
+        if self._network is None:
+            raise RuntimeError("LyCORIS network is not attached. Call apply() before building optimizer params.")
+        return self._network.prepare_optimizer_params(lr)
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        if self._network is None:
+            return {}
+        return self._network.state_dict()
+
+    def load_state_dict(self, state_dict: dict[str, torch.Tensor], strict: bool = False) -> Any:
+        if self._network is None:
+            raise RuntimeError("LyCORIS network is not attached. Call apply() before loading adapter weights.")
+        return self._network.load_state_dict(state_dict, strict=strict)
+
+    def merge_to(self, weight: float = 1.0, *, precise: bool = False) -> None:
+        if self._network is None:
+            raise RuntimeError("LyCORIS network is not attached. Call apply() before merge_to().")
+        self._network.merge_to(float(weight), precise=bool(precise))
+
+    def restore(self) -> None:
+        if self._network is None:
+            return
+        self._network.restore()
+
+    def save_weights(
+        self,
+        output_path: str | Path,
+        dtype: torch.dtype | str | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> Path:
+        if self._network is None:
+            raise RuntimeError("LyCORIS network is not attached. Call apply() before save_weights().")
+
+        path = Path(output_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        target_dtype = _coerce_dtype(dtype)
+        self._network.save_weights(str(path), target_dtype, metadata or {})
+        return path
 
 
 __all__ = [

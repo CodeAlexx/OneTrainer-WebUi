@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
-
-import json
+from typing import Any
 
 from eritrainer.core.interfaces import ModelType
 
@@ -27,8 +26,28 @@ def _coerce_model_type(value: ModelType | str) -> ModelType:
     alias_map = {
         "z_image": ModelType.ZIMAGE,
         "zimage": ModelType.ZIMAGE,
+        "z-image": ModelType.ZIMAGE,
         "sd_15": ModelType.SD15,
+        "sd15_inpaint": ModelType.SD15_INPAINTING,
+        "sd_15_inpainting": ModelType.SD15_INPAINTING,
+        "sd15_inpainting": ModelType.SD15_INPAINTING,
+        "sd_20": ModelType.SD20,
+        "sd2": ModelType.SD20,
+        "sd2_0": ModelType.SD20,
+        "sd_20_base": ModelType.SD20_BASE,
+        "sd20_base": ModelType.SD20_BASE,
+        "sd_20_inpainting": ModelType.SD20_INPAINTING,
+        "sd20_inpainting": ModelType.SD20_INPAINTING,
+        "sd_20_depth": ModelType.SD20_DEPTH,
+        "sd20_depth": ModelType.SD20_DEPTH,
+        "sd_21": ModelType.SD21,
+        "sd21": ModelType.SD21,
+        "sd_21_base": ModelType.SD21_BASE,
+        "sd21_base": ModelType.SD21_BASE,
         "sdxl_base": ModelType.SDXL_10_BASE,
+        "sdxl_10_base_inpainting": ModelType.SDXL_INPAINTING,
+        "sdxl_inpainting": ModelType.SDXL_INPAINTING,
+        "sdxl_inpaint": ModelType.SDXL_INPAINTING,
         "sd3": ModelType.SD3,
         "sd_3": ModelType.SD3,
         "sd35": ModelType.SD35,
@@ -41,6 +60,24 @@ def _coerce_model_type(value: ModelType | str) -> ModelType:
         "flux2_klein_9b": ModelType.FLUX_2_KLEIN_9B,
         "flux_2_klein_4b": ModelType.FLUX_2_KLEIN_4B,
         "flux_2_klein_9b": ModelType.FLUX_2_KLEIN_9B,
+        "flux_fill": ModelType.FLUX_FILL_DEV,
+        "flux_fill_dev": ModelType.FLUX_FILL_DEV,
+        "flux_fill_dev_1": ModelType.FLUX_FILL_DEV,
+        "flux_2": ModelType.FLUX_2,
+        "flux2": ModelType.FLUX_2,
+        "wuerstchen": ModelType.WUERSTCHEN_2,
+        "wuerstchen_2": ModelType.WUERSTCHEN_2,
+        "stable_cascade": ModelType.STABLE_CASCADE_1,
+        "stable_cascade_1": ModelType.STABLE_CASCADE_1,
+        "pixart": ModelType.PIXART_ALPHA,
+        "pixart_alpha": ModelType.PIXART_ALPHA,
+        "pixart_sigma": ModelType.PIXART_SIGMA,
+        "sana": ModelType.SANA,
+        "hunyuan_video": ModelType.HUNYUAN_VIDEO,
+        "hidream": ModelType.HI_DREAM_FULL,
+        "hi_dream_full": ModelType.HI_DREAM_FULL,
+        "chroma": ModelType.CHROMA_1,
+        "chroma_1": ModelType.CHROMA_1,
     }
     if normalized in alias_map:
         return alias_map[normalized]
@@ -70,7 +107,7 @@ class TrainConfig:
     training_method: TrainingMethod | str
     transformer_path: str
     output_dir: str
-    concepts: List[Any]
+    concepts: list[Any]
 
     # Common defaults
     learning_rate: float = 1e-4
@@ -111,7 +148,7 @@ def load_config(path: str | Path) -> TrainConfig:
     if not path.exists():
         raise FileNotFoundError(path)
 
-    data: Dict[str, Any]
+    data: dict[str, Any]
     if path.suffix.lower() in {".json"}:
         data = json.loads(path.read_text())
     elif path.suffix.lower() in {".yaml", ".yml"}:

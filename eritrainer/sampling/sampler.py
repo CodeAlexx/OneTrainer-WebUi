@@ -2,23 +2,26 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
 import inspect
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
-import torch
-
 from eritrainer.core.interfaces import ModelType
 
+import torch
+
+from PIL import Image
 
 _MODEL_TYPE_ALIASES: dict[str, ModelType] = {
     "flux": ModelType.FLUX_DEV,
     "flux_dev": ModelType.FLUX_DEV,
+    "flux_fill": ModelType.FLUX_FILL_DEV,
+    "flux_fill_dev": ModelType.FLUX_FILL_DEV,
+    "flux_fill_dev_1": ModelType.FLUX_FILL_DEV,
     "flux_schnell": ModelType.FLUX_SCHNELL,
-    "flux2": ModelType.FLUX_2_DEV,
-    "flux_2": ModelType.FLUX_2_DEV,
+    "flux_2": ModelType.FLUX_2,
+    "flux2": ModelType.FLUX_2,
     "flux_2_dev": ModelType.FLUX_2_DEV,
     "flux2_dev": ModelType.FLUX_2_DEV,
     "flux2_klein": ModelType.FLUX_2_KLEIN,
@@ -31,8 +34,25 @@ _MODEL_TYPE_ALIASES: dict[str, ModelType] = {
     "z_image": ModelType.Z_IMAGE,
     "sd15": ModelType.SD15,
     "sd_15": ModelType.SD15,
+    "sd15_inpainting": ModelType.SD15_INPAINTING,
+    "sd_15_inpainting": ModelType.SD15_INPAINTING,
+    "sd15_inpaint": ModelType.SD15_INPAINTING,
+    "sd20": ModelType.SD20,
+    "sd_20": ModelType.SD20,
+    "sd20_base": ModelType.SD20_BASE,
+    "sd_20_base": ModelType.SD20_BASE,
+    "sd20_inpainting": ModelType.SD20_INPAINTING,
+    "sd_20_inpainting": ModelType.SD20_INPAINTING,
+    "sd20_depth": ModelType.SD20_DEPTH,
+    "sd_20_depth": ModelType.SD20_DEPTH,
+    "sd21": ModelType.SD21,
+    "sd_21": ModelType.SD21,
+    "sd21_base": ModelType.SD21_BASE,
+    "sd_21_base": ModelType.SD21_BASE,
     "sdxl": ModelType.SDXL,
     "sdxl_10_base": ModelType.SDXL_10_BASE,
+    "sdxl_inpainting": ModelType.SDXL_INPAINTING,
+    "sdxl_inpaint": ModelType.SDXL_INPAINTING,
     "sd3": ModelType.SD3,
     "sd_3": ModelType.SD3,
     "sd35": ModelType.SD35,
@@ -41,6 +61,19 @@ _MODEL_TYPE_ALIASES: dict[str, ModelType] = {
     "stable_diffusion_3": ModelType.SD3,
     "stable_diffusion_35": ModelType.SD35,
     "stable_diffusion_3.5": ModelType.SD35,
+    "wuerstchen": ModelType.WUERSTCHEN_2,
+    "wuerstchen_2": ModelType.WUERSTCHEN_2,
+    "stable_cascade": ModelType.STABLE_CASCADE_1,
+    "stable_cascade_1": ModelType.STABLE_CASCADE_1,
+    "pixart": ModelType.PIXART_ALPHA,
+    "pixart_alpha": ModelType.PIXART_ALPHA,
+    "pixart_sigma": ModelType.PIXART_SIGMA,
+    "sana": ModelType.SANA,
+    "hunyuan_video": ModelType.HUNYUAN_VIDEO,
+    "hidream": ModelType.HI_DREAM_FULL,
+    "hi_dream_full": ModelType.HI_DREAM_FULL,
+    "chroma": ModelType.CHROMA_1,
+    "chroma_1": ModelType.CHROMA_1,
     "ltx2": ModelType.LTX2,
     "qwen": ModelType.QWEN,
     "qwen_image_edit": ModelType.QWEN_IMAGE_EDIT,
@@ -508,6 +541,13 @@ class FluxSampler(DiffusersSampler):
     resolution_multiple = 64
 
 
+class FluxFillSampler(DiffusersSampler):
+    pipeline_candidates = ("FluxFillPipeline", "FluxPipeline")
+    default_steps = 30
+    default_guidance = 3.5
+    resolution_multiple = 64
+
+
 class Flux2Sampler(DiffusersSampler):
     default_steps = 30
     default_guidance = 4.0
@@ -533,6 +573,13 @@ class ZImageSampler(DiffusersSampler):
     resolution_multiple = 64
 
 
+class ChromaSampler(DiffusersSampler):
+    pipeline_candidates = ("ChromaPipeline",)
+    default_steps = 20
+    default_guidance = 4.0
+    resolution_multiple = 64
+
+
 class SD15Sampler(DiffusersSampler):
     pipeline_candidates = ("StableDiffusionPipeline",)
     default_steps = 30
@@ -545,8 +592,29 @@ class SD15Sampler(DiffusersSampler):
     }
 
 
+class SDInpaintingSampler(DiffusersSampler):
+    pipeline_candidates = ("StableDiffusionInpaintPipeline",)
+    default_steps = 30
+    default_guidance = 7.5
+    resolution_multiple = 8
+
+
+class SDDepthSampler(DiffusersSampler):
+    pipeline_candidates = ("StableDiffusionDepth2ImgPipeline",)
+    default_steps = 30
+    default_guidance = 7.5
+    resolution_multiple = 8
+
+
 class SDXLSampler(DiffusersSampler):
     pipeline_candidates = ("StableDiffusionXLPipeline",)
+    default_steps = 30
+    default_guidance = 5.0
+    resolution_multiple = 8
+
+
+class SDXLInpaintingSampler(DiffusersSampler):
+    pipeline_candidates = ("StableDiffusionXLInpaintPipeline",)
     default_steps = 30
     default_guidance = 5.0
     resolution_multiple = 8
@@ -557,6 +625,49 @@ class SD3Sampler(DiffusersSampler):
     default_steps = 28
     default_guidance = 5.0
     resolution_multiple = 16
+
+
+class WuerstchenSampler(DiffusersSampler):
+    default_steps = 30
+    default_guidance = 4.0
+    resolution_multiple = 32
+
+    def _candidate_pipeline_names(self, **_: Any) -> tuple[str, ...]:
+        if self.model_type == ModelType.STABLE_CASCADE_1:
+            return ("StableCascadeCombinedPipeline", "WuerstchenCombinedPipeline")
+        return ("WuerstchenCombinedPipeline", "StableCascadeCombinedPipeline")
+
+
+class PixArtSampler(DiffusersSampler):
+    default_steps = 28
+    default_guidance = 4.5
+    resolution_multiple = 32
+
+    def _candidate_pipeline_names(self, **_: Any) -> tuple[str, ...]:
+        if self.model_type == ModelType.PIXART_SIGMA:
+            return ("PixArtSigmaPipeline", "PixArtAlphaPipeline")
+        return ("PixArtAlphaPipeline", "PixArtSigmaPipeline")
+
+
+class SanaSampler(DiffusersSampler):
+    pipeline_candidates = ("SanaPipeline",)
+    default_steps = 30
+    default_guidance = 4.0
+    resolution_multiple = 32
+
+
+class HunyuanVideoSampler(DiffusersSampler):
+    pipeline_candidates = ("HunyuanVideoPipeline",)
+    default_steps = 30
+    default_guidance = 4.0
+    resolution_multiple = 32
+
+
+class HiDreamSampler(DiffusersSampler):
+    pipeline_candidates = ("HiDreamImagePipeline",)
+    default_steps = 30
+    default_guidance = 4.0
+    resolution_multiple = 32
 
 
 class LTX2Sampler(DiffusersSampler):
@@ -591,7 +702,10 @@ def create_sampler(model_type: ModelType | str, model: Any = None) -> BaseSample
 
     if resolved_type in {ModelType.FLUX_DEV, ModelType.FLUX_SCHNELL}:
         return FluxSampler(model, model_type=resolved_type)
+    if resolved_type == ModelType.FLUX_FILL_DEV:
+        return FluxFillSampler(model, model_type=resolved_type)
     if resolved_type in {
+        ModelType.FLUX_2,
         ModelType.FLUX_2_DEV,
         ModelType.FLUX_2_KLEIN,
         ModelType.FLUX_2_KLEIN_4B,
@@ -602,12 +716,36 @@ def create_sampler(model_type: ModelType | str, model: Any = None) -> BaseSample
         return Flux2Sampler(model, model_type=resolved_type)
     if resolved_type in {ModelType.ZIMAGE, ModelType.Z_IMAGE}:
         return ZImageSampler(model, model_type=resolved_type)
-    if resolved_type == ModelType.SD15:
+    if resolved_type == ModelType.CHROMA_1:
+        return ChromaSampler(model, model_type=resolved_type)
+    if resolved_type in {
+        ModelType.SD15,
+        ModelType.SD20,
+        ModelType.SD20_BASE,
+        ModelType.SD21,
+        ModelType.SD21_BASE,
+    }:
         return SD15Sampler(model, model_type=resolved_type)
+    if resolved_type in {ModelType.SD15_INPAINTING, ModelType.SD20_INPAINTING}:
+        return SDInpaintingSampler(model, model_type=resolved_type)
+    if resolved_type == ModelType.SD20_DEPTH:
+        return SDDepthSampler(model, model_type=resolved_type)
     if resolved_type in {ModelType.SDXL, ModelType.SDXL_10_BASE}:
         return SDXLSampler(model, model_type=resolved_type)
+    if resolved_type == ModelType.SDXL_INPAINTING:
+        return SDXLInpaintingSampler(model, model_type=resolved_type)
     if resolved_type in {ModelType.SD3, ModelType.SD35}:
         return SD3Sampler(model, model_type=resolved_type)
+    if resolved_type in {ModelType.WUERSTCHEN_2, ModelType.STABLE_CASCADE_1}:
+        return WuerstchenSampler(model, model_type=resolved_type)
+    if resolved_type in {ModelType.PIXART_ALPHA, ModelType.PIXART_SIGMA}:
+        return PixArtSampler(model, model_type=resolved_type)
+    if resolved_type == ModelType.SANA:
+        return SanaSampler(model, model_type=resolved_type)
+    if resolved_type == ModelType.HUNYUAN_VIDEO:
+        return HunyuanVideoSampler(model, model_type=resolved_type)
+    if resolved_type == ModelType.HI_DREAM_FULL:
+        return HiDreamSampler(model, model_type=resolved_type)
     if resolved_type == ModelType.LTX2:
         return LTX2Sampler(model, model_type=resolved_type)
     if resolved_type == ModelType.QWEN:

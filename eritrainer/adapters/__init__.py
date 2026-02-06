@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Mapping
 
 from eritrainer.adapters.base import AdapterProtocol
+from eritrainer.training.lycoris_manager import AdapterConfig as LyCORISAdapterConfig
+from eritrainer.training.lycoris_manager import AdapterType as LyCORISAdapterType
+from eritrainer.training.lycoris_manager import LyCORISManager
 
 
 class AdapterType(str, Enum):
@@ -23,9 +26,32 @@ class BaseAdapter(AdapterProtocol):
     rank: int
     alpha: float
     model_type: str
+    _manager: LyCORISManager | None = field(default=None, init=False, repr=False)
 
-    def apply(self, module):  # pragma: no cover - placeholder
-        return module
+    def _ensure_manager(self) -> LyCORISManager:
+        if self._manager is None:
+            lycoris_type = LyCORISAdapterType(str(self.adapter_type.value))
+            self._manager = LyCORISManager(
+                LyCORISAdapterConfig(
+                    adapter_type=lycoris_type,
+                    rank=int(self.rank),
+                    alpha=float(self.alpha),
+                ),
+                model_type=self.model_type,
+            )
+        return self._manager
+
+    def apply(self, module_or_pipeline):
+        manager = self._ensure_manager()
+        return manager.apply(module_or_pipeline)
+
+    def prepare_optimizer_params(self, lr: float | None = None):
+        manager = self._ensure_manager()
+        return manager.prepare_optimizer_params(lr)
+
+    def save_weights(self, output_path: str, dtype=None):
+        manager = self._ensure_manager()
+        return manager.save_weights(output_path, dtype=dtype)
 
 
 class LoRAAdapter(BaseAdapter):
@@ -48,7 +74,7 @@ class LoConAdapter(BaseAdapter):
     pass
 
 
-ADAPTER_REGISTRY: Dict[AdapterType, type[BaseAdapter]] = {
+ADAPTER_REGISTRY: dict[AdapterType, type[BaseAdapter]] = {
     AdapterType.LORA: LoRAAdapter,
     AdapterType.DORA: DoRAAdapter,
     AdapterType.LOKR: LoKrAdapter,

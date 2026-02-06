@@ -9,9 +9,12 @@ Verifies that EriTrainer has feature parity with SimpleTuner for:
 Run: python -m pytest eritrainer/tests/test_lycoris_parity.py -v
 """
 
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+
 import pytest
-from unittest.mock import MagicMock, patch
-import sys
 
 # Skip if lycoris not installed
 pytest.importorskip("lycoris")
@@ -169,7 +172,7 @@ class TestAdapterModuleSupport:
 
     def test_adapter_detection(self):
         """Test adapter type detection from state dict."""
-        from eritrainer.adapters import detect_adapter_type, AdapterType
+        from eritrainer.adapters import AdapterType, detect_adapter_type
 
         # Test LoKr detection
         lokr_state = {"layer.lokr_w1": None, "layer.lokr_w2": None}
@@ -193,7 +196,7 @@ class TestEMASupport:
 
     def test_ema_module_exists(self):
         """Verify EMA module exists."""
-        from eritrainer.training.ema import EMAModule, EMAModel, EMAMode
+        from eritrainer.training.ema import EMAMode, EMAModel, EMAModule
 
         assert EMAModule is not None
         assert EMAModel is not None
@@ -259,10 +262,10 @@ class TestFeatureParitySummary:
 
     def test_sdxl_parity(self):
         """Confirm SDXL has SimpleTuner parity."""
-        from eritrainer.training.lycoris_manager import DEFAULT_TARGETS
-        from eritrainer.training.losses import snr_weighted_loss
-        from eritrainer.training.ema import EMAModel
         from eritrainer.core.config import NoiseConfig
+        from eritrainer.training.ema import EMAModel
+        from eritrainer.training.losses import snr_weighted_loss
+        from eritrainer.training.lycoris_manager import DEFAULT_TARGETS
 
         # Has target modules
         assert "sdxl" in DEFAULT_TARGETS
@@ -297,6 +300,64 @@ class TestFeatureParitySummary:
         config = AdapterConfig(adapter_type=AdapterType.LOKR, rank=16)
         manager = LyCORISManager(config, model_type="sd3")
         assert manager is not None
+
+
+class TestLyCORISRuntime:
+    """Runtime checks for native LyCORIS manager wiring."""
+
+    def _build_target_module(self):
+        class Transformer2DModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.to_q = nn.Linear(16, 16)
+                self.to_k = nn.Linear(16, 16)
+                self.to_v = nn.Linear(16, 16)
+                self.ff = nn.Sequential(nn.Linear(16, 16), nn.SiLU(), nn.Linear(16, 16))
+
+            def forward(self, x):
+                x = self.to_q(x) + self.to_k(x) + self.to_v(x)
+                return self.ff(x)
+
+        class Wrapper(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.unet = Transformer2DModel()
+
+            def forward(self, x):
+                return self.unet(x)
+
+        return Wrapper()
+
+    def test_lokr_attach_optimizer_and_save(self, tmp_path):
+        from eritrainer.training.lycoris_manager import AdapterConfig, AdapterType, LyCORISManager
+
+        module = self._build_target_module()
+        config = AdapterConfig(
+            adapter_type=AdapterType.LOKR,
+            rank=4,
+            alpha=4.0,
+            factor=2,
+            use_tucker=False,
+            full_matrix=False,
+        )
+        manager = LyCORISManager(config, model_type="sdxl")
+        network = manager.apply(module)
+
+        assert network is not None
+        assert manager.is_attached()
+
+        groups = manager.prepare_optimizer_params(1e-4)
+        assert groups
+        assert isinstance(groups[0], dict)
+        assert "params" in groups[0]
+
+        x = torch.randn(2, 16, requires_grad=True)
+        y = module(x).sum()
+        y.backward()
+
+        out_path = tmp_path / "lokr_test.safetensors"
+        saved = manager.save_weights(out_path)
+        assert Path(saved).exists()
 
 
 if __name__ == "__main__":

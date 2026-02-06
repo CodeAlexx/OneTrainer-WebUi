@@ -4,15 +4,25 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from PIL import Image
-
 from eritrainer.core.interfaces import ModelType
 from eritrainer.sampling.sampler import (
-    SD3Sampler,
-    SDXLSampler,
+    ChromaSampler,
+    FluxFillSampler,
+    HiDreamSampler,
+    HunyuanVideoSampler,
+    PixArtSampler,
     QwenImageEditSampler,
+    SanaSampler,
+    SD3Sampler,
+    SDDepthSampler,
+    SDInpaintingSampler,
+    SDXLInpaintingSampler,
+    SDXLSampler,
+    WuerstchenSampler,
     create_sampler,
 )
+
+from PIL import Image
 
 
 class _DummyPipeline:
@@ -64,6 +74,16 @@ def test_sampler_factory_aliases():
     assert isinstance(create_sampler("sd3.5"), SD3Sampler)
     assert isinstance(create_sampler("sd35"), SD3Sampler)
     assert isinstance(create_sampler("sdxl"), SDXLSampler)
+    assert isinstance(create_sampler("sd15_inpainting"), SDInpaintingSampler)
+    assert isinstance(create_sampler("sd20_depth"), SDDepthSampler)
+    assert isinstance(create_sampler("sdxl_inpainting"), SDXLInpaintingSampler)
+    assert isinstance(create_sampler("flux_fill_dev"), FluxFillSampler)
+    assert isinstance(create_sampler("pixart_sigma"), PixArtSampler)
+    assert isinstance(create_sampler("wuerstchen_2"), WuerstchenSampler)
+    assert isinstance(create_sampler("sana"), SanaSampler)
+    assert isinstance(create_sampler("hunyuan_video"), HunyuanVideoSampler)
+    assert isinstance(create_sampler("hi_dream_full"), HiDreamSampler)
+    assert isinstance(create_sampler("chroma"), ChromaSampler)
     assert isinstance(create_sampler("qwen_image_edit"), QwenImageEditSampler)
 
 
@@ -150,3 +170,29 @@ def test_flux2_klein_prefers_klein_pipeline(monkeypatch, tmp_path):
 
     assert loaded_names
     assert loaded_names[0] == "Flux2KleinPipeline"
+
+
+def test_pixart_sigma_prefers_sigma_pipeline(monkeypatch, tmp_path):
+    model_dir = tmp_path / "pixart_model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    loaded_names: list[str] = []
+
+    def _load_class(name: str):
+        loaded_names.append(name)
+        return _DummyPipeline
+
+    monkeypatch.setattr("eritrainer.sampling.sampler._load_pipeline_class", _load_class)
+
+    sampler = create_sampler(ModelType.PIXART_SIGMA, model={"path": str(model_dir)})
+    sampler.sample(
+        prompt="portrait",
+        height=512,
+        width=512,
+        num_inference_steps=1,
+        guidance_scale=4.0,
+        device="cpu",
+        dtype="float32",
+    )
+
+    assert loaded_names
+    assert loaded_names[0] == "PixArtSigmaPipeline"

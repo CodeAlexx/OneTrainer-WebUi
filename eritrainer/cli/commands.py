@@ -35,6 +35,12 @@ def _to_enum_name(value: str, mapping: dict[str, str], default: str) -> str:
 
 
 MODEL_TYPE_MAP: dict[str, str] = {
+    "flux_dev": "FLUX_DEV_1",
+    "flux_dev_1": "FLUX_DEV_1",
+    "flux_fill_dev": "FLUX_FILL_DEV_1",
+    "flux_fill_dev_1": "FLUX_FILL_DEV_1",
+    "flux_fill": "FLUX_FILL_DEV_1",
+    "flux_schnell": "FLUX_DEV_1",
     "zimage": "Z_IMAGE",
     "z_image": "Z_IMAGE",
     "qwen": "QWEN",
@@ -42,8 +48,25 @@ MODEL_TYPE_MAP: dict[str, str] = {
     "sdxl": "STABLE_DIFFUSION_XL_10_BASE",
     "sdxl_10_base": "STABLE_DIFFUSION_XL_10_BASE",
     "sdxl_base": "STABLE_DIFFUSION_XL_10_BASE",
+    "sdxl_inpainting": "STABLE_DIFFUSION_XL_10_BASE_INPAINTING",
+    "sdxl_inpaint": "STABLE_DIFFUSION_XL_10_BASE_INPAINTING",
     "sd15": "STABLE_DIFFUSION_15",
     "sd_15": "STABLE_DIFFUSION_15",
+    "sd15_inpainting": "STABLE_DIFFUSION_15_INPAINTING",
+    "sd_15_inpainting": "STABLE_DIFFUSION_15_INPAINTING",
+    "sd15_inpaint": "STABLE_DIFFUSION_15_INPAINTING",
+    "sd20": "STABLE_DIFFUSION_20",
+    "sd_20": "STABLE_DIFFUSION_20",
+    "sd20_base": "STABLE_DIFFUSION_20_BASE",
+    "sd_20_base": "STABLE_DIFFUSION_20_BASE",
+    "sd20_inpainting": "STABLE_DIFFUSION_20_INPAINTING",
+    "sd_20_inpainting": "STABLE_DIFFUSION_20_INPAINTING",
+    "sd20_depth": "STABLE_DIFFUSION_20_DEPTH",
+    "sd_20_depth": "STABLE_DIFFUSION_20_DEPTH",
+    "sd21": "STABLE_DIFFUSION_21",
+    "sd_21": "STABLE_DIFFUSION_21",
+    "sd21_base": "STABLE_DIFFUSION_21_BASE",
+    "sd_21_base": "STABLE_DIFFUSION_21_BASE",
     "sd3": "STABLE_DIFFUSION_3",
     "sd_3": "STABLE_DIFFUSION_3",
     "sd35": "STABLE_DIFFUSION_35",
@@ -52,8 +75,21 @@ MODEL_TYPE_MAP: dict[str, str] = {
     "stable_diffusion_3": "STABLE_DIFFUSION_3",
     "stable_diffusion_35": "STABLE_DIFFUSION_35",
     "stable_diffusion_3.5": "STABLE_DIFFUSION_35",
-    "flux2": "FLUX_2",
+    "wuerstchen": "WUERSTCHEN_2",
+    "wuerstchen_2": "WUERSTCHEN_2",
+    "stable_cascade": "STABLE_CASCADE_1",
+    "stable_cascade_1": "STABLE_CASCADE_1",
+    "pixart": "PIXART_ALPHA",
+    "pixart_alpha": "PIXART_ALPHA",
+    "pixart_sigma": "PIXART_SIGMA",
+    "sana": "SANA",
+    "hunyuan_video": "HUNYUAN_VIDEO",
+    "hidream": "HI_DREAM_FULL",
+    "hi_dream_full": "HI_DREAM_FULL",
+    "chroma": "CHROMA_1",
+    "chroma_1": "CHROMA_1",
     "flux_2": "FLUX_2",
+    "flux2": "FLUX_2",
     "flux": "FLUX_2",
     "flux_2_klein": "FLUX_2",
     "flux2_klein": "FLUX_2",
@@ -73,6 +109,10 @@ def _normalize_model_type(value: Any) -> str:
 def _map_model_type(normalized: str) -> str:
     if normalized in MODEL_TYPE_MAP:
         return MODEL_TYPE_MAP[normalized]
+    if normalized.startswith("flux_fill"):
+        return "FLUX_FILL_DEV_1"
+    if normalized.startswith("flux_dev") or normalized == "flux_schnell":
+        return "FLUX_DEV_1"
     if "flux" in normalized:
         return "FLUX_2"
     if normalized.startswith("sd3"):
