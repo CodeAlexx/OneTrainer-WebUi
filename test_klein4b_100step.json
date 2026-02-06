@@ -1,0 +1,48 @@
+{
+  "model_type": "flux_klein",
+  "training_method": "lora",
+  "peft_type": "lora",
+  "base_model": "/home/alex/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-klein-base-4B/snapshots/8c44a2fbef88fae175da65df054db0f901aa9747",
+
+  "max_steps": 100,
+  "batch_size": 1,
+  "gradient_accumulation_steps": 1,
+  "learning_rate": 0.0004,
+  "train_dtype": "bfloat16",
+
+  "concepts": [
+    {
+      "path": "/home/alex/datasets/AlinaAignatova",
+      "caption_file_ext": ".txt",
+      "num_repeats": 1
+    }
+  ],
+
+  "resolution": "1024",
+  "cache_latents": true,
+  "cache_text_embeddings": true,
+
+  "train_device": "cuda",
+  "temp_device": "cpu",
+
+  "optimizer": {
+    "optimizer": "adamw",
+    "weight_decay": 0.01
+  },
+  "lr_scheduler": "constant",
+
+  "lora": {
+    "rank": 16,
+    "alpha": 16.0,
+    "dropout": 0.0
+  },
+
+  "output_dir": "/home/alex/OneTrainer/output/klein4b_100step_test",
+  "save_every": 100,
+  "output_dtype": "float32",
+
+  "sample_every": 25,
+  "sample_prompts": ["a photo of a woman with blonde hair, professional photography"],
+  "gradient_checkpointing": "on",
+  "seed": 42
+}

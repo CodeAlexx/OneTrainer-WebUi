@@ -10,6 +10,7 @@ from eritrainer.sampling.sampler import (
     FluxFillSampler,
     HiDreamSampler,
     HunyuanVideoSampler,
+    LTX2Sampler,
     PixArtSampler,
     QwenImageEditSampler,
     SanaSampler,
@@ -84,6 +85,7 @@ def test_sampler_factory_aliases():
     assert isinstance(create_sampler("hunyuan_video"), HunyuanVideoSampler)
     assert isinstance(create_sampler("hi_dream_full"), HiDreamSampler)
     assert isinstance(create_sampler("chroma"), ChromaSampler)
+    assert isinstance(create_sampler("ltx"), LTX2Sampler)
     assert isinstance(create_sampler("qwen_image_edit"), QwenImageEditSampler)
 
 

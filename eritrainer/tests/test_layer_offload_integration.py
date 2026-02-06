@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import pytest
+from eritrainer.memory.checkpoint_layer import OffloadCheckpointLayer
+from eritrainer.memory.strategy import LayerOffloadStrategy, MemoryConfig
+
 import torch
 import torch.nn as nn
 
-from eritrainer.memory.checkpoint_layer import OffloadCheckpointLayer
-from eritrainer.memory.strategy import LayerOffloadStrategy, MemoryConfig
+import pytest
 
 
 class MockTransformerLayer(nn.Module):
@@ -235,3 +236,32 @@ class TestConductorCUDA:
         offloaded = strategy.conductor.get_offloaded_layers()
         assert len(offloaded) > 0
         strategy.cleanup()
+
+    def test_cuda_layer_reoffload_prevents_accumulation(self):
+        from eritrainer.memory.conductor import LayerOffloadConductor
+
+        model = MockModel(num_layers=6).to("cuda:0")
+        conductor = LayerOffloadConductor(
+            module=model.transformer,
+            train_device=torch.device("cuda:0"),
+            temp_device=torch.device("cpu"),
+            layer_offload_fraction=1.0,
+            offload_activations=True,
+            enable_async=False,
+        )
+        for layer in model.transformer.transformer_blocks:
+            conductor.add_layer(layer)
+
+        call_id = 1
+        x = torch.randn(2, 64, device="cuda:0", requires_grad=True)
+        with conductor.forward_context():
+            peak_loaded = 0
+            for idx, layer in enumerate(model.transformer.transformer_blocks):
+                x_tuple = conductor.before_layer(idx, call_id, (x,))
+                x = x_tuple[0] if isinstance(x_tuple, tuple) else x_tuple
+                x = layer(x)
+                x = conductor.after_layer(idx, call_id, x)
+                peak_loaded = max(peak_loaded, len(conductor.get_loaded_layers()))
+
+        # With immediate re-offload enabled, we should not accumulate the full stack on GPU.
+        assert peak_loaded <= 2

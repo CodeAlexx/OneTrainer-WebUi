@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -76,6 +79,8 @@ _MODEL_ALIASES: dict[str, str] = {
     "chroma": "chroma_1",
 }
 
+_LYCORIS_DISABLED_MODEL_TYPES = {"ltx2"}
+
 
 DEFAULT_TARGETS: dict[str, list[str]] = {
     "zimage": ["attention.to_q", "attention.to_k", "attention.to_v", "feed_forward.w1", "feed_forward.w2"],
@@ -106,7 +111,7 @@ DEFAULT_TARGETS: dict[str, list[str]] = {
     "hunyuan_video": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
     "hi_dream_full": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
     "chroma_1": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
-    "ltx2": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
+    "ltx2": ["to_q", "to_k", "to_v", "to_out.0", "ff.net.0.proj", "ff.net.2"],
     "wuerstchen_2": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
     "stable_cascade_1": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
 }
@@ -213,6 +218,10 @@ class LyCORISManager:
     def __init__(self, config: AdapterConfig, model_type: str) -> None:
         self.config = config
         self.model_type = _normalize_model_type(model_type)
+        if self.model_type in _LYCORIS_DISABLED_MODEL_TYPES:
+            raise ValueError(
+                f"LyCORIS adapters are temporarily disabled for model type '{self.model_type}'."
+            )
         self.target_modules = (
             list(config.target_modules)
             if config.target_modules
@@ -286,6 +295,81 @@ class LyCORISManager:
 
         return kwargs
 
+    @staticmethod
+    def _dedupe(values: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
+        return out
+
+    def _target_preset_path(self) -> Path | None:
+        """
+        Build a LyCORIS preset TOML that scopes adaptation to configured target names.
+
+        The upstream generic `lycoris.create_lycoris()` API only accepts a preset key/path
+        and does not consume `target_modules` directly. We materialize a small preset file
+        and pass its path to ensure strict module targeting.
+        """
+        if not self.target_modules:
+            return None
+
+        module_targets: list[str] = []
+        name_targets: list[str] = []
+        for raw_target in self.target_modules:
+            target = str(raw_target).strip()
+            if not target:
+                continue
+
+            looks_like_class_name = (
+                target[0].isupper()
+                and "." not in target
+                and "*" not in target
+                and "?" not in target
+            )
+            if looks_like_class_name:
+                module_targets.append(target)
+                continue
+
+            if any(ch in target for ch in "*?[]"):
+                name_targets.append(target)
+            else:
+                # Match the leaf/suffix anywhere in full module paths.
+                name_targets.append(f"*{target}")
+
+        module_targets = self._dedupe(module_targets)
+        name_targets = self._dedupe(name_targets)
+        if not module_targets and not name_targets:
+            return None
+
+        preset_payload: dict[str, Any] = {
+            "enable_conv": False,
+            "target_module": module_targets,
+            "target_name": name_targets,
+            "use_fnmatch": True,
+        }
+        preset_key = hashlib.sha1(
+            json.dumps(preset_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        preset_dir = Path(tempfile.gettempdir()) / "eritrainer_lycoris_presets"
+        preset_dir.mkdir(parents=True, exist_ok=True)
+        preset_path = preset_dir / f"{preset_key}.toml"
+
+        if not preset_path.exists():
+            toml_lines = [
+                "enable_conv = false",
+                f"use_fnmatch = {str(bool(preset_payload['use_fnmatch'])).lower()}",
+                f"target_module = {json.dumps(preset_payload['target_module'])}",
+                f"target_name = {json.dumps(preset_payload['target_name'])}",
+                "",
+            ]
+            preset_path.write_text("\n".join(toml_lines), encoding="utf-8")
+
+        return preset_path
+
     def apply(self, model_or_pipeline: Any) -> Any:
         if create_lycoris is None:
             raise RuntimeError("LyCORIS is not installed. Install `lycoris` in the active environment.")
@@ -295,12 +379,21 @@ class LyCORISManager:
             return self._network
 
         self._target_module = target_module
+        network_kwargs = self._network_kwargs()
+        preset_path = self._target_preset_path()
+        if preset_path is not None:
+            network_kwargs["preset"] = str(preset_path)
+            logger.info(
+                "Applying LyCORIS target filter preset (%d targets): %s",
+                len(self.target_modules),
+                preset_path,
+            )
         network = create_lycoris(
             target_module,
             multiplier=float(self.config.multiplier),
             linear_dim=int(self.config.rank),
             linear_alpha=float(self.config.alpha),
-            **self._network_kwargs(),
+            **network_kwargs,
         )
         network.apply_to()
         self._network = network

@@ -38,12 +38,15 @@ class LoraTab:
         components.options_kv(self.scroll_frame, 0, 1, [
             ("LoRA", PeftType.LORA),
             ("LoHa", PeftType.LOHA),
+            ("LoKr", PeftType.LOKR),
             ("OFT v2", PeftType.OFT_2),
         ], self.ui_state, "peft_type", command=self.setup_lora)
 
     def setup_lora(self, peft_type: PeftType):
         if peft_type == PeftType.LOHA:
             name = "LoHa"
+        elif peft_type == PeftType.LOKR:
+            name = "LoKr"
         elif peft_type == PeftType.OFT_2:
             name = "OFT v2"
         else:
@@ -84,17 +87,20 @@ class LoraTab:
                              tooltip="Apply the weight decomposition on the output axis instead of the input axis.")
             components.switch(master, 3, 4, self.ui_state, "lora_decompose_output_axis")
 
-        # LoRA and LoHA shared settings
-        if peft_type == PeftType.LORA or peft_type == PeftType.LOHA:
+        # LoRA, LoHA, and LoKr shared settings
+        if peft_type in {PeftType.LORA, PeftType.LOHA, PeftType.LOKR}:
+            rank_key = "lokr_dim" if peft_type == PeftType.LOKR else "lora_rank"
+            alpha_key = "lokr_alpha" if peft_type == PeftType.LOKR else "lora_alpha"
+            rank_label = "dim" if peft_type == PeftType.LOKR else "rank"
             # rank
-            components.label(master, 1, 0, f"{name} rank",
+            components.label(master, 1, 0, f"{name} {rank_label}",
                             tooltip=f"The rank parameter used when creating a new {name}")
-            components.entry(master, 1, 1, self.ui_state, "lora_rank")
+            components.entry(master, 1, 1, self.ui_state, rank_key)
 
             # alpha
             components.label(master, 2, 0, f"{name} alpha",
                             tooltip=f"The alpha parameter used when creating a new {name}")
-            components.entry(master, 2, 1, self.ui_state, "lora_alpha")
+            components.entry(master, 2, 1, self.ui_state, alpha_key)
 
             # Dropout Percentage
             components.label(master, 3, 0, "Dropout Probability",
@@ -113,6 +119,35 @@ class LoraTab:
             components.label(master, 5, 0, "Bundle Embeddings",
                             tooltip=f"Bundles any additional embeddings into the {name} output file, rather than as separate files")
             components.switch(master, 5, 1, self.ui_state, "bundle_additional_embeddings")
+
+        if peft_type == PeftType.LOKR:
+            components.label(master, 1, 3, "Decompose Both",
+                             tooltip="Enable W1 decomposition when LoKr can decompose both sides.")
+            components.switch(master, 1, 4, self.ui_state, "lokr_decompose_both")
+
+            components.label(master, 2, 3, "Decompose Factor",
+                             tooltip="Factorization target for Kronecker dimensions. -1 chooses automatically.")
+            components.entry(master, 2, 4, self.ui_state, "lokr_decompose_factor")
+
+            components.label(master, 3, 3, "Use Tucker",
+                             tooltip="Enable Tucker decomposition for convolutional weights.")
+            components.switch(master, 3, 4, self.ui_state, "lokr_use_tucker")
+
+            components.label(master, 4, 3, "Full Matrix",
+                             tooltip="Force full-matrix LoKr when rank is large.")
+            components.switch(master, 4, 4, self.ui_state, "lokr_full_matrix")
+
+            components.label(master, 5, 3, "RS-LoRA Scale",
+                             tooltip="Use RS-LoRA scaling (alpha/sqrt(rank)) instead of alpha/rank.")
+            components.switch(master, 5, 4, self.ui_state, "lokr_rs_lora")
+
+            components.label(master, 6, 3, "Weight Decompose",
+                             tooltip="Enable DoRA-style weight decomposition for LoKr.")
+            components.switch(master, 6, 4, self.ui_state, "lokr_weight_decompose")
+
+            components.label(master, 7, 3, "DoRA Output Axis",
+                             tooltip="Apply DoRA decomposition on output axis (only if Weight Decompose is enabled).")
+            components.switch(master, 7, 4, self.ui_state, "lokr_dora_on_output")
 
         # OFTv2
         elif peft_type == PeftType.OFT_2:

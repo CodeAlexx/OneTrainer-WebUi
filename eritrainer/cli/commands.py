@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,246 @@ MODEL_TYPE_MAP: dict[str, str] = {
     "flux2_klein_9b": "FLUX_2",
 }
 
+_ONETRAINER_TO_ERITRAINER_MODEL_TYPE: dict[str, str] = {
+    "FLUX_DEV_1": "flux_dev",
+    "FLUX_FILL_DEV_1": "flux_fill_dev",
+    "FLUX_2": "flux_2",
+    "FLUX_2_KLEIN": "flux_2_klein",
+    "FLUX_2_KLEIN_4B": "flux_2_klein_4b",
+    "FLUX_2_KLEIN_9B": "flux_2_klein_9b",
+    "FLUX_2_KLEIN_4B_BASE": "flux_2_klein_4b_base",
+    "FLUX_2_KLEIN_9B_BASE": "flux_2_klein_9b_base",
+    "Z_IMAGE": "zimage",
+    "QWEN": "qwen",
+    "STABLE_DIFFUSION_15": "sd15",
+    "STABLE_DIFFUSION_XL_10_BASE": "sdxl",
+    "STABLE_DIFFUSION_3": "sd3",
+    "STABLE_DIFFUSION_35": "sd35",
+    "CHROMA_1": "chroma",
+    "HUNYUAN_VIDEO": "hunyuan_video",
+    "HI_DREAM_FULL": "hi_dream_full",
+    "SANA": "sana",
+}
+
+_MODEL_FILE_SUFFIXES = {
+    ".safetensors",
+    ".ckpt",
+    ".pt",
+    ".pth",
+    ".bin",
+    ".gguf",
+}
+
+
+def _normalize_onetrainer_model_type(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip().upper().replace("-", "_")
+    return text
+
+
+def _coerce_ot_dtype(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().upper().replace("-", "_")
+    if normalized in {"BFLOAT16", "BFLOAT_16"}:
+        return "bfloat16"
+    if normalized in {"FLOAT16", "FLOAT_16", "FP16"}:
+        return "float16"
+    if normalized in {"FLOAT32", "FLOAT_32", "FP32"}:
+        return "float32"
+    if normalized in {"INT_8", "INT8", "INT_W8A8", "FLOAT_W8A8"}:
+        return "int8"
+    if normalized in {"FLOAT_8", "FP8", "FLOAT8"}:
+        return "fp8"
+    return None
+
+
+def _coerce_ot_gradient_checkpointing(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "on" if value else "off"
+
+    normalized = str(value).strip().lower()
+    if normalized in {"on", "true", "1"}:
+        return "on"
+    if normalized in {"off", "false", "0"}:
+        return "off"
+    if normalized in {"cpu_offloaded", "cpu"}:
+        return "cpu_offloaded"
+    return None
+
+
+def _collect_concepts_from_onetrainer_config(config: dict[str, Any], source_path: Path) -> list[dict[str, Any]]:
+    concepts = config.get("concepts")
+    if isinstance(concepts, list) and concepts:
+        out: list[dict[str, Any]] = []
+        for concept in concepts:
+            if isinstance(concept, str):
+                out.append({"path": str(Path(concept).expanduser())})
+                continue
+            if not isinstance(concept, dict):
+                continue
+            concept_path = concept.get("path")
+            if concept_path:
+                mapped: dict[str, Any] = {"path": str(Path(str(concept_path)).expanduser())}
+                if "balancing" in concept:
+                    mapped["repeats"] = float(concept["balancing"])
+                elif "num_repeats" in concept:
+                    mapped["num_repeats"] = float(concept["num_repeats"])
+                out.append(mapped)
+        if out:
+            return out
+
+    concept_file_raw = config.get("concept_file_name")
+    if not concept_file_raw:
+        return []
+
+    concept_file = Path(str(concept_file_raw)).expanduser()
+    if not concept_file.is_absolute():
+        concept_file = (source_path.parent / concept_file).resolve()
+    if not concept_file.exists():
+        return []
+
+    with suppress(Exception):
+        loaded = json.loads(concept_file.read_text())
+        if isinstance(loaded, list):
+            out: list[dict[str, Any]] = []
+            for concept in loaded:
+                if not isinstance(concept, dict):
+                    continue
+                concept_path = concept.get("path")
+                if not concept_path:
+                    continue
+                mapped = {"path": str(Path(str(concept_path)).expanduser())}
+                if "balancing" in concept:
+                    mapped["repeats"] = float(concept["balancing"])
+                elif "num_repeats" in concept:
+                    mapped["num_repeats"] = float(concept["num_repeats"])
+                out.append(mapped)
+            return out
+    return []
+
+
+def _normalize_output_dir(output_destination: str, source_path: Path) -> str:
+    candidate = Path(output_destination).expanduser()
+    if candidate.suffix.lower() in _MODEL_FILE_SUFFIXES:
+        candidate = candidate.parent
+    if not str(candidate):
+        candidate = Path("output") / source_path.stem
+    return str(candidate)
+
+
+def _convert_onetrainer_to_eritrainer(config: dict[str, Any], source_path: Path) -> dict[str, Any]:
+    ot_model_type = _normalize_onetrainer_model_type(config.get("model_type"))
+    normalized_model_type = _ONETRAINER_TO_ERITRAINER_MODEL_TYPE.get(ot_model_type, _normalize_model_type(ot_model_type))
+
+    model_path = str(config.get("base_model_name") or config.get("base_model") or config.get("model_path") or "")
+    if not model_path:
+        raise ValueError("Missing model path in OneTrainer config (`base_model_name`/`base_model`/`model_path`).")
+
+    training_method = str(config.get("training_method") or "").strip().lower()
+    peft_type = str(config.get("peft_type") or "lora").strip().lower()
+    adapter_type = "full" if "fine_tune" in training_method else peft_type
+    if adapter_type == "oft_2":
+        adapter_type = "oft"
+
+    if normalized_model_type == "qwen" and (
+        _is_truthy(config.get("custom_conditioning_image")) or _is_truthy(config.get("masked_training"))
+    ):
+        normalized_model_type = "qwen_image_edit"
+
+    output_destination = str(config.get("output_model_destination") or "")
+    output_dir = _normalize_output_dir(output_destination, source_path) if output_destination else str(
+        Path("output") / source_path.stem
+    )
+
+    optimizer_value = config.get("optimizer")
+    if isinstance(optimizer_value, dict):
+        optimizer_name = str(optimizer_value.get("optimizer") or "adamw")
+        weight_decay = float(optimizer_value.get("weight_decay", 0.0))
+    else:
+        optimizer_name = str(optimizer_value or "adamw")
+        weight_decay = float(config.get("weight_decay", 0.0))
+
+    gradient_checkpointing = _coerce_ot_gradient_checkpointing(config.get("gradient_checkpointing"))
+
+    quantization = _coerce_ot_dtype(config.get("quantization"))
+    if quantization is None:
+        transformer_block = config.get("transformer") if isinstance(config.get("transformer"), dict) else {}
+        quantization = _coerce_ot_dtype(transformer_block.get("weight_dtype"))
+
+    train_dtype = _coerce_ot_dtype(config.get("train_dtype"))
+    if train_dtype is None:
+        train_dtype = "bfloat16"
+
+    data_concepts = _collect_concepts_from_onetrainer_config(config, source_path)
+    if not data_concepts:
+        raise ValueError("No concepts found in OneTrainer config; provide `concepts` or a valid `concept_file_name`.")
+
+    converted: dict[str, Any] = {
+        "model_type": normalized_model_type,
+        "model": {
+            "type": normalized_model_type,
+            "path": model_path,
+        },
+        "data": {
+            "concepts": data_concepts,
+            "batch_size": int(config.get("batch_size", 1)),
+            "resolution": int(config.get("resolution", 1024)),
+            "num_workers": int(config.get("dataloader_threads", 1)),
+            "cache_latents": _is_truthy(config.get("latent_caching")) if "latent_caching" in config else True,
+        },
+        "adapter": {
+            "type": adapter_type,
+            "rank": int(config.get("lora_rank", 16)),
+            "alpha": float(config.get("lora_alpha", config.get("lora_rank", 16))),
+            "dropout": float(config.get("dropout_probability", 0.0)),
+        },
+        "memory": {
+            "gradient_checkpointing": gradient_checkpointing or "off",
+            "enable_activation_offloading": _is_truthy(config.get("enable_activation_offloading")),
+            "enable_async_offloading": _is_truthy(config.get("enable_async_offloading")),
+            "layer_offload_fraction": float(config.get("layer_offload_fraction", 0.0)),
+        },
+        "optimizer": {
+            "optimizer": optimizer_name,
+            "weight_decay": weight_decay,
+        },
+        "checkpoint": {
+            "output_dir": output_dir,
+            "save_every": int(config.get("save_every_n_steps") or config.get("save_every") or 0),
+            "save_full_model": True,
+        },
+        "train_device": str(config.get("train_device", "cuda")),
+        "temp_device": str(config.get("temp_device", "cpu")),
+        "train_dtype": train_dtype,
+        "learning_rate": float(config.get("learning_rate", 1e-4)),
+        "gradient_accumulation_steps": int(config.get("gradient_accumulation_steps", 1)),
+        "max_grad_norm": float(config.get("clip_grad_norm", 1.0)),
+        "seed": int(config.get("seed", 42)),
+        "native_diffusion": True,
+    }
+
+    if quantization is not None:
+        converted["memory"]["quantization"] = quantization
+
+    if "max_train_steps" in config:
+        converted["max_steps"] = int(config["max_train_steps"])
+    elif "epochs" in config:
+        # Preserve previous behavior: at least one pass over data if max_steps is not explicitly set.
+        epochs = int(config.get("epochs", 1))
+        concept_count = max(1, len(data_concepts))
+        converted["max_steps"] = max(1, epochs * concept_count)
+
+    if "custom_conditioning_image" in config:
+        converted["custom_conditioning_image"] = str(config["custom_conditioning_image"])
+    if "masked_training" in config:
+        converted["masked_training"] = _is_truthy(config.get("masked_training"))
+
+    return converted
+
 
 def _normalize_model_type(value: Any) -> str:
     if value is None:
@@ -124,11 +365,6 @@ def _is_native_flux2_type(normalized: str) -> bool:
     if not normalized:
         return False
     if normalized in {
-        "flux_2",
-        "flux2",
-        "flux",
-        "flux_2_dev",
-        "flux2_dev",
         "flux_2_klein",
         "flux2_klein",
         "flux_2_klein_4b",
@@ -139,7 +375,91 @@ def _is_native_flux2_type(normalized: str) -> bool:
         "flux_2_klein_9b_base",
     }:
         return True
-    return normalized.startswith("flux_2") or normalized.startswith("flux2")
+    return normalized.startswith(("flux_2_klein", "flux2_klein"))
+
+
+def _extract_model_path(config: dict[str, Any]) -> str | None:
+    model_block = config.get("model")
+    if isinstance(model_block, dict):
+        model_path = model_block.get("path")
+        if model_path:
+            return str(model_path)
+
+    for key in ("base_model", "base_model_name", "transformer_path", "model_path"):
+        value = config.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _should_use_native_flux2_backend(config: dict[str, Any], normalized_model_type: str) -> bool:
+    if _is_native_flux2_type(normalized_model_type):
+        return True
+
+    # Backward compatibility: "flux2"/"flux_2"/"flux_2_dev" were historically
+    # used for Klein checkpoints in EriTrainer presets.
+    if normalized_model_type not in {"flux", "flux2", "flux_2", "flux_2_dev", "flux2_dev"}:
+        return False
+
+    model_path = (_extract_model_path(config) or "").lower()
+    return "klein" in model_path
+
+
+def _is_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_diffusion_opt_in(config: dict[str, Any]) -> bool:
+    # Keep native diffusion behind explicit opt-in while it is still experimental.
+    if _is_truthy(os.environ.get("ERITRAINER_ENABLE_NATIVE_DIFFUSION")):
+        return True
+    return any(
+        _is_truthy(config.get(key))
+        for key in ("native_diffusion", "use_native_diffusion", "experimental_native_diffusion")
+    )
+
+
+def _onetrainer_bridge_opt_in(config: dict[str, Any]) -> bool:
+    if _is_truthy(os.environ.get("ERITRAINER_ENABLE_ONETRAINER_BRIDGE")):
+        return True
+
+    backend = str(config.get("backend") or config.get("execution_backend") or "").strip().lower()
+    return backend in {"onetrainer", "bridge"}
+
+
+def _run_onetrainer_bridge(
+    config: dict[str, Any],
+    *,
+    config_path: Path,
+    steps_override: int | None = None,
+) -> int:
+    if _is_onetrainer_config(config):
+        train_cfg = config
+    else:
+        train_cfg = _convert_eritrainer_to_onetrainer(
+            config,
+            source_path=config_path,
+            steps_override=steps_override,
+        )
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
+        json.dump(train_cfg, tmp, indent=2)
+        tmp_path = tmp.name
+
+    try:
+        cmd = [sys.executable, "scripts/train.py", "--config-path", tmp_path]
+        env = os.environ.copy()
+        env.setdefault("HF_HUB_OFFLINE", "1")
+        env.setdefault("TRANSFORMERS_OFFLINE", "1")
+        env.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+        return subprocess.call(cmd, cwd=str(Path(__file__).resolve().parents[2]), env=env)
+    finally:
+        with suppress(OSError):
+            os.unlink(tmp_path)
 
 
 def _is_structured_config(config: dict[str, Any]) -> bool:
@@ -183,17 +503,14 @@ def _resolve_hf_local_path(model_path: str) -> str:
     # Resolve HF repo id to local cache snapshot path.
     if "/" not in model_path:
         raise FileNotFoundError(
-            f"Model path not found locally: {model_path}. "
-            "Expected a local path or a cached HF repo id."
+            f"Model path not found locally: {model_path}. Expected a local path or a cached HF repo id."
         )
 
     org, name = model_path.split("/", 1)
     cache_root = Path.home() / ".cache" / "huggingface" / "hub"
     repo_dir = cache_root / f"models--{org}--{name}"
     if not repo_dir.exists():
-        raise FileNotFoundError(
-            f"HF cache not found for {model_path}: {repo_dir}"
-        )
+        raise FileNotFoundError(f"HF cache not found for {model_path}: {repo_dir}")
 
     refs_main = repo_dir / "refs" / "main"
     if refs_main.exists():
@@ -265,9 +582,7 @@ def _convert_eritrainer_to_onetrainer(
     adapter_type, adapter_block = _extract_adapter_block(config)
 
     output_dir = (
-        checkpoint_block.get("output_dir")
-        or config.get("output_dir")
-        or str(Path("output") / source_path.stem)
+        checkpoint_block.get("output_dir") or config.get("output_dir") or str(Path("output") / source_path.stem)
     )
     output_dir = str(Path(output_dir).expanduser())
     workspace_dir = str(Path(output_dir) / "workspace")
@@ -281,12 +596,7 @@ def _convert_eritrainer_to_onetrainer(
         "fp32": "FLOAT_32",
     }
     train_dtype = _to_enum_name(
-        str(
-            config.get("train_dtype")
-            or model_block.get("dtype")
-            or config.get("dtype")
-            or "bfloat16"
-        ),
+        str(config.get("train_dtype") or model_block.get("dtype") or config.get("dtype") or "bfloat16"),
         dtype_map,
         "BFLOAT_16",
     )
@@ -304,21 +614,13 @@ def _convert_eritrainer_to_onetrainer(
         "cpu_offloaded": "CPU_OFFLOADED",
     }
     gradient_checkpointing = _to_enum_name(
-        str(
-            memory_block.get("gradient_checkpointing")
-            or config.get("gradient_checkpointing")
-            or "on"
-        ),
+        str(memory_block.get("gradient_checkpointing") or config.get("gradient_checkpointing") or "on"),
         checkpointing_map,
         "ON",
     )
 
     scheduler_name = _to_enum_name(
-        str(
-            scheduler_block.get("scheduler")
-            or config.get("lr_scheduler")
-            or "constant"
-        ),
+        str(scheduler_block.get("scheduler") or config.get("lr_scheduler") or "constant"),
         {
             "constant": "CONSTANT",
             "linear": "LINEAR",
@@ -398,9 +700,7 @@ def _convert_eritrainer_to_onetrainer(
         )
     )
 
-    quantization_dtype = _map_quantization_dtype(
-        memory_block.get("quantization") or config.get("quantization")
-    )
+    quantization_dtype = _map_quantization_dtype(memory_block.get("quantization") or config.get("quantization"))
     if normalized_model_type in {"qwen", "qwen_image_edit"} and quantization_dtype == "INT_8":
         print(
             "Warning: INT_8 quantization relies on bitsandbytes Linear8bitLt. "
@@ -416,10 +716,7 @@ def _convert_eritrainer_to_onetrainer(
     if normalized_model_type in {"qwen", "qwen_image_edit"} and quantization_dtype:
         text_encoder_weight_dtype = quantization_dtype
 
-    cache_text_embeddings = bool(
-        config.get("cache_text_embeddings")
-        or data_block.get("cache_text_embeddings")
-    )
+    cache_text_embeddings = bool(config.get("cache_text_embeddings") or data_block.get("cache_text_embeddings"))
     train_text_encoder = config.get("train_text_encoder")
     if train_text_encoder is None:
         if cache_text_embeddings or normalized_model_type in {"qwen", "qwen_image_edit"}:
@@ -435,14 +732,16 @@ def _convert_eritrainer_to_onetrainer(
         or (normalized_model_type == "qwen_image_edit" and data_block.get("edit_mode"))
     )
     custom_conditioning_image = bool(
-        config.get("custom_conditioning_image")
-        or data_block.get("custom_conditioning_image")
+        config.get("custom_conditioning_image") or data_block.get("custom_conditioning_image")
     )
 
-    dataloader_threads_default = 1 if (
-        normalized_model_type in {"qwen", "qwen_image_edit", "zimage", "z_image"}
-        or "flux" in normalized_model_type
-    ) else 2
+    dataloader_threads_default = (
+        1
+        if (
+            normalized_model_type in {"qwen", "qwen_image_edit", "zimage", "z_image"} or "flux" in normalized_model_type
+        )
+        else 2
+    )
 
     dataloader_threads = int(
         data_block.get("num_workers")
@@ -466,11 +765,7 @@ def _convert_eritrainer_to_onetrainer(
         "output_model_destination": output_dir,
         "workspace_dir": workspace_dir,
         "cache_dir": str(
-            Path(
-                data_block.get("cache_dir")
-                or config.get("cache_dir")
-                or (Path(output_dir) / "cache")
-            ).expanduser()
+            Path(data_block.get("cache_dir") or config.get("cache_dir") or (Path(output_dir) / "cache")).expanduser()
         ),
         "tensorboard": bool(logging_block.get("enable_tensorboard", False)),
         "concepts": concepts_out,
@@ -478,9 +773,7 @@ def _convert_eritrainer_to_onetrainer(
         "batch_size": int(data_block.get("batch_size") or config.get("batch_size") or 1),
         "dataloader_threads": dataloader_threads,
         "gradient_accumulation_steps": int(
-            config.get("gradient_accumulation_steps")
-            or config.get("gradient_accumulation")
-            or 1
+            config.get("gradient_accumulation_steps") or config.get("gradient_accumulation") or 1
         ),
         "learning_rate": float(config.get("learning_rate", 1e-4)),
         "epochs": int(config.get("epochs", 1)),
@@ -498,9 +791,7 @@ def _convert_eritrainer_to_onetrainer(
         ),
         "layer_offload_fraction": float(layer_offload_fraction),
         "latent_caching": bool(
-            data_block.get("cache_latents")
-            if "cache_latents" in data_block
-            else config.get("cache_latents", True)
+            data_block.get("cache_latents") if "cache_latents" in data_block else config.get("cache_latents", True)
         ),
         "learning_rate_scheduler": scheduler_name,
         "optimizer": {
@@ -534,9 +825,7 @@ def _convert_eritrainer_to_onetrainer(
                 "lokr_dim": lokr_dim,
                 "lokr_alpha": lokr_alpha,
                 "lokr_decompose_both": bool(adapter_block.get("decompose_both", False)),
-                "lokr_decompose_factor": int(
-                    adapter_block.get("decompose_factor", adapter_block.get("factor", -1))
-                ),
+                "lokr_decompose_factor": int(adapter_block.get("decompose_factor", adapter_block.get("factor", -1))),
                 "lokr_use_tucker": bool(adapter_block.get("use_tucker", False)),
                 "lokr_full_matrix": bool(adapter_block.get("full_matrix", False)),
                 "lokr_weight_decompose": bool(adapter_block.get("weight_decompose", False)),
@@ -680,15 +969,14 @@ def train_command(args: list[str] | None = None) -> int:
     if not isinstance(cfg, dict):
         raise ValueError("Config root must be a mapping/object")
 
+    if _is_onetrainer_config(cfg):
+        cfg = _convert_onetrainer_to_eritrainer(cfg, source_path=config_path)
+
     normalized_model_type = _normalize_model_type(
-        cfg.get("model_type")
-        or (
-            cfg.get("model", {}).get("type")
-            if isinstance(cfg.get("model"), dict)
-            else None
-        )
+        cfg.get("model_type") or (cfg.get("model", {}).get("type") if isinstance(cfg.get("model"), dict) else None)
     )
-    if not _is_onetrainer_config(cfg) and _is_native_flux2_type(normalized_model_type):
+
+    if _should_use_native_flux2_backend(cfg, normalized_model_type):
         from eritrainer.cli.native_flux2 import run_native_flux2_training
 
         return run_native_flux2_training(
@@ -697,28 +985,24 @@ def train_command(args: list[str] | None = None) -> int:
             steps_override=getattr(ns, "steps", None),
         )
 
-    if _is_onetrainer_config(cfg):
-        train_cfg = cfg
-    else:
-        train_cfg = _convert_eritrainer_to_onetrainer(
+    from eritrainer.cli.native_diffusion import is_native_diffusion_model_type, run_native_diffusion_training
+
+    if is_native_diffusion_model_type(normalized_model_type):
+        return run_native_diffusion_training(
             cfg,
             source_path=config_path,
             steps_override=getattr(ns, "steps", None),
         )
 
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
-        json.dump(train_cfg, tmp, indent=2)
-        tmp_path = tmp.name
+    if _onetrainer_bridge_opt_in(cfg):
+        return _run_onetrainer_bridge(
+            cfg,
+            config_path=config_path,
+            steps_override=getattr(ns, "steps", None),
+        )
 
-    try:
-        cmd = [sys.executable, "scripts/train.py", "--config-path", tmp_path]
-        env = os.environ.copy()
-        env.setdefault("HF_HUB_OFFLINE", "1")
-        env.setdefault("TRANSFORMERS_OFFLINE", "1")
-        env.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-        return subprocess.call(cmd, cwd=str(Path(__file__).resolve().parents[2]), env=env)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+    raise ValueError(
+        "Unsupported model_type for native EriTrainer backend: "
+        f"{normalized_model_type or '<missing>'}. "
+        "Set `backend: onetrainer` (or ERITRAINER_ENABLE_ONETRAINER_BRIDGE=1) only if you explicitly want bridge mode."
+    )

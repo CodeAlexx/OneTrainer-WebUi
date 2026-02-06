@@ -1,0 +1,48 @@
+# ZImage 100-step test with sampling
+model_type: zimage
+
+model:
+  path: /home/alex/.cache/huggingface/hub/models--Tongyi-MAI--Z-Image-Turbo/snapshots/013496ad041be2e9ded1c291c00d8cc4054a6422
+  dtype: bfloat16
+
+adapter:
+  type: lora
+  rank: 16
+  alpha: 16.0
+  dropout: 0.0
+
+data:
+  concepts:
+    - /home/alex/eri2
+  resolution: 1024
+  batch_size: 1
+  cache_dir: /home/alex/OneTrainer/workspace-cache/zimage_100step
+
+checkpoint:
+  output_dir: /home/alex/OneTrainer/output/zimage_100step
+  save_every: 100
+  save_every_unit: step
+
+sample:
+  enabled: true
+  interval: 50
+  interval_unit: step
+  sample_at_start: false
+  sample_at_end: true
+  prompts:
+    - a photo of a woman with blonde hair, professional photography
+  num_inference_steps: 8
+  guidance_scale: 3.5
+  width: 512
+  height: 512
+
+memory:
+  gradient_checkpointing: "cpu_offloaded"
+  layer_offload_fraction: 0.5
+  enable_activation_offloading: true
+
+learning_rate: 0.0004
+epochs: 1
+seed: 42
+
+output_dir: /home/alex/OneTrainer/output/zimage_100step

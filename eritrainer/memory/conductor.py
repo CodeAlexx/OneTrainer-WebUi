@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Self
+
+from eritrainer.memory.sync import torch_gc
 
 import torch
 import torch.nn as nn
-
-from eritrainer.memory.sync import torch_gc
 
 
 def _flatten_tensors(value: Any) -> Iterable[torch.Tensor]:
     if torch.is_tensor(value):
         yield value
         return
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         for item in value:
             yield from _flatten_tensors(item)
         return
@@ -47,16 +48,15 @@ class _LayerState:
 class ForwardContext(AbstractContextManager):
     """Forward/backward context for a single training step."""
 
-    def __init__(self, conductor: "LayerOffloadConductor"):
+    def __init__(self, conductor: LayerOffloadConductor):
         self.conductor = conductor
 
-    def __enter__(self) -> "ForwardContext":
+    def __enter__(self) -> Self:
         self.conductor.start_forward(keep_graph=False)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.conductor.end_step()
-        return None
 
 
 class LayerOffloadConductor:
@@ -155,6 +155,15 @@ class LayerOffloadConductor:
         if not (0 <= layer_index < len(self._layers)):
             return activations
 
+        state = self._layers[layer_index]
+        if self.layer_offload_activated() and self.activation_offload_activated():
+            keep_on_train = self._keep_on_train()
+            # Musubi-style swap: once an offloaded layer finished its work, move it back
+            # immediately so VRAM usage does not accumulate across the whole stack.
+            if layer_index >= keep_on_train and state.on_train_device:
+                state.layer.to(device=self.temp_device, non_blocking=self.enable_async)
+                state.on_train_device = False
+
         if (
             self.activation_offload_activated()
             and activations is not None
@@ -216,7 +225,7 @@ class LayerOffloadConductor:
         }
 
     def _load_layers_for_forward(self) -> None:
-        keep_on_train = max(int(round((1.0 - self.layer_offload_fraction) * len(self._layers))), 1)
+        keep_on_train = self._keep_on_train()
         for idx, state in enumerate(self._layers):
             should_be_loaded = idx < keep_on_train
             if should_be_loaded and not state.on_train_device:
@@ -229,8 +238,15 @@ class LayerOffloadConductor:
     def _offload_deferred_layers(self) -> None:
         if not self.layer_offload_activated():
             return
-        keep_on_train = max(int(round((1.0 - self.layer_offload_fraction) * len(self._layers))), 1)
+        keep_on_train = self._keep_on_train()
         for idx, state in enumerate(self._layers):
             if idx >= keep_on_train and state.on_train_device:
                 state.layer.to(device=self.temp_device, non_blocking=self.enable_async)
                 state.on_train_device = False
+
+    def _keep_on_train(self) -> int:
+        if not self._layers:
+            return 0
+        if self.layer_offload_fraction >= 1.0:
+            return 0
+        return max(int(round((1.0 - self.layer_offload_fraction) * len(self._layers))), 1)

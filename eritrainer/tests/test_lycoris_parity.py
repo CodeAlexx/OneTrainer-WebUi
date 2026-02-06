@@ -359,6 +359,56 @@ class TestLyCORISRuntime:
         saved = manager.save_weights(out_path)
         assert Path(saved).exists()
 
+    def test_target_modules_emit_custom_preset(self, monkeypatch):
+        from eritrainer.training import lycoris_manager as lm
+        from eritrainer.training.lycoris_manager import AdapterConfig, AdapterType, LyCORISManager
+
+        captured: dict[str, object] = {}
+
+        class _DummyNetwork:
+            def apply_to(self):
+                captured["apply_to_called"] = True
+
+        def _fake_create_lycoris(module, **kwargs):
+            captured["module"] = module
+            captured["kwargs"] = kwargs
+            return _DummyNetwork()
+
+        monkeypatch.setattr(lm, "create_lycoris", _fake_create_lycoris)
+
+        config = AdapterConfig(
+            adapter_type=AdapterType.LORA,
+            rank=4,
+            alpha=4.0,
+            target_modules=["attn.to_q", "to_v"],
+        )
+        manager = LyCORISManager(config, model_type="sdxl")
+        target = nn.Linear(8, 8)
+        network = manager.apply(target)
+
+        assert network is not None
+        assert captured.get("apply_to_called") is True
+        kwargs = captured.get("kwargs")
+        assert isinstance(kwargs, dict)
+        assert "preset" in kwargs
+        preset_path = Path(kwargs["preset"])
+        assert preset_path.exists()
+        text = preset_path.read_text(encoding="utf-8")
+        assert "target_name" in text
+        assert "*attn.to_q" in text
+        assert "*to_v" in text
+
+    def test_ltx2_lycoris_disabled(self):
+        from eritrainer.training.lycoris_manager import AdapterConfig, AdapterType, LyCORISManager
+
+        config = AdapterConfig(
+            adapter_type=AdapterType.LORA,
+            rank=4,
+            alpha=4.0,
+        )
+        with pytest.raises(ValueError, match="disabled"):
+            LyCORISManager(config, model_type="ltx2")
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

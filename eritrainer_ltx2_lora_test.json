@@ -1,0 +1,61 @@
+{
+  "model_type": "ltx2",
+  "training_method": "lora",
+  "peft_type": "lora",
+
+  "use_safetensors": true,
+  "transformer_path": "/home/alex/eriui/comfyui/ComfyUI/models/diffusion_models/ltx-2-19b-dev-fp8.safetensors",
+  "text_encoder_path": "/home/alex/models/gemma-3-12b-it",
+
+  "max_steps": 20,
+  "batch_size": 1,
+  "gradient_accumulation_steps": 1,
+  "learning_rate": 0.0004,
+  "train_dtype": "float16",
+
+  "concepts": [
+    {
+      "path": "/home/alex/disney/videos",
+      "num_repeats": 1
+    }
+  ],
+
+  "num_frames": 25,
+  "resolution": "512",
+  "cache_latents": true,
+  "cache_text_embeddings": true,
+
+  "train_device": "cuda",
+  "temp_device": "cpu",
+
+  "optimizer": {
+    "optimizer": "adamw",
+    "weight_decay": 0.01
+  },
+  "lr_scheduler": "constant",
+
+  "lora": {
+    "rank": 16,
+    "alpha": 16.0,
+    "dropout": 0.0,
+    "target_modules": ["to_q", "to_k", "to_v", "to_out.0"]
+  },
+
+  "output_dir": "/home/alex/OneTrainer/output/ltx2_lora_test",
+  "save_every": 999999,
+  "output_dtype": "float16",
+
+  "sample_every": 999999,
+  "gradient_checkpointing": "on",
+  "enable_activation_offloading": true,
+  "layer_offload_fraction": 0.85,
+  "blocks_to_swap": 10,
+  "deferred_transformer_loading": true,
+  "use_experimental_memory_manager": true,
+  "quantize_text_encoder": true,
+  "text_encoder_quantization": "int8",
+  "clip_grad_norm": 1.0,
+  "ema_mode": "off",
+  "seed": 42,
+  "cache_dir": "/home/alex/OneTrainer/workspace-cache/ltx2_test"
+}

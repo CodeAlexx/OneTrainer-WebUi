@@ -822,6 +822,10 @@ class GenericTrainer(BaseTrainer):
                 train_progress.next_step(self.config.batch_size)
                 self.callbacks.on_update_train_progress(train_progress, current_epoch_length, self.config.epochs)
 
+                if self.config.max_train_steps is not None and self.config.max_train_steps > 0:
+                    if train_progress.global_step >= self.config.max_train_steps:
+                        return
+
                 if self.commands.get_stop_command():
                     return
 

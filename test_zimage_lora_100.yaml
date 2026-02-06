@@ -1,0 +1,60 @@
+# EriTrainer Z-Image LoRA 100-step Test
+# Dataset: eri2 (118 images)
+
+model_type: zimage
+
+model:
+  path: /home/alex/.cache/huggingface/hub/models--Tongyi-MAI--Z-Image-Turbo/snapshots/78771b7e11b922c868dd766476bda1f4fc6bfc96
+  dtype: bfloat16
+
+adapter:
+  type: lora
+  rank: 16
+  alpha: 16.0
+  dropout: 0.0
+  target_modules: []
+
+memory:
+  strategy: noop
+  gradient_checkpointing: "cpu_offloaded"
+  layer_offload_fraction: 0.0
+
+data:
+  concepts:
+    - /home/alex/eri2
+  cache_dir: /home/alex/OneTrainer/workspace/zimage_100_cache
+  resolution: 1024
+  batch_size: 1
+  num_workers: 4
+
+sample:
+  enabled: true
+  interval: 50
+  interval_unit: step
+  prompts:
+    - "a beautiful woman, photorealistic portrait"
+  seeds:
+    - 42
+  num_inference_steps: 28
+  guidance_scale: 3.5
+  width: 1024
+  height: 1024
+
+checkpoint:
+  save_every_n_steps: 100
+  save_on_epoch_end: false
+  keep_last_n: 2
+
+logging:
+  enable_tensorboard: false
+  enable_wandb: false
+  log_interval: 10
+
+learning_rate: 1.0e-4
+epochs: 10
+max_steps: 100
+gradient_accumulation: 1
+
+output_dir: /home/alex/OneTrainer/output/zimage_lora_100
+
+seed: 42

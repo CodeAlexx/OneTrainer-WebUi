@@ -11,18 +11,112 @@ Verifies that EriTrainer's LTX2 implementation matches SimpleTuner's:
 Run: python -m eritrainer.tests.test_ltx2_parity
 """
 
-import torch
-import torch.nn as nn
-from typing import Tuple
 
 # Import our implementations
 from eritrainer.models.ltx2 import (
+    LTX2Model,
+    adjust_video_frames,
     normalize_ltx2_latents,
     pack_ltx2_latents,
     unpack_ltx2_latents,
-    adjust_video_frames,
-    LTX2Model,
 )
+
+import torch
+
+
+def test_ltx_load_pipeline_accepts_single_transformer_with_component_overrides(monkeypatch, tmp_path):
+    """Single-file transformer path should route through split bundle assembly."""
+
+    transformer_path = tmp_path / "ltx.safetensors"
+    transformer_path.write_bytes(b"weights")
+    template_path = tmp_path / "template"
+    template_path.mkdir(parents=True, exist_ok=True)
+
+    calls: dict[str, object] = {}
+
+    def _fake_find_template(explicit_template):
+        calls["template_hint"] = explicit_template
+        return template_path
+
+    def _fake_build_bundle(*, primary_model_path, template_root, component_paths, dtype):
+        calls["primary_model_path"] = primary_model_path
+        calls["template_root"] = template_root
+        calls["component_paths"] = component_paths
+        calls["dtype"] = dtype
+
+        class _Pipeline:
+            def __init__(self) -> None:
+                self.device = None
+
+            def to(self, device):
+                self.device = device
+                return self
+
+        return _Pipeline()
+
+    monkeypatch.setattr("eritrainer.models.ltx2._find_ltx_template_root", _fake_find_template)
+    monkeypatch.setattr("eritrainer.models.ltx2._build_ltx_bundle", _fake_build_bundle)
+
+    model = LTX2Model()
+    pipeline = model.load_pipeline(
+        str(transformer_path),
+        torch.float32,
+        train_device=torch.device("cpu"),
+        vae_path="/custom/vae",
+        ltx_template_path=str(template_path),
+    )
+
+    assert calls["primary_model_path"] == transformer_path
+    assert calls["template_root"] == template_path
+    assert calls["component_paths"]["vae"] == "/custom/vae"
+    assert calls["dtype"] == torch.float32
+    assert pipeline.device == "cpu"
+
+
+def test_ltx_load_pipeline_infers_split_component_roots(monkeypatch, tmp_path):
+    """When using .../diffusion_models/file.safetensors, sibling VAE/clip roots are inferred."""
+
+    models_root = tmp_path / "Models"
+    diffusion_root = models_root / "diffusion_models"
+    diffusion_root.mkdir(parents=True, exist_ok=True)
+    transformer_path = diffusion_root / "ltx-2-19b-dev-fp8.safetensors"
+    transformer_path.write_bytes(b"weights")
+    (models_root / "VAE").mkdir()
+    (models_root / "clip").mkdir()
+
+    template_path = tmp_path / "template"
+    template_path.mkdir(parents=True, exist_ok=True)
+
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "eritrainer.models.ltx2._find_ltx_template_root",
+        lambda _explicit_template: template_path,
+    )
+
+    def _fake_build_bundle(*, primary_model_path, template_root, component_paths, dtype):
+        del primary_model_path, template_root, dtype
+        calls["component_paths"] = component_paths
+
+        class _Pipeline:
+            def to(self, _device):
+                return self
+
+        return _Pipeline()
+
+    monkeypatch.setattr("eritrainer.models.ltx2._build_ltx_bundle", _fake_build_bundle)
+
+    model = LTX2Model()
+    model.load_pipeline(
+        str(transformer_path),
+        torch.float32,
+        train_device=torch.device("cpu"),
+    )
+
+    component_paths = calls["component_paths"]
+    assert component_paths["vae"] == str(models_root / "VAE")
+    assert component_paths["text_encoder"] == str(models_root / "clip")
+    assert component_paths["tokenizer"] == str(models_root / "clip")
 
 
 def test_normalize_latents():
@@ -289,9 +383,37 @@ def test_normalize_with_nonzero_mean():
 
     # Should be approximately 1.0 (2 - 1 = 1)
     assert torch.allclose(normalized.float(), torch.ones_like(normalized), atol=1e-5), \
-        f"Normalization with mean shift failed"
+        "Normalization with mean shift failed"
 
     print("  ✅ Non-zero mean normalization PASSED")
+
+
+def test_ltx_prompt_max_length_respects_tokenizer_limit():
+    """Test LTX prompt max length caps at 226 and respects tokenizer limit."""
+    print("\n=== Test: Prompt Max Length ===")
+
+    class DummyPipeline:
+        def __init__(self, model_max_length: int) -> None:
+            self.tokenizer = type("Tokenizer", (), {"model_max_length": model_max_length})()
+            self.max_sequence_length_seen = None
+
+        def encode_prompt(self, **kwargs):
+            self.max_sequence_length_seen = kwargs.get("max_sequence_length")
+            prompt_embeds = torch.randn(1, 4, 8)
+            prompt_mask = torch.ones(1, 4, dtype=torch.long)
+            return prompt_embeds, prompt_mask
+
+    model = LTX2Model()
+
+    pipeline_large = DummyPipeline(model_max_length=512)
+    model.encode_prompt_features(pipeline_large, "test", device=torch.device("cpu"))
+    assert pipeline_large.max_sequence_length_seen == 226
+
+    pipeline_small = DummyPipeline(model_max_length=128)
+    model.encode_prompt_features(pipeline_small, "test", device=torch.device("cpu"))
+    assert pipeline_small.max_sequence_length_seen == 128
+
+    print("  ✅ Prompt max length PASSED")
 
 
 def run_all_tests():
@@ -309,6 +431,7 @@ def run_all_tests():
     test_pack_unpack_specific_shapes()
     test_normalize_denormalize_roundtrip()
     test_normalize_with_nonzero_mean()
+    test_ltx_prompt_max_length_respects_tokenizer_limit()
 
     print("\n" + "=" * 60)
     print("All LTX2 parity tests PASSED! ✅")

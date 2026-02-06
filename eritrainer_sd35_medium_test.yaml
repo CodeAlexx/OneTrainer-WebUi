@@ -1,0 +1,36 @@
+# SD3.5 Medium Test - 50 steps
+model_type: sd3.5
+
+model:
+  path: stabilityai/stable-diffusion-3.5-medium
+  dtype: bfloat16
+
+data:
+  concepts:
+    - /home/alex/eri2
+  resolution: 1024
+  batch_size: 1
+  caption_source: txt
+
+adapter:
+  type: lora
+  rank: 16
+  alpha: 16
+  target_modules:
+    - transformer
+
+optimizer:
+  optimizer: adamw
+
+scheduler:
+  scheduler: constant
+
+learning_rate: 0.0001
+epochs: 1
+gradient_accumulation: 1
+
+checkpoint:
+  save_every: 50
+  save_every_unit: step
+  output_dir: output/sd35_test
+seed: 42

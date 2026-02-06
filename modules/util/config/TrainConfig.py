@@ -408,6 +408,7 @@ class TrainConfig(BaseConfig):
     learning_rate_cycles: float
     learning_rate_min_factor: float
     epochs: int
+    max_train_steps: int | None
     batch_size: int
     gradient_accumulation_steps: int
     ema: EMAMode
@@ -526,6 +527,17 @@ class TrainConfig(BaseConfig):
     lora_decompose_output_axis: bool
     lora_weight_dtype: DataType
     bundle_additional_embeddings: bool
+    # lokr
+    lokr_dim: int
+    lokr_alpha: float
+    lokr_factor: int
+    lokr_decompose_factor: int
+    lokr_decompose_both: bool
+    lokr_use_tucker: bool
+    lokr_weight_decompose: bool
+    lokr_dora_on_output: bool
+    lokr_rs_lora: bool
+    lokr_full_matrix: bool
 
     # oft
     oft_block_size: int
@@ -991,6 +1003,7 @@ class TrainConfig(BaseConfig):
         data.append(("learning_rate_cycles", 1.0, float, False))
         data.append(("learning_rate_min_factor", 0.0, float, False))
         data.append(("epochs", 100, int, False))
+        data.append(("max_train_steps", None, int, True))
         data.append(("batch_size", 1, int, False))
         data.append(("gradient_accumulation_steps", 1, int, False))
         data.append(("ema", EMAMode.OFF, EMAMode, False))
@@ -1155,6 +1168,18 @@ class TrainConfig(BaseConfig):
         data.append(("lora_decompose_output_axis", False, bool, False))
         data.append(("lora_weight_dtype", DataType.FLOAT_32, DataType, False))
         data.append(("bundle_additional_embeddings", True, bool, False))
+
+        # lokr
+        data.append(("lokr_dim", 16, int, False))
+        data.append(("lokr_alpha", 16.0, float, False))
+        data.append(("lokr_factor", -1, int, False))
+        data.append(("lokr_decompose_factor", -1, int, False))
+        data.append(("lokr_decompose_both", False, bool, False))
+        data.append(("lokr_use_tucker", False, bool, False))
+        data.append(("lokr_weight_decompose", False, bool, False))
+        data.append(("lokr_dora_on_output", True, bool, False))
+        data.append(("lokr_rs_lora", False, bool, False))
+        data.append(("lokr_full_matrix", False, bool, False))
 
         # oft
         data.append(("oft_block_size", 32, int, False))

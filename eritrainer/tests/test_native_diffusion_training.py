@@ -1,0 +1,160 @@
+"""Tests for native non-bridge diffusion training helpers."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+from eritrainer.cli.native_diffusion import (
+    _build_video_training_pairs,
+    _collect_ltx_component_paths,
+    _load_media_tensor,
+    _normalize_quantization_mode,
+    _qwen_pack_latents,
+    _qwen_unpack_latents,
+    _resolve_ltx_video_frame_count,
+    is_native_diffusion_model_type,
+)
+
+import torch
+
+import numpy as np
+
+
+def test_native_diffusion_model_type_aliases():
+    assert is_native_diffusion_model_type("flux")
+    assert is_native_diffusion_model_type("flux2")
+    assert is_native_diffusion_model_type("z_image")
+    assert is_native_diffusion_model_type("qwen")
+    assert is_native_diffusion_model_type("qwen_image_edit")
+    assert is_native_diffusion_model_type("ltx")
+    assert is_native_diffusion_model_type("ltx2")
+    assert is_native_diffusion_model_type("sdxl")
+    assert is_native_diffusion_model_type("sd_15")
+    assert is_native_diffusion_model_type("sd3.5")
+    assert not is_native_diffusion_model_type("flux_2_klein_4b")
+
+
+def test_build_video_training_pairs(tmp_path):
+    concept_dir = tmp_path / "videos"
+    concept_dir.mkdir(parents=True, exist_ok=True)
+
+    video_path = concept_dir / "sample.mp4"
+    caption_path = concept_dir / "sample.txt"
+    video_path.write_bytes(b"not-a-real-video")
+    caption_path.write_text("video caption", encoding="utf-8")
+
+    cfg = {
+        "concepts": [{"path": str(concept_dir)}],
+    }
+    pairs = _build_video_training_pairs(cfg)
+
+    assert len(pairs) == 1
+    assert pairs[0][0] == video_path
+    assert pairs[0][1] == "video caption"
+
+
+def test_qwen_pack_unpack_round_trip():
+    latents = torch.randn(2, 16, 1, 32, 32)
+    packed = _qwen_pack_latents(latents)
+    unpacked = _qwen_unpack_latents(packed, 32, 32)
+
+    assert packed.shape == (2, 256, 64)
+    assert unpacked.shape == latents.shape
+    assert torch.allclose(unpacked, latents, atol=1e-5)
+
+
+def test_native_quantization_aliases():
+    assert _normalize_quantization_mode(None) is None
+    assert _normalize_quantization_mode("off") is None
+    assert _normalize_quantization_mode("INT_8") == "int8"
+    assert _normalize_quantization_mode("int_w8a8") == "int8"
+    assert _normalize_quantization_mode("w8a8_int") == "int8"
+    assert _normalize_quantization_mode("fp8") == "fp8"
+
+
+def test_collect_ltx_component_paths_prefers_model_block_paths():
+    config = {
+        "vae_path": "/global/vae",
+        "text_encoder_path": "/global/text",
+        "ltx_template_path": "/global/template",
+    }
+    model_block = {
+        "vae_path": "/model/vae",
+        "text_encoder_path": "/model/text",
+        "tokenizer_path": "/model/tokenizer",
+    }
+
+    component_paths, template_path = _collect_ltx_component_paths(config, model_block)
+    assert component_paths["vae"] == "/model/vae"
+    assert component_paths["text_encoder"] == "/model/text"
+    assert component_paths["tokenizer"] == "/model/tokenizer"
+    assert template_path == "/global/template"
+
+
+def test_collect_ltx_component_paths_reads_top_level_aliases():
+    config = {
+        "transformer_path": "~/models/ltx.safetensors",
+        "clip_path": "~/models/clip",
+        "vae": "~/models/VAE",
+        "scheduler_dir": "~/models/scheduler",
+        "template_path": "~/models/LTX-Video-0.9.7-dev",
+    }
+
+    component_paths, template_path = _collect_ltx_component_paths(config, {})
+    assert component_paths["transformer"].endswith("/models/ltx.safetensors")
+    assert component_paths["text_encoder"].endswith("/models/clip")
+    assert component_paths["vae"].endswith("/models/VAE")
+    assert component_paths["scheduler"].endswith("/models/scheduler")
+    assert template_path and template_path.endswith("/models/LTX-Video-0.9.7-dev")
+
+
+def test_resolve_ltx_video_frame_count_adjusts_to_valid_stride():
+    assert _resolve_ltx_video_frame_count({"frames": 10}, {}) == 9
+    assert _resolve_ltx_video_frame_count({"frames": 17}, {}) == 17
+    assert _resolve_ltx_video_frame_count({}, {}) == 9
+
+
+def test_load_media_tensor_repeats_image_for_ltx_video_mode(monkeypatch):
+    base = torch.ones(3, 4, 4, dtype=torch.float32)
+
+    monkeypatch.setattr(
+        "eritrainer.cli.native_diffusion._load_image_tensor",
+        lambda *_args, **_kwargs: base.clone(),
+    )
+
+    loaded = _load_media_tensor(
+        Path("sample.png"),
+        resolution=4,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+        allow_video=True,
+        video_frame_count=9,
+    )
+    assert loaded.shape == (3, 9, 4, 4)
+    assert torch.allclose(loaded[:, 0], base)
+    assert torch.allclose(loaded[:, -1], base)
+
+
+def test_load_media_tensor_decodes_and_pads_video_frames(monkeypatch):
+    frame_a = np.zeros((2, 2, 3), dtype=np.uint8)
+    frame_b = np.full((2, 2, 3), 255, dtype=np.uint8)
+    raw = frame_a.tobytes() + frame_b.tobytes()
+
+    monkeypatch.setattr(
+        "eritrainer.cli.native_diffusion.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=raw, stderr=b""),
+    )
+
+    loaded = _load_media_tensor(
+        Path("clip.mp4"),
+        resolution=2,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+        allow_video=True,
+        video_frame_count=5,
+    )
+    assert loaded.shape == (3, 5, 2, 2)
+    assert torch.allclose(loaded[:, 0], torch.full((3, 2, 2), -1.0))
+    assert torch.allclose(loaded[:, 1], torch.full((3, 2, 2), 1.0))
+    assert torch.allclose(loaded[:, 4], loaded[:, 1])

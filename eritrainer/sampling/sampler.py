@@ -75,6 +75,9 @@ _MODEL_TYPE_ALIASES: dict[str, ModelType] = {
     "chroma": ModelType.CHROMA_1,
     "chroma_1": ModelType.CHROMA_1,
     "ltx2": ModelType.LTX2,
+    "ltx": ModelType.LTX2,
+    "ltx_video": ModelType.LTX2,
+    "ltxvideo": ModelType.LTX2,
     "qwen": ModelType.QWEN,
     "qwen_image_edit": ModelType.QWEN_IMAGE_EDIT,
 }

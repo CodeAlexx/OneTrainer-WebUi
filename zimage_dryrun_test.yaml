@@ -1,0 +1,53 @@
+# Z-Image Dry-run Test for Hardening Verification
+model_type: z_image
+training_method: lora
+
+# Safetensors model loading (NO downloads ever)
+use_safetensors: true
+transformer_path: /home/alex/.cache/huggingface/hub/models--ostris--Z-Image-De-Turbo/snapshots/9da355082d6374634080361054e712a08cc54af1/z_image_de_turbo_v1_bf16.safetensors
+vae_path: /home/alex/eriui/comfyui/ComfyUI/models/vae/ae.safetensors
+text_encoder_path: /home/alex/eriui/comfyui/ComfyUI/models/clip/qwen_3_4b.safetensors
+
+# No turbo adapter needed
+turbo_adapter_path: ""
+
+# Training params - 1 step test
+max_steps: 1
+batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 0.0001
+train_dtype: bfloat16
+
+# Data (Using existing dataset verified to work)
+concepts:
+  - path: /home/alex/datasets/liza_fresh
+    num_repeats: 1
+
+resolution: "1024"
+cache_latents: true
+cache_text_embeddings: true
+
+# Devices
+train_device: cuda
+temp_device: cpu
+
+# Optimizer
+optimizer:
+  optimizer: adamw
+  weight_decay: 0.01
+
+# LoRA
+lora:
+  rank: 16
+  alpha: 16.0
+  target_modules: ["to_q", "to_k", "to_v", "to_out.0"]
+
+# Output
+output_dir: /home/alex/OneTrainer/output/zimage_hardening_test
+save_every: 0
+sample_every: 0
+
+# Hardening Verification Settings
+gradient_checkpointing: "on"
+blocks_to_swap: 8
+use_experimental_memory_manager: true

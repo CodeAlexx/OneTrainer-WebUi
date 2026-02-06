@@ -210,6 +210,41 @@ class PeftBase(nn.Module):
         return Dummy
 
 
+def _factorize_dim(dimension: int, factor: int) -> tuple[int, int]:
+    if factor > 0 and (dimension % factor) == 0:
+        m = factor
+        n = dimension // factor
+        if m > n:
+            n, m = m, n
+        return m, n
+    if factor < 0:
+        factor = dimension
+    m, n = 1, dimension
+    length = m + n
+    while m < n:
+        new_m = m + 1
+        while dimension % new_m != 0:
+            new_m += 1
+        new_n = dimension // new_m
+        if new_m + new_n > length or new_m > factor:
+            break
+        m, n = new_m, new_n
+        length = m + n
+    if m > n:
+        n, m = m, n
+    return m, n
+
+
+def _make_kron(w1: Tensor, w2: Tensor) -> Tensor:
+    for _ in range(w2.dim() - w1.dim()):
+        w1 = w1.unsqueeze(-1)
+    return torch.kron(w1, w2.contiguous())
+
+
+def _rebuild_tucker(t: Tensor, wa: Tensor, wb: Tensor) -> Tensor:
+    return torch.einsum("i j ..., i p, j r -> p r ...", t, wa, wb)
+
+
 class LoHaModule(PeftBase):
     """Implementation of LoHa from Lycoris.
 
@@ -274,6 +309,284 @@ class LoHaModule(PeftBase):
                               self.dropout(self.hada_w2_a))
         W = (W1 * W2) * (self.alpha / self.rank)
         return self.orig_forward(x) + self.op(x, W, bias=None, **self.layer_kwargs)
+
+    def apply_to_module(self):
+        # TODO
+        pass
+
+    def extract_from_module(self, base_module: nn.Module):
+        # TODO
+        pass
+
+
+class LoKrModule(PeftBase):
+    rank: int
+    dropout: Dropout
+    alpha: Tensor
+
+    lokr_w1: Tensor | None
+    lokr_w1_a: Tensor | None
+    lokr_w1_b: Tensor | None
+    lokr_w2: Tensor | None
+    lokr_w2_a: Tensor | None
+    lokr_w2_b: Tensor | None
+    lokr_t2: Tensor | None
+
+    use_w1: bool
+    use_w2: bool
+    tucker: bool
+    factor: int
+    decompose_both: bool
+    use_tucker: bool
+    full_matrix: bool
+    weight_decompose: bool
+    dora_on_output: bool
+    rs_lora: bool
+    norm_epsilon: bool
+    dora_scale: Tensor | None
+    dora_num_dims: int
+    train_device: torch.device | None
+
+    shape_groups: tuple[tuple[int, int], tuple[int, int]]
+    kernel_size: tuple[int, ...]
+
+    def __init__(
+        self,
+        prefix: str,
+        orig_module: nn.Module | None,
+        rank: int,
+        alpha: float,
+        *,
+        factor: int = -1,
+        decompose_both: bool = False,
+        use_tucker: bool = False,
+        full_matrix: bool = False,
+        weight_decompose: bool = False,
+        dora_on_output: bool = True,
+        rs_lora: bool = False,
+        norm_epsilon: bool = False,
+        train_device: torch.device | None = None,
+    ):
+        super().__init__(prefix, orig_module)
+        self.rank = rank
+        self.dropout = Dropout(0)
+        self.register_buffer("alpha", torch.tensor(alpha))
+
+        self.factor = factor
+        self.decompose_both = decompose_both
+        self.use_tucker = use_tucker
+        self.full_matrix = full_matrix
+        self.weight_decompose = weight_decompose
+        self.dora_on_output = dora_on_output
+        self.rs_lora = rs_lora
+        self.norm_epsilon = norm_epsilon
+        self.train_device = train_device
+
+        self.use_w1 = False
+        self.use_w2 = False
+        self.tucker = False
+
+        self.lokr_w1 = None
+        self.lokr_w1_a = None
+        self.lokr_w1_b = None
+        self.lokr_w2 = None
+        self.lokr_w2_a = None
+        self.lokr_w2_b = None
+        self.lokr_t2 = None
+        self.dora_scale = None
+        self.dora_num_dims = 0
+        self.shape_groups = ((1, 1), (1, 1))
+        self.kernel_size = ()
+
+        if orig_module is not None:
+            self.initialize_weights()
+            self.alpha = self.alpha.to(orig_module.weight.device)
+        self.alpha.requires_grad_(False)
+
+    def initialize_weights(self):
+        self._initialized = True
+        device = self.orig_module.weight.device
+
+        if isinstance(self.orig_module, nn.Conv2d):
+            out_dim, in_dim, *k_size = self.orig_module.weight.shape
+            self.kernel_size = tuple(k_size)
+            out_l, out_k = _factorize_dim(out_dim, self.factor)
+            in_m, in_n = _factorize_dim(in_dim, self.factor)
+            self.shape_groups = ((out_l, out_k), (in_m, in_n))
+
+            self.tucker = self.use_tucker and any(k != 1 for k in self.kernel_size)
+            if self.decompose_both and self.rank < max(out_l, in_m) / 2 and not self.full_matrix:
+                self.lokr_w1_a = nn.Parameter(torch.empty(out_l, self.rank, device=device))
+                self.lokr_w1_b = nn.Parameter(torch.empty(self.rank, in_m, device=device))
+            else:
+                self.use_w1 = True
+                self.lokr_w1 = nn.Parameter(torch.empty(out_l, in_m, device=device))
+
+            if self.rank >= max(out_k, in_n) / 2 or self.full_matrix:
+                self.use_w2 = True
+                self.lokr_w2 = nn.Parameter(torch.empty(out_k, in_n, *self.kernel_size, device=device))
+            elif self.tucker:
+                self.lokr_t2 = nn.Parameter(torch.empty(self.rank, self.rank, *self.kernel_size, device=device))
+                self.lokr_w2_a = nn.Parameter(torch.empty(self.rank, out_k, device=device))
+                self.lokr_w2_b = nn.Parameter(torch.empty(self.rank, in_n, device=device))
+            else:
+                self.lokr_w2_a = nn.Parameter(torch.empty(out_k, self.rank, device=device))
+                self.lokr_w2_b = nn.Parameter(
+                    torch.empty(self.rank, in_n * math.prod(self.kernel_size), device=device)
+                )
+        else:
+            assert isinstance(self.orig_module, nn.Linear)
+            out_dim, in_dim = self.orig_module.weight.shape
+            out_l, out_k = _factorize_dim(out_dim, self.factor)
+            in_m, in_n = _factorize_dim(in_dim, self.factor)
+            self.shape_groups = ((out_l, out_k), (in_m, in_n))
+
+            if self.decompose_both and self.rank < max(out_l, in_m) / 2 and not self.full_matrix:
+                self.lokr_w1_a = nn.Parameter(torch.empty(out_l, self.rank, device=device))
+                self.lokr_w1_b = nn.Parameter(torch.empty(self.rank, in_m, device=device))
+            else:
+                self.use_w1 = True
+                self.lokr_w1 = nn.Parameter(torch.empty(out_l, in_m, device=device))
+
+            if self.rank < max(out_k, in_n) / 2 and not self.full_matrix:
+                self.lokr_w2_a = nn.Parameter(torch.empty(out_k, self.rank, device=device))
+                self.lokr_w2_b = nn.Parameter(torch.empty(self.rank, in_n, device=device))
+            else:
+                self.use_w2 = True
+                self.lokr_w2 = nn.Parameter(torch.empty(out_k, in_n, device=device))
+
+        if self.use_w2:
+            nn.init.constant_(self.lokr_w2, 0)
+        else:
+            if self.tucker:
+                nn.init.kaiming_uniform_(self.lokr_t2, a=math.sqrt(5))
+            nn.init.kaiming_uniform_(self.lokr_w2_a, a=math.sqrt(5))
+            nn.init.constant_(self.lokr_w2_b, 0)
+
+        if self.use_w1:
+            nn.init.kaiming_uniform_(self.lokr_w1, a=math.sqrt(5))
+        else:
+            nn.init.kaiming_uniform_(self.lokr_w1_a, a=math.sqrt(5))
+            nn.init.kaiming_uniform_(self.lokr_w1_b, a=math.sqrt(5))
+
+        if self.weight_decompose:
+            if isinstance(self.orig_module, nn.Linear):
+                orig_weight = get_unquantized_weight(self.orig_module, torch.float, self.train_device)
+            else:
+                orig_weight = self.orig_module.weight.detach().float()
+
+            self.dora_num_dims = orig_weight.dim() - 1
+            if self.dora_on_output:
+                self.dora_scale = nn.Parameter(
+                    torch.norm(
+                        orig_weight.reshape(orig_weight.shape[0], -1),
+                        dim=1,
+                        keepdim=True,
+                    ).reshape(orig_weight.shape[0], *[1] * self.dora_num_dims)
+                    .to(device=self.orig_module.weight.device)
+                )
+            else:
+                self.dora_scale = nn.Parameter(
+                    torch.norm(
+                        orig_weight.transpose(1, 0).reshape(orig_weight.shape[1], -1),
+                        dim=1,
+                        keepdim=True,
+                    )
+                    .reshape(orig_weight.shape[1], *[1] * self.dora_num_dims)
+                    .transpose(1, 0)
+                    .to(device=self.orig_module.weight.device)
+                )
+
+            del orig_weight
+
+    def check_initialized(self):
+        super().check_initialized()
+        if self.use_w1:
+            assert self.lokr_w1 is not None
+        else:
+            assert self.lokr_w1_a is not None
+            assert self.lokr_w1_b is not None
+
+        if self.use_w2:
+            assert self.lokr_w2 is not None
+        else:
+            assert self.lokr_w2_a is not None
+            assert self.lokr_w2_b is not None
+            if self.tucker:
+                assert self.lokr_t2 is not None
+
+        if self.weight_decompose:
+            assert self.dora_scale is not None
+
+    def _build_w1(self) -> Tensor:
+        if self.use_w1:
+            assert self.lokr_w1 is not None
+            return self.lokr_w1
+        assert self.lokr_w1_a is not None
+        assert self.lokr_w1_b is not None
+        return self.lokr_w1_a @ self.lokr_w1_b
+
+    def _build_w2(self) -> Tensor:
+        if self.use_w2:
+            assert self.lokr_w2 is not None
+            return self.lokr_w2
+        assert self.lokr_w2_a is not None
+        assert self.lokr_w2_b is not None
+        if self.tucker:
+            assert self.lokr_t2 is not None
+            return _rebuild_tucker(self.lokr_t2, self.lokr_w2_a, self.lokr_w2_b)
+        if self.kernel_size:
+            w2 = self.lokr_w2_a @ self.lokr_w2_b
+            out_k, in_n = self.shape_groups[0][1], self.shape_groups[1][1]
+            return w2.view(out_k, in_n, *self.kernel_size)
+        return self.lokr_w2_a @ self.lokr_w2_b
+
+    def _scale(self, device: torch.device) -> Tensor:
+        r_factor = math.sqrt(self.rank) if self.rs_lora else self.rank
+        if r_factor <= 0:
+            r_factor = 1
+        alpha = self.alpha.to(device)
+        if (alpha == 0).any():
+            alpha = torch.where(alpha == 0, torch.tensor(float(self.rank), device=device), alpha)
+        return alpha / r_factor
+
+    def forward(self, x, *args, **kwargs):
+        self.check_initialized()
+        w1 = self._build_w1()
+        w2 = self._build_w2()
+        diff = _make_kron(w1, w2)
+        diff = diff * self._scale(diff.device)
+        diff = diff.view(self.shape)
+        diff = self.dropout(diff)
+
+        if self.weight_decompose:
+            if isinstance(self.orig_module, nn.Linear):
+                orig_weight = get_unquantized_weight(self.orig_module, torch.float, self.train_device)
+            else:
+                orig_weight = self.orig_module.weight.detach().float()
+
+            wp = orig_weight + diff
+            del orig_weight
+            eps = torch.finfo(wp.dtype).eps if self.norm_epsilon else 0.0
+            if self.dora_on_output:
+                norm = wp.detach() \
+                    .reshape(wp.shape[0], -1) \
+                    .norm(dim=1) \
+                    .reshape(wp.shape[0], *[1] * self.dora_num_dims) + eps
+            else:
+                norm = wp.detach() \
+                    .transpose(0, 1) \
+                    .reshape(wp.shape[1], -1) \
+                    .norm(dim=1, keepdim=True) \
+                    .reshape(wp.shape[1], *[1] * self.dora_num_dims) \
+                    .transpose(0, 1) + eps
+            wp = self.dora_scale * (wp / norm)
+            return self.op(self.dropout(x),
+                           wp,
+                           self.orig_module.bias,
+                           **self.layer_kwargs)
+
+        return self.orig_forward(x) + self.op(x, diff, bias=None, **self.layer_kwargs)
 
     def apply_to_module(self):
         # TODO
@@ -570,6 +883,7 @@ class DoRAModule(LoRAModule):
 DummyLoRAModule = LoRAModule.make_dummy()
 DummyDoRAModule = DoRAModule.make_dummy()
 DummyLoHaModule = LoHaModule.make_dummy()
+DummyLoKrModule = LoKrModule.make_dummy()
 DummyOFTModule = OFTModule.make_dummy()
 
 
@@ -591,8 +905,12 @@ class LoRAModuleWrapper:
         self.orig_module = orig_module
         self.prefix = prefix
         self.peft_type = config.peft_type
-        self.rank = config.lora_rank
-        self.alpha = config.lora_alpha
+        if self.peft_type == PeftType.LOKR:
+            self.rank = config.lokr_dim if config.lokr_dim > 0 else config.lora_rank
+            self.alpha = config.lokr_alpha if config.lokr_alpha > 0 else config.lora_alpha
+        else:
+            self.rank = config.lora_rank
+            self.alpha = config.lora_alpha
 
         self.module_filters = [
             ModuleFilter(pattern, use_regex=config.layer_filter_regex)
@@ -620,6 +938,25 @@ class LoRAModuleWrapper:
             self.dummy_klass = DummyLoHaModule
             self.additional_args = [self.rank, self.alpha]
             self.additional_kwargs = {}
+        elif self.peft_type == PeftType.LOKR:
+            lokr_factor = config.lokr_decompose_factor if config.lokr_decompose_factor != -1 else config.lokr_factor
+            self.klass = LoKrModule
+            self.dummy_klass = DummyLoKrModule
+            self.additional_args = [
+                self.rank,
+                self.alpha,
+            ]
+            self.additional_kwargs = {
+                "factor": lokr_factor,
+                "decompose_both": config.lokr_decompose_both,
+                "use_tucker": config.lokr_use_tucker,
+                "full_matrix": config.lokr_full_matrix,
+                "weight_decompose": config.lokr_weight_decompose,
+                "dora_on_output": config.lokr_dora_on_output,
+                "rs_lora": config.lokr_rs_lora,
+                "norm_epsilon": config.lora_decompose_norm_epsilon,
+                "train_device": torch.device(config.train_device),
+            }
         elif self.peft_type == PeftType.OFT_2:
             self.klass = OFTModule
             self.dummy_klass = DummyOFTModule
@@ -713,8 +1050,17 @@ class LoRAModuleWrapper:
         # For OFT, the comparison is not straightforward, so we skip it.
         if self.peft_type == PeftType.OFT_2:
             return
+        if self.peft_type == PeftType.LOKR:
+            return
 
-        if rank_key := next((k for k in state_dict if k.endswith((".lora_down.weight", ".hada_w1_a"))), None):
+        if rank_key := next(
+            (
+                k
+                for k in state_dict
+                if k.endswith((".lora_down.weight", ".hada_w1_a"))
+            ),
+            None,
+        ):
             if (checkpoint_rank := state_dict[rank_key].shape[0]) != self.rank:
                 raise ValueError(f"Rank mismatch: checkpoint={checkpoint_rank}, config={self.rank}, please correct in the UI.")
 

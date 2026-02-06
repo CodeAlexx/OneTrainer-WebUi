@@ -1,0 +1,52 @@
+# SDXL Test - 10 steps with sampling
+model_type: sdxl
+
+model:
+  path: stabilityai/stable-diffusion-xl-base-1.0
+  dtype: bfloat16
+
+data:
+  concepts:
+    - /home/alex/eri2
+  resolution: 512
+  batch_size: 1
+  caption_source: txt
+  cache_dir: /home/alex/eri2/cache_sdxl
+
+adapter:
+  type: lora
+  rank: 16
+  alpha: 16
+
+memory:
+  gradient_checkpointing: "on"
+
+optimizer:
+  optimizer: adamw
+
+scheduler:
+  scheduler: constant
+
+learning_rate: 0.0001
+epochs: 1
+gradient_accumulation: 1
+
+sample:
+  enabled: true
+  interval: 5
+  interval_unit: step
+  sample_at_start: true
+  num_inference_steps: 10
+  guidance_scale: 5.0
+  width: 512
+  height: 512
+  prompts:
+    - "a photograph of a cat, high quality"
+  seeds:
+    - 42
+
+checkpoint:
+  save_every: 100
+  save_every_unit: step
+  output_dir: output/sdxl_sample_test
+seed: 42

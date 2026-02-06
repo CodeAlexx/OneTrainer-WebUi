@@ -78,6 +78,10 @@ def _coerce_model_type(value: ModelType | str) -> ModelType:
         "hi_dream_full": ModelType.HI_DREAM_FULL,
         "chroma": ModelType.CHROMA_1,
         "chroma_1": ModelType.CHROMA_1,
+        "ltx2": ModelType.LTX2,
+        "ltx": ModelType.LTX2,
+        "ltx_video": ModelType.LTX2,
+        "ltxvideo": ModelType.LTX2,
     }
     if normalized in alias_map:
         return alias_map[normalized]

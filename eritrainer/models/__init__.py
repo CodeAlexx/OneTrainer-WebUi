@@ -8,6 +8,7 @@ from eritrainer.models.zimage import ZImageModel
 from eritrainer.models.sd15 import SD15Model
 from eritrainer.models.sd3 import SD3Model, SD35Model
 from eritrainer.models.sdxl import SDXLModel
+from eritrainer.models.qwen import QwenModel, QwenImageEditModel
 from eritrainer.models.ltx2 import LTX2Model
 
 __all__ = [
@@ -20,5 +21,7 @@ __all__ = [
     "SD3Model",
     "SD35Model",
     "SDXLModel",
+    "QwenModel",
+    "QwenImageEditModel",
     "LTX2Model",
 ]

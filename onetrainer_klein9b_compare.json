@@ -1,0 +1,43 @@
+{
+  "__version": 17,
+  "training_method": "LORA",
+  "model_type": "FLUX_2_KLEIN_9B_BASE",
+  "base_model_name": "/home/alex/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-klein-base-9B/snapshots/17c3b160520b7dd44665dbf0b9ed9dd30c15cd06",
+  "output_model_destination": "/home/alex/OneTrainer/output/ot_klein9b_compare/ot_klein9b.safetensors",
+  "output_model_format": "SAFETENSORS",
+  "learning_rate": 0.0003,
+  "epochs": 1,
+  "batch_size": 1,
+  "gradient_accumulation_steps": 1,
+  "optimizer": "ADAFACTOR",
+  "lora_rank": 16,
+  "lora_alpha": 16,
+  "lora_layers": "ATTN_MLP",
+  "concepts": [
+    {
+      "path": "/home/alex/eri2",
+      "name": "main",
+      "enabled": true
+    }
+  ],
+  "resolution": 1024,
+  "train_dtype": "BFLOAT_16",
+  "weight_dtype": "BFLOAT_16",
+  "gradient_checkpointing": true,
+  "quantization": "INT_8",
+  "mse_strength": 1.0,
+  "mae_strength": 0.0,
+  "loss_weight_fn": "CONSTANT",
+  "timestep_distribution": "UNIFORM",
+  "min_noising_strength": 0.0,
+  "max_noising_strength": 1.0,
+  "sample_every_n_steps": 0,
+  "sample_every_n_epochs": 0,
+  "save_every_n_steps": 0,
+  "save_every_n_epochs": 0,
+  "backup_every_n_steps": 0,
+  "workspace_dir": "/home/alex/OneTrainer/workspace/ot_klein9b_compare",
+  "cache_dir": "/home/alex/OneTrainer/workspace/ot_klein9b_compare/cache",
+  "tensorboard": false,
+  "wandb": false
+}
