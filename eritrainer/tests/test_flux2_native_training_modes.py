@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from eritrainer.cli.native_flux2 import (
+    _build_adapter_kwargs,
+    _create_lr_scheduler,
+    _create_optimizer,
+    _extract_adapter_config,
+)
+from eritrainer.training.flux2.image_trainer import Flux2ImageTrainer, Flux2ImageTrainerConfig
+
 import torch
 import torch.nn as nn
-
-from eritrainer.cli.native_flux2 import _build_adapter_kwargs, _extract_adapter_config
-from eritrainer.training.flux2.image_trainer import Flux2ImageTrainer, Flux2ImageTrainerConfig
 
 
 class _TinyModel:
@@ -23,6 +28,11 @@ class _DummyAdapter:
 
     def get_trainable_params(self):
         return self._params
+
+
+def _make_trainable_params() -> list[nn.Parameter]:
+    layer = nn.Linear(4, 4)
+    return list(layer.parameters())
 
 
 def test_extract_adapter_config_supports_extended_lycoris_types():
@@ -110,3 +120,65 @@ def test_to_train_mode_adapter_freezes_backbone():
     assert frozen
     assert all(not param.requires_grad for param in frozen)
 
+
+def test_create_optimizer_maps_schedule_free_alias_to_adamw():
+    params = _make_trainable_params()
+    optimizer, optimizer_name = _create_optimizer(
+        params,
+        config={},
+        optimizer_block={"optimizer": "SCHEDULE_FREE_ADAMW", "weight_decay": 0.01},
+        learning_rate=1e-4,
+    )
+    assert optimizer_name == "adamw"
+    assert isinstance(optimizer, torch.optim.AdamW)
+
+
+def test_create_optimizer_supports_sgd():
+    params = _make_trainable_params()
+    optimizer, optimizer_name = _create_optimizer(
+        params,
+        config={},
+        optimizer_block={"optimizer": "sgd", "momentum": 0.9, "nesterov": True},
+        learning_rate=1e-3,
+    )
+    assert optimizer_name == "sgd"
+    assert isinstance(optimizer, torch.optim.SGD)
+    assert optimizer.defaults["momentum"] == 0.9
+    assert optimizer.defaults["nesterov"] is True
+
+
+def test_create_lr_scheduler_supports_linear_with_warmup():
+    params = _make_trainable_params()
+    optimizer = torch.optim.AdamW(params, lr=1.0)
+    scheduler, scheduler_name = _create_lr_scheduler(
+        optimizer,
+        config={"learning_rate_scheduler": "LINEAR", "learning_rate_warmup_steps": 2},
+        scheduler_block={},
+        total_optimizer_steps=6,
+    )
+    assert scheduler is not None
+    assert scheduler_name == "linear"
+    warmup_initial_lr = float(optimizer.param_groups[0]["lr"])
+    assert warmup_initial_lr < 1.0
+
+    lrs: list[float] = []
+    for _ in range(6):
+        optimizer.step()
+        scheduler.step()
+        lrs.append(float(optimizer.param_groups[0]["lr"]))
+
+    assert lrs[0] >= warmup_initial_lr
+    assert lrs[-1] <= lrs[2]
+
+
+def test_create_lr_scheduler_constant_without_warmup_returns_none():
+    params = _make_trainable_params()
+    optimizer = torch.optim.AdamW(params, lr=1.0)
+    scheduler, scheduler_name = _create_lr_scheduler(
+        optimizer,
+        config={"learning_rate_scheduler": "CONSTANT"},
+        scheduler_block={},
+        total_optimizer_steps=10,
+    )
+    assert scheduler is None
+    assert scheduler_name == "constant"

@@ -128,6 +128,30 @@ def _resolve_model_source(model_source: str) -> str:
     if expanded.exists():
         return str(expanded)
 
+    # If this is an absolute filesystem path and it does not exist, avoid
+    # reinterpreting it as a repo id. Try a case-insensitive HF-cache recovery
+    # for `models--ORG--NAME` tokens first.
+    if expanded.is_absolute():
+        marker = "models--"
+        as_posix = expanded.as_posix()
+        if marker in as_posix:
+            token = as_posix.split(marker, 1)[1].split("/", 1)[0]
+            hub_root = Path.home() / ".cache" / "huggingface" / "hub"
+            expected = f"{marker}{token}".lower()
+            for candidate in hub_root.glob("models--*"):
+                if candidate.name.lower() == expected:
+                    refs_main = candidate / "refs" / "main"
+                    if refs_main.exists():
+                        revision = refs_main.read_text().strip()
+                        snapshot = candidate / "snapshots" / revision
+                        if snapshot.exists():
+                            return str(snapshot)
+                    snapshots_dir = candidate / "snapshots"
+                    snapshots = sorted(snapshots_dir.glob("*")) if snapshots_dir.exists() else []
+                    if snapshots:
+                        return str(snapshots[-1])
+        raise FileNotFoundError(f"Model source path does not exist: {expanded}")
+
     if "/" not in model_source:
         raise FileNotFoundError(
             f"Model source not found locally: {model_source}. "
@@ -161,6 +185,166 @@ def _load_pipeline_class(class_name: str):
     if not hasattr(diffusers, class_name):
         raise AttributeError(f"diffusers has no pipeline class named {class_name}")
     return getattr(diffusers, class_name)
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "none", "null"}:
+        return False
+    return default
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _call_with_filtered_kwargs(fn, *args: Any, **kwargs: Any):
+    params = inspect.signature(fn).parameters
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
+        return fn(*args, **kwargs)
+    filtered = {key: value for key, value in kwargs.items() if key in params}
+    return fn(*args, **filtered)
+
+
+def _extract_assistant_lora_settings(model: Any) -> tuple[Path | None, str | None, float | None]:
+    if model is None:
+        return None, None, None
+
+    def _get_attr(key: str):
+        return getattr(model, key, None)
+
+    get_value = model.get if isinstance(model, dict) else _get_attr
+
+    if _as_bool(get_value("disable_assistant_lora"), False):
+        return None, None, None
+
+    path_raw = (
+        get_value("assistant_lora_path")
+        or get_value("turbo_adapter_path")
+        or get_value("assistant_adapter_path")
+    )
+    path_text = _optional_text(path_raw)
+    if not path_text:
+        return None, None, None
+
+    path = Path(path_text).expanduser()
+    if not path.exists():
+        print(f"[sampler] warning: assistant LoRA path does not exist: {path}")
+        return None, None, None
+    if not path.is_file():
+        print(f"[sampler] warning: assistant LoRA path must be a file: {path}")
+        return None, None, None
+
+    weight_name = _optional_text(
+        get_value("assistant_lora_weight_name")
+        or get_value("turbo_adapter_weight_name")
+        or get_value("assistant_adapter_weight_name")
+    )
+    strength_raw = get_value("assistant_lora_inference_strength")
+    if strength_raw is None:
+        strength_raw = get_value("assistant_lora_strength")
+    if strength_raw is None:
+        strength_raw = get_value("turbo_adapter_strength")
+    strength = _optional_float(strength_raw)
+    return path, weight_name, strength
+
+
+def _freeze_adapter_parameters(module: Any, adapter_name: str) -> None:
+    if module is None:
+        return
+    for name, param in module.named_parameters():
+        if param is None:
+            continue
+        if f".{adapter_name}" in name and "lora_" in name:
+            param.requires_grad_(False)
+
+
+def _load_assistant_lora_into_transformer(
+    *,
+    pipeline: Any,
+    lora_path: Path,
+    adapter_name: str = "assistant",
+    weight_name: str | None = None,
+    strength: float | None = None,
+) -> bool:
+    transformer = getattr(pipeline, "transformer", None)
+    pipeline_cls = pipeline.__class__
+    lora_state_fn = getattr(pipeline_cls, "lora_state_dict", None)
+    load_fn = getattr(pipeline_cls, "load_lora_into_transformer", None)
+    if transformer is None or lora_state_fn is None or load_fn is None:
+        return False
+
+    state_kwargs: dict[str, Any] = {"local_files_only": True}
+    if weight_name is not None:
+        state_kwargs["weight_name"] = weight_name
+    if "return_alphas" in inspect.signature(lora_state_fn).parameters:
+        state_kwargs["return_alphas"] = True
+
+    lora_state = lora_state_fn(str(lora_path), **state_kwargs)
+    state_dict: dict[str, torch.Tensor]
+    network_alphas: dict[str, float] | None = None
+    metadata: Any = None
+    if isinstance(lora_state, tuple):
+        if len(lora_state) >= 1:
+            state_dict = lora_state[0]
+        else:
+            return False
+        if len(lora_state) >= 2 and isinstance(lora_state[1], dict):
+            network_alphas = lora_state[1]
+        if len(lora_state) >= 3:
+            metadata = lora_state[2]
+    else:
+        state_dict = lora_state
+
+    load_kwargs: dict[str, Any] = {
+        "transformer": transformer,
+        "adapter_name": adapter_name,
+        "_pipeline": None,
+        "low_cpu_mem_usage": False,
+    }
+    if network_alphas:
+        load_kwargs["network_alphas"] = network_alphas
+    if metadata is not None:
+        load_kwargs["metadata"] = metadata
+
+    _call_with_filtered_kwargs(load_fn, state_dict, **load_kwargs)
+    _freeze_adapter_parameters(transformer, adapter_name)
+
+    with suppress(Exception):
+        if hasattr(transformer, "set_adapters"):
+            if strength is None:
+                transformer.set_adapters([adapter_name])
+            else:
+                transformer.set_adapters([adapter_name], [float(strength)])
+        elif hasattr(transformer, "set_adapter"):
+            transformer.set_adapter(adapter_name)
+
+    return True
 
 
 class BaseSampler:
@@ -574,6 +758,42 @@ class ZImageSampler(DiffusersSampler):
     default_steps = 20
     default_guidance = 5.0
     resolution_multiple = 64
+
+    def __init__(self, model: Any = None, *, model_type: ModelType | None = None) -> None:
+        super().__init__(model=model, model_type=model_type)
+        self._assistant_signature: tuple[str, str | None, float | None] | None = None
+
+    def _ensure_pipeline(
+        self,
+        *,
+        model_source: str,
+        device: torch.device,
+        dtype: torch.dtype,
+        image: Any = None,
+    ):
+        pipeline = super()._ensure_pipeline(model_source=model_source, device=device, dtype=dtype, image=image)
+        path, weight_name, strength = _extract_assistant_lora_settings(self.model)
+        if path is None:
+            return pipeline
+
+        signature = (str(path), weight_name, strength)
+        if self._assistant_signature == signature:
+            return pipeline
+
+        try:
+            loaded = _load_assistant_lora_into_transformer(
+                pipeline=pipeline,
+                lora_path=path,
+                adapter_name="assistant",
+                weight_name=weight_name,
+                strength=strength,
+            )
+            if loaded:
+                self._assistant_signature = signature
+                print(f"[sampler] loaded Z-Image assistant LoRA from {path}")
+        except Exception as exc:
+            print(f"[sampler] warning: failed to load Z-Image assistant LoRA {path}: {exc}")
+        return pipeline
 
 
 class ChromaSampler(DiffusersSampler):

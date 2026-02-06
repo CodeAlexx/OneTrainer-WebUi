@@ -86,6 +86,24 @@ def test_validate_zimage_model_path_accepts_complete_layout(tmp_path):
     assert resolved == model_root
 
 
+def test_validate_zimage_model_path_allows_missing_scheduler(tmp_path):
+    model_root = tmp_path / "zimage"
+    model_root.mkdir()
+
+    (model_root / "tokenizer").mkdir()
+    (model_root / "text_encoder").mkdir()
+    (model_root / "vae").mkdir()
+    (model_root / "transformer").mkdir()
+
+    (model_root / "tokenizer" / "tokenizer_config.json").write_text("{}")
+    (model_root / "text_encoder" / "config.json").write_text("{}")
+    (model_root / "vae" / "config.json").write_text("{}")
+    (model_root / "transformer" / "config.json").write_text("{}")
+
+    resolved = _validate_zimage_model_path(str(model_root))
+    assert resolved == model_root
+
+
 def test_encode_prompt_features_applies_mask():
     class DummyTokenizer:
         def __call__(self, prompts, **kwargs):

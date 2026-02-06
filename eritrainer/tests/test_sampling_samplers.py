@@ -20,8 +20,12 @@ from eritrainer.sampling.sampler import (
     SDXLInpaintingSampler,
     SDXLSampler,
     WuerstchenSampler,
+    ZImageSampler,
+    _resolve_model_source,
     create_sampler,
 )
+
+import torch
 
 from PIL import Image
 
@@ -198,3 +202,98 @@ def test_pixart_sigma_prefers_sigma_pipeline(monkeypatch, tmp_path):
 
     assert loaded_names
     assert loaded_names[0] == "PixArtSigmaPipeline"
+
+
+def test_zimage_sampler_loads_assistant_lora(monkeypatch, tmp_path):
+    model_dir = tmp_path / "zimage_model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    assistant_path = tmp_path / "zimage_turbo_training_adapter_v2.safetensors"
+    assistant_path.write_bytes(b"adapter")
+
+    class _DummyTransformer:
+        def __init__(self):
+            self._assistant_param = torch.nn.Parameter(torch.ones(1))
+            self.last_set_adapters: tuple | None = None
+
+        def named_parameters(self):
+            return [("layers.0.assistant.lora_A.weight", self._assistant_param)]
+
+        def set_adapters(self, names, weights=None):
+            self.last_set_adapters = (names, weights)
+
+    class _DummyZImagePipeline(_DummyPipeline):
+        last_lora_state_dict: tuple[str, dict] | None = None
+        last_load_lora: dict | None = None
+        last_transformer: _DummyTransformer | None = None
+
+        def __init__(self):
+            self.transformer = _DummyTransformer()
+            type(self).last_transformer = self.transformer
+
+        @classmethod
+        def lora_state_dict(cls, pretrained_model_name_or_path_or_dict, **kwargs):
+            cls.last_lora_state_dict = (str(pretrained_model_name_or_path_or_dict), kwargs)
+            return {"transformer.lora_A.weight": torch.zeros(1)}
+
+        @classmethod
+        def load_lora_into_transformer(cls, state_dict, transformer, adapter_name=None, **kwargs):
+            cls.last_load_lora = {
+                "state_dict": state_dict,
+                "transformer": transformer,
+                "adapter_name": adapter_name,
+                "kwargs": kwargs,
+            }
+
+    monkeypatch.setattr("eritrainer.sampling.sampler._load_pipeline_class", lambda _name: _DummyZImagePipeline)
+
+    sampler = ZImageSampler(
+        model={
+            "path": str(model_dir),
+            "assistant_lora_path": str(assistant_path),
+            "assistant_lora_inference_strength": 0.6,
+        },
+        model_type=ModelType.ZIMAGE,
+    )
+    sampler.sample(
+        prompt="portrait",
+        height=512,
+        width=512,
+        num_inference_steps=1,
+        guidance_scale=5.0,
+        device="cpu",
+        dtype="float32",
+    )
+
+    assert _DummyZImagePipeline.last_lora_state_dict is not None
+    _, kwargs = _DummyZImagePipeline.last_lora_state_dict
+    assert kwargs["local_files_only"] is True
+
+    assert _DummyZImagePipeline.last_load_lora is not None
+    assert _DummyZImagePipeline.last_load_lora["adapter_name"] == "assistant"
+    assert _DummyZImagePipeline.last_transformer is not None
+    assert _DummyZImagePipeline.last_transformer.last_set_adapters == (["assistant"], [0.6])
+    assert _DummyZImagePipeline.last_transformer._assistant_param.requires_grad is False
+
+
+def test_resolve_model_source_recovers_case_mismatch_for_absolute_hf_cache_path(monkeypatch, tmp_path):
+    hub_root = tmp_path / ".cache" / "huggingface" / "hub"
+    repo_dir = hub_root / "models--Tongyi-MAI--Z-Image-Turbo"
+    snapshot_dir = repo_dir / "snapshots" / "abc123"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    refs_dir = repo_dir / "refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    (refs_dir / "main").write_text("abc123", encoding="utf-8")
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    wrong_case = (
+        tmp_path
+        / ".cache"
+        / "huggingface"
+        / "hub"
+        / "models--TONGYI-MAI--Z-Image-Turbo"
+        / "snapshots"
+        / "abc123"
+    )
+    resolved = _resolve_model_source(str(wrong_case))
+    assert resolved == str(snapshot_dir)

@@ -14,11 +14,13 @@ import torch
 
 _PROMPT_MAX_LENGTH = 512
 _REQUIRED_SUBFOLDERS: dict[str, tuple[str, ...]] = {
-    "scheduler": ("scheduler_config.json", "config.json"),
     "tokenizer": ("tokenizer_config.json", "tokenizer.json"),
     "text_encoder": ("config.json",),
     "vae": ("config.json",),
     "transformer": ("config.json",),
+}
+_OPTIONAL_SUBFOLDERS: dict[str, tuple[str, ...]] = {
+    "scheduler": ("scheduler_config.json", "config.json"),
 }
 _WEIGHT_MARKERS = (
     ".safetensors",
@@ -54,6 +56,20 @@ def _validate_zimage_model_path(model_path: str) -> Path:
         raise FileNotFoundError(
             f"Z-Image model at {root} has invalid components (missing config files): "
             f"{', '.join(sorted(invalid_components))}"
+        )
+
+    optional_invalid_components: list[str] = []
+    for subfolder, required_files in _OPTIONAL_SUBFOLDERS.items():
+        component_path = root / subfolder
+        if not component_path.exists():
+            continue
+        if not any((component_path / required).exists() for required in required_files):
+            optional_invalid_components.append(subfolder)
+
+    if optional_invalid_components:
+        raise FileNotFoundError(
+            f"Z-Image model at {root} has invalid optional components (missing config files): "
+            f"{', '.join(sorted(optional_invalid_components))}"
         )
 
     return root
@@ -144,11 +160,17 @@ class ZImageModel(BaseModelImpl):
 
         model_root = _validate_zimage_model_path(model_path)
 
-        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            str(model_root),
-            subfolder="scheduler",
-            local_files_only=True,
-        )
+        scheduler_dir = model_root / "scheduler"
+        if scheduler_dir.exists():
+            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                str(model_root),
+                subfolder="scheduler",
+                local_files_only=True,
+            )
+        else:
+            # Some local HF snapshots (non-turbo variants) omit scheduler config;
+            # use local default scheduler construction in that case.
+            scheduler = FlowMatchEulerDiscreteScheduler()
         tokenizer = AutoTokenizer.from_pretrained(
             str(model_root),
             subfolder="tokenizer",

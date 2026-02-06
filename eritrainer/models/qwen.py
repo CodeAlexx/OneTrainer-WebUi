@@ -108,6 +108,17 @@ class QwenBaseModel(BaseModelImpl):
         "w8a8_int",
         "w8a8",
     }
+    _FP8_ALIASES = {
+        "fp8",
+        "fp_8",
+        "fp-8",
+        "float8",
+        "float_8",
+        "float-8",
+        "float_w8a8",
+        "fpw8a8",
+        "w8a8_float",
+    }
 
     @classmethod
     def normalize_quantization_mode(cls, value: Any) -> str | None:
@@ -118,6 +129,8 @@ class QwenBaseModel(BaseModelImpl):
             return None
         if normalized in cls._INT8_ALIASES:
             return "int8"
+        if normalized in cls._FP8_ALIASES:
+            return "fp8"
         return normalized
 
     @staticmethod
@@ -204,28 +217,56 @@ class QwenBaseModel(BaseModelImpl):
 
         raise RuntimeError("No compatible Qwen pipeline class is available in this diffusers build.")
 
-    def _load_pipeline_int8(
+    def _build_quantization_configs(self, quantization_mode: str) -> tuple[Any, Any]:
+        if quantization_mode == "int8":
+            try:
+                import bitsandbytes  # noqa: F401
+            except Exception as exc:  # pragma: no cover - environment-dependent
+                raise RuntimeError("Qwen INT8 mode requires bitsandbytes installed in the active environment.") from exc
+
+            from diffusers import BitsAndBytesConfig as DiffusersBitsAndBytesConfig
+            from transformers import BitsAndBytesConfig as TransformersBitsAndBytesConfig
+
+            return (
+                TransformersBitsAndBytesConfig(
+                    load_in_8bit=True,
+                    llm_int8_enable_fp32_cpu_offload=True,
+                ),
+                DiffusersBitsAndBytesConfig(
+                    load_in_8bit=True,
+                    llm_int8_enable_fp32_cpu_offload=True,
+                ),
+            )
+
+        if quantization_mode == "fp8":
+            try:
+                from diffusers import QuantoConfig as DiffusersQuantoConfig
+                from transformers import QuantoConfig as TransformersQuantoConfig
+            except Exception as exc:  # pragma: no cover - environment-dependent
+                raise RuntimeError(
+                    "Qwen FP8 mode requires Quanto support in diffusers/transformers."
+                ) from exc
+
+            return (
+                TransformersQuantoConfig(weights="float8"),
+                DiffusersQuantoConfig(weights_dtype="float8"),
+            )
+
+        raise ValueError(f"Unsupported Qwen quantization mode: {quantization_mode}")
+
+    def _load_pipeline_quantized(
         self,
         model_root: Path,
         dtype: torch.dtype,
         train_device: torch.device,
+        *,
+        quantization_mode: str,
         requested_gpu_budget_gib: int | None = None,
     ):
-        try:
-            import bitsandbytes  # noqa: F401
-        except Exception as exc:  # pragma: no cover - environment-dependent
-            raise RuntimeError("Qwen INT8 mode requires bitsandbytes installed in the active environment.") from exc
-
         from diffusers import (
             AutoencoderKLQwenImage,
             FlowMatchEulerDiscreteScheduler,
             QwenImageTransformer2DModel,
-        )
-        from diffusers import (
-            BitsAndBytesConfig as DiffusersBitsAndBytesConfig,
-        )
-        from transformers import (
-            BitsAndBytesConfig as TransformersBitsAndBytesConfig,
         )
         from transformers import (
             Qwen2_5_VLForConditionalGeneration,
@@ -237,14 +278,7 @@ class QwenBaseModel(BaseModelImpl):
         if not _component_has_weights(model_root / "text_encoder"):
             raise FileNotFoundError(f"No text-encoder weights found under {model_root / 'text_encoder'}")
 
-        text_bnb_config = TransformersBitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_enable_fp32_cpu_offload=True,
-        )
-        transformer_bnb_config = DiffusersBitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_enable_fp32_cpu_offload=True,
-        )
+        text_quantization_config, transformer_quantization_config = self._build_quantization_configs(quantization_mode)
 
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             str(model_root),
@@ -259,7 +293,7 @@ class QwenBaseModel(BaseModelImpl):
         text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             str(model_root),
             subfolder="text_encoder",
-            quantization_config=text_bnb_config,
+            quantization_config=text_quantization_config,
             device_map={"": "cpu"},
             local_files_only=True,
         )
@@ -273,7 +307,7 @@ class QwenBaseModel(BaseModelImpl):
             str(model_root),
             subfolder="transformer",
             torch_dtype=dtype,
-            quantization_config=transformer_bnb_config,
+            quantization_config=transformer_quantization_config,
             device_map="auto",
             max_memory=self.build_bnb_max_memory(
                 train_device,
@@ -291,6 +325,36 @@ class QwenBaseModel(BaseModelImpl):
             transformer=transformer,
         )
 
+    def _load_pipeline_int8(
+        self,
+        model_root: Path,
+        dtype: torch.dtype,
+        train_device: torch.device,
+        requested_gpu_budget_gib: int | None = None,
+    ):
+        return self._load_pipeline_quantized(
+            model_root,
+            dtype,
+            train_device,
+            quantization_mode="int8",
+            requested_gpu_budget_gib=requested_gpu_budget_gib,
+        )
+
+    def _load_pipeline_fp8(
+        self,
+        model_root: Path,
+        dtype: torch.dtype,
+        train_device: torch.device,
+        requested_gpu_budget_gib: int | None = None,
+    ):
+        return self._load_pipeline_quantized(
+            model_root,
+            dtype,
+            train_device,
+            quantization_mode="fp8",
+            requested_gpu_budget_gib=requested_gpu_budget_gib,
+        )
+
     def load_pipeline(
         self,
         model_path: str,
@@ -305,6 +369,13 @@ class QwenBaseModel(BaseModelImpl):
         normalized_quantization = self.normalize_quantization_mode(quantization_mode)
         if normalized_quantization == "int8":
             return self._load_pipeline_int8(
+                model_root,
+                dtype,
+                train_device,
+                requested_gpu_budget_gib=requested_gpu_budget_gib,
+            )
+        if normalized_quantization == "fp8":
+            return self._load_pipeline_fp8(
                 model_root,
                 dtype,
                 train_device,

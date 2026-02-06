@@ -79,7 +79,7 @@ _MODEL_ALIASES: dict[str, str] = {
     "chroma": "chroma_1",
 }
 
-_LYCORIS_DISABLED_MODEL_TYPES = {"ltx2"}
+_LYCORIS_DISABLED_MODEL_TYPES: set[str] = {"ltx2"}
 
 
 DEFAULT_TARGETS: dict[str, list[str]] = {

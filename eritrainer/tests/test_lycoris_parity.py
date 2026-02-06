@@ -406,7 +406,7 @@ class TestLyCORISRuntime:
             rank=4,
             alpha=4.0,
         )
-        with pytest.raises(ValueError, match="disabled"):
+        with pytest.raises(ValueError, match="temporarily disabled"):
             LyCORISManager(config, model_type="ltx2")
 
 

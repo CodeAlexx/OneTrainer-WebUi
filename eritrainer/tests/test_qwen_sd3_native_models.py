@@ -133,6 +133,50 @@ def test_qwen_encode_latents_accepts_4d_pixels():
     assert latents.shape == (1, 2, 1, 8, 8)
 
 
+def test_qwen_quantization_mode_normalization_aliases():
+    assert QwenModel.normalize_quantization_mode(None) is None
+    assert QwenModel.normalize_quantization_mode("off") is None
+    assert QwenModel.normalize_quantization_mode("INT_8") == "int8"
+    assert QwenModel.normalize_quantization_mode("w8a8_int") == "int8"
+    assert QwenModel.normalize_quantization_mode("FP8") == "fp8"
+    assert QwenModel.normalize_quantization_mode("float_w8a8") == "fp8"
+
+
+def test_qwen_load_pipeline_routes_to_fp8_loader(monkeypatch, tmp_path):
+    root = tmp_path / "qwen"
+    _touch(root / "scheduler" / "scheduler_config.json")
+    _touch(root / "tokenizer" / "tokenizer_config.json")
+    _touch(root / "text_encoder" / "config.json")
+    _touch(root / "vae" / "config.json")
+    _touch(root / "transformer" / "config.json")
+
+    model = QwenModel()
+    calls: dict[str, object] = {}
+
+    def _fake_fp8_loader(self, model_root, dtype, train_device, requested_gpu_budget_gib=None):
+        calls["model_root"] = model_root
+        calls["dtype"] = dtype
+        calls["train_device"] = train_device
+        calls["requested_gpu_budget_gib"] = requested_gpu_budget_gib
+        return "fp8_pipeline"
+
+    monkeypatch.setattr(QwenModel, "_load_pipeline_fp8", _fake_fp8_loader)
+
+    pipeline = model.load_pipeline(
+        str(root),
+        torch.bfloat16,
+        torch.device("cpu"),
+        quantization_mode="fp8",
+        requested_gpu_budget_gib=10,
+    )
+
+    assert pipeline == "fp8_pipeline"
+    assert calls["model_root"] == root
+    assert calls["dtype"] == torch.bfloat16
+    assert calls["train_device"] == torch.device("cpu")
+    assert calls["requested_gpu_budget_gib"] == 10
+
+
 def test_sd3_encode_prompt_features_extracts_pooled():
     class DummyPipeline:
         def encode_prompt(self, **kwargs):
