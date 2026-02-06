@@ -28,6 +28,7 @@ if _DiffusersFluxTransformer2DModel is not None:
                 model_path,
                 torch_dtype=torch_dtype,
                 local_files_only=True,
+                low_cpu_mem_usage=False,
             )
             return model.to(device)
 

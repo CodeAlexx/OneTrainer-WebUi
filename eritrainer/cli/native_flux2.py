@@ -23,6 +23,30 @@ from eritrainer.training.flux2.image_trainer import Flux2ImageTrainer, Flux2Imag
 
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+_FULL_TRAINING_METHODS = {"full", "full_finetune", "full_fine_tune", "fine_tune", "finetune"}
+_ADAPTER_ALIASES = {
+    "diag-oft": "diag_oft",
+    "diagoft": "diag_oft",
+    "oft_2": "oft",
+    "full_finetune": "full",
+    "full_fine_tune": "full",
+    "fine_tune": "full",
+    "finetune": "full",
+}
+_KNOWN_ADAPTER_KEYS = (
+    "lora",
+    "lokr",
+    "loha",
+    "locon",
+    "dora",
+    "ia3",
+    "oft",
+    "boft",
+    "diag_oft",
+    "glora",
+    "dylora",
+    "full",
+)
 
 
 @dataclass
@@ -85,6 +109,29 @@ def _normalize_model_type(value: Any) -> str:
     return str(value).strip().lower().replace("-", "_")
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "none", "null"}:
+        return False
+    return default
+
+
+def _normalize_adapter_type(value: Any, default: str = "lora") -> str:
+    if value is None:
+        return default
+    normalized = str(value).strip().lower().replace("-", "_")
+    normalized = _ADAPTER_ALIASES.get(normalized, normalized)
+    return normalized or default
+
+
 def _resolve_flux2_model_type(value: str, model_path: str) -> ModelType:
     normalized = _normalize_model_type(value)
     path_lower = str(model_path).lower()
@@ -111,24 +158,71 @@ def _resolve_flux2_model_type(value: str, model_path: str) -> ModelType:
 
 
 def _extract_adapter_config(config: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    training_method = _normalize_model_type(config.get("training_method"))
+    if training_method in _FULL_TRAINING_METHODS:
+        return "full", {}
+
     if "adapter" in config and isinstance(config["adapter"], dict):
         adapter_block = config["adapter"]
-        return str(adapter_block.get("type", "lora")).lower(), adapter_block
+        return _normalize_adapter_type(adapter_block.get("type", config.get("peft_type", "lora"))), adapter_block
 
-    peft_type = str(config.get("peft_type", "lora")).lower()
+    peft_type = _normalize_adapter_type(config.get("peft_type", "lora"))
+    if peft_type in _FULL_TRAINING_METHODS:
+        return "full", {}
     if peft_type in config and isinstance(config[peft_type], dict):
         return peft_type, config[peft_type]
 
-    if "lora" in config and isinstance(config["lora"], dict):
-        return "lora", config["lora"]
-    if "lokr" in config and isinstance(config["lokr"], dict):
-        return "lokr", config["lokr"]
-    if "loha" in config and isinstance(config["loha"], dict):
-        return "loha", config["loha"]
-    if "locon" in config and isinstance(config["locon"], dict):
-        return "locon", config["locon"]
+    for key in _KNOWN_ADAPTER_KEYS:
+        if key in config and isinstance(config[key], dict):
+            return _normalize_adapter_type(key), config[key]
+
+    lycoris_block = config.get("lycoris")
+    if isinstance(lycoris_block, dict):
+        lycoris_type = lycoris_block.get("type") or lycoris_block.get("algorithm") or peft_type
+        return _normalize_adapter_type(lycoris_type), lycoris_block
 
     return peft_type, {}
+
+
+def _as_target_modules(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        out: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                out.append(text)
+        return out
+    return []
+
+
+def _build_adapter_kwargs(adapter_block: dict[str, Any]) -> dict[str, Any]:
+    conv_rank_raw = adapter_block.get("conv_rank")
+    conv_alpha_raw = adapter_block.get("conv_alpha")
+
+    return {
+        "target_modules": _as_target_modules(adapter_block.get("target_modules")),
+        "conv_rank": int(conv_rank_raw) if conv_rank_raw is not None else None,
+        "conv_alpha": float(conv_alpha_raw) if conv_alpha_raw is not None else None,
+        "rank_dropout": float(adapter_block.get("rank_dropout", 0.0)),
+        "module_dropout": float(adapter_block.get("module_dropout", 0.0)),
+        "factor": int(adapter_block.get("factor", 2)),
+        "decompose_both": _as_bool(adapter_block.get("decompose_both", False)),
+        "use_tucker": _as_bool(adapter_block.get("use_tucker", False)),
+        "full_matrix": _as_bool(adapter_block.get("full_matrix", False)),
+        "weight_decompose": _as_bool(
+            adapter_block.get("weight_decompose", adapter_block.get("dora_wd", False))
+        ),
+        "dora_on_output": _as_bool(adapter_block.get("dora_on_output", adapter_block.get("wd_on_output", True))),
+        "rs_lora": _as_bool(adapter_block.get("rs_lora", False)),
+        "block_size": int(adapter_block.get("block_size", adapter_block.get("boft_block_size", 4))),
+        "constraint": float(adapter_block.get("constraint", 0.0)),
+        "rescaled": _as_bool(adapter_block.get("rescaled", False)),
+        "multiplier": float(adapter_block.get("multiplier", 1.0)),
+    }
 
 
 def _collect_concept_dirs(config: dict[str, Any]) -> list[tuple[Path, str]]:
@@ -220,6 +314,33 @@ def _cache_training_data(
     return cached
 
 
+def _save_transformer_state(
+    transformer: torch.nn.Module,
+    output_path: Path,
+    *,
+    save_dtype: torch.dtype | None = None,
+) -> Path:
+    state_dict: dict[str, torch.Tensor] = {}
+    for name, tensor in transformer.state_dict().items():
+        if not torch.is_tensor(tensor):
+            continue
+        value = tensor.detach().cpu()
+        if save_dtype is not None and value.is_floating_point():
+            value = value.to(dtype=save_dtype)
+        state_dict[name] = value.contiguous()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from safetensors.torch import save_file
+
+        save_file(state_dict, str(output_path))
+        return output_path
+    except Exception:
+        fallback_path = output_path.with_suffix(".pt")
+        torch.save(state_dict, fallback_path)
+        return fallback_path
+
+
 def _pick_batch(
     cached: list[_CachedSample],
     batch_size: int,
@@ -292,6 +413,8 @@ def run_native_flux2_training(
     memory_block = config.get("memory", {}) if isinstance(config.get("memory"), dict) else {}
     checkpoint_block = config.get("checkpoint", {}) if isinstance(config.get("checkpoint"), dict) else {}
     optimizer_block = config.get("optimizer", {}) if isinstance(config.get("optimizer"), dict) else {}
+    adapter_type, adapter_block = _extract_adapter_config(config)
+    full_finetune = adapter_type == "full"
 
     model_path_raw = (
         model_block.get("path")
@@ -309,6 +432,14 @@ def run_native_flux2_training(
 
     train_dtype = _coerce_dtype(config.get("train_dtype") or model_block.get("dtype") or "bfloat16")
     train_device = torch.device(str(config.get("train_device", "cuda")))
+    save_dtype = _coerce_dtype(config.get("output_dtype"), default=train_dtype)
+
+    seed = int(config.get("seed", 42))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     learning_rate = float(config.get("learning_rate", 1e-4))
     batch_size = int(config.get("batch_size") or config.get("data", {}).get("batch_size", 1) or 1)
@@ -357,10 +488,10 @@ def run_native_flux2_training(
         batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
         gradient_checkpointing=gradient_checkpointing,
-        enable_activation_offloading=bool(
+        enable_activation_offloading=_as_bool(
             memory_block.get("enable_activation_offloading", config.get("enable_activation_offloading", False))
         ),
-        enable_async_offloading=bool(
+        enable_async_offloading=_as_bool(
             memory_block.get("enable_async_offloading", config.get("enable_async_offloading", False))
         ),
         layer_offload_fraction=float(
@@ -373,21 +504,27 @@ def run_native_flux2_training(
 
     trainer = Flux2ImageTrainer(trainer_cfg, model=model)
 
-    adapter_type, adapter_block = _extract_adapter_config(config)
-    adapter = create_adapter(
-        adapter_type=adapter_type,
-        rank=int(adapter_block.get("rank", 16)),
-        alpha=float(adapter_block.get("alpha", 16.0)),
-        model_type=flux_model_type.value,
-        dropout=float(adapter_block.get("dropout", 0.0)),
-    )
-    trainer.inject_adapter(adapter)
+    adapter = None
+    if not full_finetune:
+        rank = int(adapter_block.get("rank") or adapter_block.get("network_dim") or 16)
+        alpha = float(adapter_block.get("alpha") or adapter_block.get("network_alpha") or rank)
+        adapter = create_adapter(
+            adapter_type=adapter_type,
+            rank=rank,
+            alpha=alpha,
+            model_type=flux_model_type.value,
+            dropout=float(adapter_block.get("dropout", 0.0)),
+            **_build_adapter_kwargs(adapter_block),
+        )
+        trainer.inject_adapter(adapter)
     trainer.to_train_mode()
-    if hasattr(adapter, "to"):
+    if adapter is not None and hasattr(adapter, "to"):
         adapter.to(train_device, dtype=train_dtype)
 
-    params = list(trainer.get_trainable_params())
+    params = [param for param in trainer.get_trainable_params() if param.requires_grad]
     if not params:
+        if full_finetune:
+            raise RuntimeError("No trainable transformer parameters found for full-finetune mode.")
         raise RuntimeError("No trainable adapter parameters were found after injection.")
 
     optimizer_name = str(optimizer_block.get("optimizer") or config.get("optimizer") or "adamw").lower()
@@ -411,6 +548,7 @@ def run_native_flux2_training(
 
     max_grad_norm = float(config.get("max_grad_norm", 1.0))
     save_every = int(checkpoint_block.get("save_every") or config.get("save_every") or 0)
+    save_full_model = _as_bool(checkpoint_block.get("save_full_model", config.get("save_full_model", True)), True)
 
     optimizer.zero_grad(set_to_none=True)
     autocast_enabled = train_device.type == "cuda" and train_dtype in {torch.bfloat16, torch.float16}
@@ -423,7 +561,8 @@ def run_native_flux2_training(
         scaled_loss = loss / float(max(grad_accum, 1))
         scaled_loss.backward()
 
-        if step % max(grad_accum, 1) == 0:
+        should_step = (step % max(grad_accum, 1) == 0) or (step == max_steps)
+        if should_step:
             if max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
             optimizer.step()
@@ -443,11 +582,31 @@ def run_native_flux2_training(
         )
 
         if save_every > 0 and step % save_every == 0:
-            ckpt_path = output_dir / f"{adapter_type}_step_{step:06d}.safetensors"
-            adapter.save(str(ckpt_path))
+            if adapter is not None:
+                ckpt_path = output_dir / f"{adapter_type}_step_{step:06d}.safetensors"
+                adapter.save(str(ckpt_path))
+            elif save_full_model:
+                ckpt_path = output_dir / f"transformer_step_{step:06d}.safetensors"
+                saved_path = _save_transformer_state(
+                    trainer.model.transformer,
+                    ckpt_path,
+                    save_dtype=save_dtype,
+                )
+                print(f"[native/flux2] saved full transformer checkpoint to {saved_path}")
 
-    final_path = output_dir / f"{adapter_type}_last.safetensors"
-    adapter.save(str(final_path))
-    print(f"[native/flux2] training complete, adapter saved to {final_path}")
+    if adapter is not None:
+        final_path = output_dir / f"{adapter_type}_last.safetensors"
+        adapter.save(str(final_path))
+        print(f"[native/flux2] training complete, adapter saved to {final_path}")
+    elif save_full_model:
+        final_path = output_dir / "transformer_last.safetensors"
+        saved_path = _save_transformer_state(
+            trainer.model.transformer,
+            final_path,
+            save_dtype=save_dtype,
+        )
+        print(f"[native/flux2] training complete, full transformer saved to {saved_path}")
+    else:
+        print("[native/flux2] training complete (save_full_model=false, no full checkpoint written)")
 
     return 0

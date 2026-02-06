@@ -376,9 +376,11 @@ class Flux2BaseTrainer(ABC):
 
     def get_trainable_params(self) -> List[torch.nn.Parameter]:
         """Get list of trainable parameters (adapter params)."""
+        if self.model is None or self.model.transformer is None:
+            return []
         if self.adapter is None:
-            # Train all transformer params if no adapter
-            return list(self.model.transformer.parameters())
+            trainable = [param for param in self.model.transformer.parameters() if param.requires_grad]
+            return trainable if trainable else list(self.model.transformer.parameters())
         return list(self.adapter.get_trainable_params())
 
     # =========================================================================
@@ -603,6 +605,13 @@ class Flux2BaseTrainer(ABC):
         # Pack latents/text for transformer.
         packed_latents, image_ids = self.model.pack_latents(noisy_latents)
         packed_text, text_ids = self.model.pack_text(text_embeddings)
+        pooled_projections = kwargs.pop("pooled_projections", None)
+        if pooled_projections is None:
+            if hasattr(self.model, "pooled_text_projection"):
+                pooled_projections = self.model.pooled_text_projection(packed_text)
+            else:
+                # FLUX.2 transformer time_text_embed expects pooled text projections.
+                pooled_projections = packed_text.mean(dim=1)
 
         # Get latent dimensions for unpacking.
         _, _, height, width = noisy_latents.shape
@@ -615,6 +624,7 @@ class Flux2BaseTrainer(ABC):
             timestep=timesteps / 1000,  # Normalize discrete timestep
             guidance=None,
             encoder_hidden_states=packed_text,
+            pooled_projections=pooled_projections,
             txt_ids=text_ids,
             img_ids=image_ids,
             return_dict=False,
@@ -712,11 +722,24 @@ class Flux2BaseTrainer(ABC):
                 self.move_transformer_to_train_device()
 
             self.model.transformer.train()
-            # Freeze non-adapter params
-            for param in self.model.transformer.parameters():
-                param.requires_grad = False
-            # Unfreeze adapter params
-            if self.adapter is not None:
+
+            # Keep frozen inference-only components out of the optimizer.
+            for attr_name in ("vae", "text_encoder", "text_encoder_2"):
+                component = getattr(self.model, attr_name, None)
+                if component is None or not hasattr(component, "parameters"):
+                    continue
+                component.eval()
+                for param in component.parameters():
+                    param.requires_grad = False
+
+            if self.adapter is None:
+                # Native full-finetune mode: train the full transformer.
+                for param in self.model.transformer.parameters():
+                    param.requires_grad = True
+            else:
+                # Adapter mode: freeze backbone and train adapter params only.
+                for param in self.model.transformer.parameters():
+                    param.requires_grad = False
                 for param in self.adapter.get_trainable_params():
                     param.requires_grad = True
 

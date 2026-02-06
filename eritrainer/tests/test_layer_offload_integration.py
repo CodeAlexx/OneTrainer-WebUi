@@ -178,6 +178,37 @@ class TestConductorActivation:
         assert strategy.conductor is not None
         strategy.cleanup()
 
+    def test_last_layer_activation_not_offloaded(self, monkeypatch):
+        from eritrainer.memory.conductor import LayerOffloadConductor
+
+        model = MockModel(num_layers=2)
+        conductor = LayerOffloadConductor(
+            module=model.transformer,
+            train_device=torch.device("cuda"),
+            temp_device=torch.device("cpu"),
+            layer_offload_fraction=0.0,
+            offload_activations=True,
+            enable_async=False,
+        )
+        for layer in model.transformer.transformer_blocks:
+            conductor.add_layer(layer)
+
+        move_calls = {"count": 0}
+
+        def _fake_move(value, device, non_blocking=False):
+            del device, non_blocking
+            move_calls["count"] += 1
+            return value
+
+        monkeypatch.setattr("eritrainer.memory.conductor._move_structure", _fake_move)
+
+        conductor._active = True
+        _ = conductor.after_layer(0, 1, torch.randn(2, 64))
+        _ = conductor.after_layer(1, 1, torch.randn(2, 64))
+
+        # Only the non-final wrapped layer should offload activations.
+        assert move_calls["count"] == 1
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for device-movement validation")
 class TestConductorCUDA:

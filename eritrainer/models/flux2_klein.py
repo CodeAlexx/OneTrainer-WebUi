@@ -688,6 +688,32 @@ class Flux2KleinModel(BaseModel):
 
         return text_embeds, txt_ids
 
+    def pooled_text_projection(self, text_embeds: Tensor) -> Tensor:
+        """
+        Create pooled text projections compatible with transformer time-text embedding.
+
+        Some diffusers builds expect `pooled_projections` to have a smaller feature
+        size (for example 768) even when encoder hidden states are much larger.
+        """
+
+        pooled = text_embeds.mean(dim=1)
+
+        expected_dim = None
+        time_text_embed = getattr(self.transformer, "time_text_embed", None)
+        text_embedder = getattr(time_text_embed, "text_embedder", None)
+        linear_1 = getattr(text_embedder, "linear_1", None)
+        if linear_1 is not None and hasattr(linear_1, "in_features"):
+            expected_dim = int(linear_1.in_features)
+
+        if expected_dim is None or expected_dim <= 0 or pooled.shape[-1] == expected_dim:
+            return pooled
+
+        if pooled.shape[-1] > expected_dim:
+            return pooled[..., :expected_dim]
+
+        pad_width = expected_dim - pooled.shape[-1]
+        return torch.nn.functional.pad(pooled, (0, pad_width))
+
     # =========================================================================
     # Block Swapping (Memory Optimization)
     # =========================================================================
@@ -947,6 +973,7 @@ class Flux2KleinModel(BaseModel):
 
         # Pack text embeddings
         packed_text, txt_ids = self.pack_text(text_encoder_output)
+        pooled_projections = self.pooled_text_projection(packed_text)
 
         # 8. Transformer forward (NO guidance for Klein)
         transformer_output = self.transformer(
@@ -954,6 +981,7 @@ class Flux2KleinModel(BaseModel):
             timestep=timestep_int / 1000,  # discrete timestep normalized
             guidance=None,  # Klein has no guidance embeddings
             encoder_hidden_states=packed_text.to(dtype=self.transformer.dtype),
+            pooled_projections=pooled_projections.to(dtype=self.transformer.dtype),
             txt_ids=txt_ids,
             img_ids=img_ids,
             joint_attention_kwargs=None,
@@ -1369,6 +1397,7 @@ class Flux2KleinSampler:
 
         # Pack text embeddings
         packed_text, txt_ids = self.model.pack_text(prompt_embeds)
+        pooled_projections = self.model.pooled_text_projection(packed_text)
 
         # Get dimensions for unpacking later
         _, _, packed_h, packed_w = latents.shape
@@ -1399,6 +1428,7 @@ class Flux2KleinSampler:
                     hidden_states=packed_latents,
                     timestep=timestep,
                     encoder_hidden_states=packed_text,
+                    pooled_projections=pooled_projections,
                     img_ids=img_ids,
                     txt_ids=txt_ids,
                     guidance=None,

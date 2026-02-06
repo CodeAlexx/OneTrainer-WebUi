@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -21,6 +22,32 @@ class AdapterType(str, Enum):
     LOKR = "lokr"
     LOHA = "loha"
     LOCON = "locon"
+    IA3 = "ia3"
+    OFT = "oft"
+    BOFT = "boft"
+    DIAG_OFT = "diag_oft"
+    GLORA = "glora"
+    DYLORA = "dylora"
+    FULL = "full"
+
+
+_ADAPTER_ALIASES: dict[str, str] = {
+    "diag-oft": "diag_oft",
+    "diagoft": "diag_oft",
+    "oft_2": "oft",
+    "full_finetune": "full",
+    "full_fine_tune": "full",
+    "fine_tune": "full",
+    "finetune": "full",
+}
+
+
+def _normalize_adapter_type(adapter_type: AdapterType | str) -> AdapterType:
+    if isinstance(adapter_type, AdapterType):
+        return adapter_type
+    normalized = str(adapter_type).strip().lower().replace("-", "_")
+    normalized = _ADAPTER_ALIASES.get(normalized, normalized)
+    return AdapterType(normalized)
 
 
 @dataclass
@@ -30,6 +57,22 @@ class BaseAdapter(AdapterProtocol):
     alpha: float
     model_type: str
     dropout: float = 0.0
+    target_modules: list[str] = field(default_factory=list)
+    conv_rank: int | None = None
+    conv_alpha: float | None = None
+    rank_dropout: float = 0.0
+    module_dropout: float = 0.0
+    factor: int = 2
+    decompose_both: bool = False
+    use_tucker: bool = False
+    full_matrix: bool = False
+    weight_decompose: bool = False
+    dora_on_output: bool = True
+    rs_lora: bool = False
+    block_size: int = 4
+    constraint: float = 0.0
+    rescaled: bool = False
+    multiplier: float = 1.0
     _manager: LyCORISManager | None = field(default=None, init=False, repr=False)
     _target_module: object | None = field(default=None, init=False, repr=False)
 
@@ -41,7 +84,23 @@ class BaseAdapter(AdapterProtocol):
                     adapter_type=lycoris_type,
                     rank=int(self.rank),
                     alpha=float(self.alpha),
+                    target_modules=list(self.target_modules),
+                    conv_rank=self.conv_rank,
+                    conv_alpha=self.conv_alpha,
                     dropout=float(self.dropout),
+                    rank_dropout=float(self.rank_dropout),
+                    module_dropout=float(self.module_dropout),
+                    factor=int(self.factor),
+                    decompose_both=bool(self.decompose_both),
+                    use_tucker=bool(self.use_tucker),
+                    full_matrix=bool(self.full_matrix),
+                    weight_decompose=bool(self.weight_decompose),
+                    dora_on_output=bool(self.dora_on_output),
+                    rs_lora=bool(self.rs_lora),
+                    block_size=int(self.block_size),
+                    constraint=float(self.constraint),
+                    rescaled=bool(self.rescaled),
+                    multiplier=float(self.multiplier),
                 ),
                 model_type=self.model_type,
             )
@@ -143,12 +202,47 @@ class LoConAdapter(BaseAdapter):
     pass
 
 
+class IA3Adapter(BaseAdapter):
+    pass
+
+
+class OFTAdapter(BaseAdapter):
+    pass
+
+
+class BOFTAdapter(BaseAdapter):
+    pass
+
+
+class DiagOFTAdapter(BaseAdapter):
+    pass
+
+
+class GLoRAAdapter(BaseAdapter):
+    pass
+
+
+class DyLoRAAdapter(BaseAdapter):
+    pass
+
+
+class FullAdapter(BaseAdapter):
+    pass
+
+
 ADAPTER_REGISTRY: dict[AdapterType, type[BaseAdapter]] = {
     AdapterType.LORA: LoRAAdapter,
     AdapterType.DORA: DoRAAdapter,
     AdapterType.LOKR: LoKrAdapter,
     AdapterType.LOHA: LoHaAdapter,
     AdapterType.LOCON: LoConAdapter,
+    AdapterType.IA3: IA3Adapter,
+    AdapterType.OFT: OFTAdapter,
+    AdapterType.BOFT: BOFTAdapter,
+    AdapterType.DIAG_OFT: DiagOFTAdapter,
+    AdapterType.GLORA: GLoRAAdapter,
+    AdapterType.DYLORA: DyLoRAAdapter,
+    AdapterType.FULL: FullAdapter,
 }
 
 
@@ -158,8 +252,10 @@ def create_adapter(
     alpha: float,
     model_type: str,
     dropout: float = 0.0,
+    target_modules: list[str] | None = None,
+    **kwargs,
 ) -> BaseAdapter:
-    adapter_enum = AdapterType(adapter_type) if not isinstance(adapter_type, AdapterType) else adapter_type
+    adapter_enum = _normalize_adapter_type(adapter_type)
     adapter_cls = ADAPTER_REGISTRY[adapter_enum]
     return adapter_cls(
         adapter_type=adapter_enum,
@@ -167,6 +263,22 @@ def create_adapter(
         alpha=alpha,
         model_type=model_type,
         dropout=dropout,
+        target_modules=list(target_modules or kwargs.get("target_modules") or []),
+        conv_rank=kwargs.get("conv_rank"),
+        conv_alpha=kwargs.get("conv_alpha"),
+        rank_dropout=float(kwargs.get("rank_dropout", 0.0)),
+        module_dropout=float(kwargs.get("module_dropout", 0.0)),
+        factor=int(kwargs.get("factor", 2)),
+        decompose_both=bool(kwargs.get("decompose_both", False)),
+        use_tucker=bool(kwargs.get("use_tucker", False)),
+        full_matrix=bool(kwargs.get("full_matrix", False)),
+        weight_decompose=bool(kwargs.get("weight_decompose", False)),
+        dora_on_output=bool(kwargs.get("dora_on_output", True)),
+        rs_lora=bool(kwargs.get("rs_lora", False)),
+        block_size=int(kwargs.get("block_size", 4)),
+        constraint=float(kwargs.get("constraint", 0.0)),
+        rescaled=bool(kwargs.get("rescaled", False)),
+        multiplier=float(kwargs.get("multiplier", 1.0)),
     )
 
 
@@ -174,6 +286,12 @@ def detect_adapter_type(state_dict: Mapping[str, object]) -> AdapterType:
     keys = " ".join(state_dict.keys())
     if "lokr" in keys:
         return AdapterType.LOKR
+    if "diag_oft" in keys:
+        return AdapterType.DIAG_OFT
+    if "boft" in keys:
+        return AdapterType.BOFT
+    if "oft" in keys:
+        return AdapterType.OFT
     if "hada" in keys:
         return AdapterType.LOHA
     if "dora" in keys:
@@ -181,9 +299,53 @@ def detect_adapter_type(state_dict: Mapping[str, object]) -> AdapterType:
     return AdapterType.LORA
 
 
+def detect_rank(state_dict: Mapping[str, object], default: int = 16) -> int:
+    """Best-effort rank detection from adapter tensors."""
+
+    candidate_keys = (
+        "lora_a",
+        "lora_down",
+        "lokr_w1",
+        "lokr_w1_a",
+        "hada_w1_a",
+        "oft",
+        "boft",
+        "diag_oft",
+        "diag-oft",
+    )
+
+    def _is_candidate(name: str) -> bool:
+        lowered = name.lower()
+        return any(token in lowered for token in candidate_keys)
+
+    for key, value in state_dict.items():
+        if not _is_candidate(str(key)):
+            continue
+        if not torch.is_tensor(value):
+            continue
+        if value.ndim >= 2:
+            first = int(value.shape[0])
+            second = int(value.shape[1])
+            if first > 0 and second > 0:
+                return min(first, second)
+            if first > 0:
+                return first
+        elif value.ndim == 1 and int(value.shape[0]) > 0:
+            return int(value.shape[0])
+
+    for value in state_dict.values():
+        if torch.is_tensor(value) and value.ndim >= 2:
+            first = int(value.shape[0])
+            if first > 0:
+                return first
+
+    return int(default)
+
+
 __all__ = [
     "AdapterType",
     "ADAPTER_REGISTRY",
     "create_adapter",
     "detect_adapter_type",
+    "detect_rank",
 ]

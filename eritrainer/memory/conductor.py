@@ -155,7 +155,11 @@ class LayerOffloadConductor:
         if not (0 <= layer_index < len(self._layers)):
             return activations
 
-        if self.activation_offload_activated() and activations is not None:
+        if (
+            self.activation_offload_activated()
+            and activations is not None
+            and layer_index < (len(self._layers) - 1)
+        ):
             return _move_structure(activations, self.temp_device, non_blocking=self.enable_async)
 
         return activations
