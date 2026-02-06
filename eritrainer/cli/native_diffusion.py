@@ -54,6 +54,7 @@ from eritrainer.models.sd15 import SD15Model
 from eritrainer.models.sdxl import SDXLModel
 from eritrainer.models.zimage import ZImageModel
 from eritrainer.sampling.sampler import create_sampler
+from eritrainer.training.ema import EMAMode, EMAModel
 
 import torch
 import torch.nn.functional as F
@@ -125,9 +126,11 @@ _FULL_TRAINING_METHODS = {"full", "full_finetune", "full_fine_tune", "fine_tune"
 class _CachedExample:
     latents: torch.Tensor
     conditioning_latents: torch.Tensor | None
-    prompt_embeds: torch.Tensor
+    prompt_embeds: torch.Tensor | None
     pooled_prompt_embeds: torch.Tensor | None
     prompt_mask: torch.Tensor | None
+    caption: str
+    conditioning_image: torch.Tensor | None
     num_frames: int
     height: int
     width: int
@@ -137,17 +140,19 @@ class _CachedExample:
 class _Batch:
     latents: torch.Tensor
     conditioning_latents: torch.Tensor | None
-    prompt_embeds: torch.Tensor | list[torch.Tensor]
+    prompt_embeds: torch.Tensor | list[torch.Tensor] | None
     pooled_prompt_embeds: torch.Tensor | None
     prompt_mask: torch.Tensor | None
+    captions: list[str] | None
+    conditioning_images: torch.Tensor | None
     num_frames: int
     height: int
     width: int
 
 
 def _normalize_training_method(value: Any) -> str:
-    normalized = _normalize_model_type(value or "lora")
-    if normalized in {"finetune", "full", "full_finetune", "full_fine_tune"}:
+    normalized = str(value or "lora").strip().lower()
+    if normalized in {"fine_tune", "finetune", "full", "full_finetune", "full_fine_tune"}:
         return "fine_tune"
     if normalized in {"fine_tune_vae", "finetune_vae", "vae"}:
         return "fine_tune_vae"
@@ -617,10 +622,13 @@ def _cache_training_data(
     *,
     allow_video: bool = False,
     video_frame_count: int = 1,
+    cache_text_embeddings: bool = True,
+    keep_text_encoder_on_device: bool = False,
 ) -> list[_CachedExample]:
     pipeline.vae.to(train_device)
-    model_impl.move_text_encoders_to_device(pipeline, train_device)
     prompt_device = model_impl.cache_prompt_device(pipeline, train_device)
+    if cache_text_embeddings:
+        model_impl.move_text_encoders_to_device(pipeline, train_device)
 
     cached: list[_CachedExample] = []
     with torch.no_grad():
@@ -639,7 +647,8 @@ def _cache_training_data(
             latents = model_impl.encode_latents(pipeline, pixel_values).squeeze(0).to(dtype=train_dtype).cpu()
 
             conditioning_latents: torch.Tensor | None = None
-            conditioning_image: torch.Tensor | None = None
+            conditioning_image_cpu: torch.Tensor | None = None
+            conditioning_image_prompt: torch.Tensor | None = None
             if _is_qwen_edit_type(model_type):
                 conditioning_path = _resolve_conditioning_image_path(
                     media_path,
@@ -652,36 +661,43 @@ def _cache_training_data(
                 conditioning_latents = (
                     model_impl.encode_latents(pipeline, conditioning_pixels).squeeze(0).to(dtype=train_dtype).cpu()
                 )
-                conditioning_image = conditioning_pixels.to(device=prompt_device, dtype=torch.float32)
+                conditioning_image_cpu = conditioning_pixels.squeeze(0).to(dtype=torch.float32).cpu()
+                conditioning_image_prompt = conditioning_pixels.to(device=prompt_device, dtype=torch.float32)
 
-            if conditioning_image is not None:
-                prompt_embeds, pooled_prompt_embeds, prompt_mask = model_impl.encode_prompt_features(
-                    pipeline,
-                    caption,
-                    prompt_device,
-                    conditioning_image=conditioning_image,
+            prompt_embeds_cpu: torch.Tensor | None = None
+            pooled_cpu: torch.Tensor | None = None
+            mask_cpu: torch.Tensor | None = None
+            if cache_text_embeddings:
+                if conditioning_image_prompt is not None:
+                    prompt_embeds, pooled_prompt_embeds, prompt_mask = model_impl.encode_prompt_features(
+                        pipeline,
+                        caption,
+                        prompt_device,
+                        conditioning_image=conditioning_image_prompt,
+                    )
+                else:
+                    prompt_embeds, pooled_prompt_embeds, prompt_mask = model_impl.encode_prompt_features(
+                        pipeline,
+                        caption,
+                        prompt_device,
+                    )
+                prompt_embeds_cpu = prompt_embeds.squeeze(0).to(dtype=train_dtype).cpu()
+                pooled_cpu = (
+                    pooled_prompt_embeds.squeeze(0).to(dtype=train_dtype).cpu()
+                    if pooled_prompt_embeds is not None
+                    else None
                 )
-            else:
-                prompt_embeds, pooled_prompt_embeds, prompt_mask = model_impl.encode_prompt_features(
-                    pipeline,
-                    caption,
-                    prompt_device,
-                )
-            prompt_embeds = prompt_embeds.squeeze(0).to(dtype=train_dtype).cpu()
-            pooled_cpu = (
-                pooled_prompt_embeds.squeeze(0).to(dtype=train_dtype).cpu()
-                if pooled_prompt_embeds is not None
-                else None
-            )
-            mask_cpu = prompt_mask.squeeze(0).cpu() if prompt_mask is not None else None
+                mask_cpu = prompt_mask.squeeze(0).cpu() if prompt_mask is not None else None
 
             cached.append(
                 _CachedExample(
                     latents=latents,
                     conditioning_latents=conditioning_latents,
-                    prompt_embeds=prompt_embeds,
+                    prompt_embeds=prompt_embeds_cpu,
                     pooled_prompt_embeds=pooled_cpu,
                     prompt_mask=mask_cpu,
+                    caption=caption,
+                    conditioning_image=conditioning_image_cpu,
                     num_frames=int(latents.shape[-3]) if latents.dim() == 4 else 1,
                     height=resolution,
                     width=resolution,
@@ -689,7 +705,8 @@ def _cache_training_data(
             )
 
     pipeline.vae.to("cpu")
-    model_impl.offload_text_encoders(pipeline)
+    if cache_text_embeddings and not keep_text_encoder_on_device:
+        model_impl.offload_text_encoders(pipeline)
 
     return cached
 
@@ -711,12 +728,17 @@ def _pick_batch(
             dtype=train_dtype,
         )
 
-    if family == "zimage":
-        prompt_embeds: torch.Tensor | list[torch.Tensor] = [
-            item.prompt_embeds.to(train_device, dtype=train_dtype) for item in items
-        ]
-    else:
-        prompt_embeds = torch.stack([item.prompt_embeds for item in items], dim=0).to(train_device, dtype=train_dtype)
+    prompt_embeds: torch.Tensor | list[torch.Tensor] | None = None
+    if items[0].prompt_embeds is not None:
+        if family == "zimage":
+            prompt_embeds = [
+                item.prompt_embeds.to(train_device, dtype=train_dtype) for item in items if item.prompt_embeds is not None
+            ]
+        else:
+            prompt_embeds = torch.stack([item.prompt_embeds for item in items if item.prompt_embeds is not None], dim=0).to(
+                train_device,
+                dtype=train_dtype,
+            )
 
     pooled_prompt_embeds = None
     if items[0].pooled_prompt_embeds is not None:
@@ -729,17 +751,174 @@ def _pick_batch(
     if items[0].prompt_mask is not None:
         prompt_mask = torch.stack([item.prompt_mask for item in items], dim=0).to(train_device)
 
+    conditioning_images = None
+    if items[0].conditioning_image is not None:
+        conditioning_images = torch.stack([item.conditioning_image for item in items], dim=0).to(
+            train_device,
+            dtype=torch.float32,
+        )
+    captions = [item.caption for item in items]
+
     return _Batch(
         latents=latents,
         conditioning_latents=conditioning_latents,
         prompt_embeds=prompt_embeds,
         pooled_prompt_embeds=pooled_prompt_embeds,
         prompt_mask=prompt_mask,
+        captions=captions,
+        conditioning_images=conditioning_images,
         num_frames=items[0].num_frames,
         height=items[0].height,
         width=items[0].width,
     )
 
+
+def _resolve_component_train_flags(
+    *,
+    config: dict[str, Any],
+    model_block: dict[str, Any],
+    family: str,
+    full_finetune: bool,
+    training_method: str,
+) -> tuple[bool, dict[str, bool], bool]:
+    def _read_flag(
+        key: str,
+        *,
+        block_key: str | None = None,
+        default: bool = False,
+    ) -> bool:
+        for source in (
+            config.get("train"),
+            config.get("components"),
+            model_block,
+            config,
+        ):
+            if not isinstance(source, dict):
+                continue
+            if key in source:
+                return _as_bool(source.get(key), default)
+            if block_key and isinstance(source.get(block_key), dict) and "train" in source[block_key]:
+                return _as_bool(source[block_key].get("train"), default)
+        return default
+
+    primary_key = "unet" if family in {"sd15", "sdxl"} else "transformer"
+    primary_flag_key = "train_unet" if primary_key == "unet" else "train_transformer"
+    train_primary = _read_flag(primary_flag_key, block_key=primary_key, default=full_finetune)
+
+    if training_method == "fine_tune_vae":
+        train_primary = False
+
+    text_flags: dict[str, bool] = {}
+    text_encoder_attrs = ("text_encoder", "text_encoder_2", "text_encoder_3")
+    for idx, attr in enumerate(text_encoder_attrs, start=1):
+        suffix = "" if idx == 1 else f"_{idx}"
+        train_key = f"train_text_encoder{suffix}"
+        text_flags[attr] = _read_flag(train_key, block_key=attr, default=False) if full_finetune else False
+
+    # Diffusion objective does not provide VAE gradients in this path; keep it explicit.
+    train_vae = _read_flag("train_vae", block_key="vae", default=training_method == "fine_tune_vae")
+    if train_vae and training_method != "fine_tune_vae":
+        print(
+            "[native/diffusion] warning: train_vae=true requires training_method='fine_tune_vae'; "
+            "ignoring train_vae for diffusion objective."
+        )
+        train_vae = False
+
+    return train_primary, text_flags, train_vae
+
+
+def _set_module_train_state(module: torch.nn.Module | None, should_train: bool) -> None:
+    if module is None:
+        return
+    module.train(should_train)
+    for param in module.parameters():
+        param.requires_grad_(should_train)
+
+
+def _materialize_batch_prompt_features(
+    *,
+    model_impl: Any,
+    pipeline: Any,
+    family: str,
+    model_type: ModelType,
+    batch: _Batch,
+    train_device: torch.device,
+    train_dtype: torch.dtype,
+    requires_grad: bool,
+) -> _Batch:
+    if batch.prompt_embeds is not None:
+        return batch
+    if not batch.captions:
+        raise RuntimeError("Prompt embeddings are missing and no captions are available to regenerate them.")
+
+    prompt_embeds_list: list[torch.Tensor] = []
+    pooled_list: list[torch.Tensor] = []
+    mask_list: list[torch.Tensor] = []
+
+    context = nullcontext() if requires_grad else torch.no_grad()
+    with context:
+        for idx, caption in enumerate(batch.captions):
+            conditioning_image = None
+            if _is_qwen_edit_type(model_type) and batch.conditioning_images is not None:
+                conditioning_image = batch.conditioning_images[idx : idx + 1]
+
+            if conditioning_image is not None:
+                prompt_embeds, pooled_prompt_embeds, prompt_mask = model_impl.encode_prompt_features(
+                    pipeline,
+                    caption,
+                    train_device,
+                    conditioning_image=conditioning_image,
+                )
+            else:
+                prompt_embeds, pooled_prompt_embeds, prompt_mask = model_impl.encode_prompt_features(
+                    pipeline,
+                    caption,
+                    train_device,
+                )
+
+            prompt_embeds_list.append(prompt_embeds.squeeze(0))
+            if pooled_prompt_embeds is not None:
+                pooled_list.append(pooled_prompt_embeds.squeeze(0))
+            if prompt_mask is not None:
+                mask_list.append(prompt_mask.squeeze(0))
+
+    if family == "zimage":
+        resolved_prompt_embeds: torch.Tensor | list[torch.Tensor] = [
+            prompt_embed.to(dtype=train_dtype) for prompt_embed in prompt_embeds_list
+        ]
+    else:
+        resolved_prompt_embeds = torch.stack(prompt_embeds_list, dim=0).to(dtype=train_dtype)
+
+    resolved_pooled = (
+        torch.stack(pooled_list, dim=0).to(dtype=train_dtype)
+        if pooled_list and len(pooled_list) == len(prompt_embeds_list)
+        else None
+    )
+    resolved_mask = torch.stack(mask_list, dim=0) if mask_list and len(mask_list) == len(prompt_embeds_list) else None
+
+    batch.prompt_embeds = resolved_prompt_embeds
+    batch.pooled_prompt_embeds = resolved_pooled
+    batch.prompt_mask = resolved_mask
+    return batch
+
+
+def _compute_vae_loss(
+    vae: torch.nn.Module,
+    pixel_values: torch.Tensor,
+    *,
+    kl_weight: float,
+) -> torch.Tensor:
+    encoded = vae.encode(pixel_values)
+    latent_dist = getattr(encoded, "latent_dist", None)
+    if latent_dist is None:
+        raise RuntimeError("VAE encode() did not return a latent distribution.")
+    latents = latent_dist.sample()
+    decoded = vae.decode(latents)
+    reconstructed = decoded.sample if hasattr(decoded, "sample") else decoded
+
+    recon_loss = F.mse_loss(reconstructed.float(), pixel_values.float(), reduction="mean")
+    kl_term = latent_dist.kl().mean() if hasattr(latent_dist, "kl") else torch.tensor(0.0, device=pixel_values.device)
+    return recon_loss + (float(kl_weight) * kl_term)
 
 def _sample_flow_timesteps(
     batch_size: int,
@@ -809,6 +988,8 @@ def _compute_loss(
 ) -> torch.Tensor:
     latents = batch.latents
     batch_size = latents.shape[0]
+    if batch.prompt_embeds is None:
+        raise RuntimeError("Prompt embeddings must be materialized before loss computation.")
 
     if family in _FLOW_FAMILIES:
         num_train_timesteps = int(getattr(pipeline.scheduler.config, "num_train_timesteps", 1000))
@@ -1061,6 +1242,119 @@ def _save_module_state(
         fallback_path = output_path.with_suffix(".pt")
         torch.save(state_dict, fallback_path)
         return fallback_path
+
+
+def _save_training_state(
+    output_path: Path,
+    *,
+    step: int,
+    model_checkpoint: Path | None,
+    optimizer: torch.optim.Optimizer | None,
+    lr_scheduler: Any | None,
+    ema_model: EMAModel | None,
+) -> Path:
+    state: dict[str, Any] = {
+        "step": int(step),
+        "model_checkpoint": str(model_checkpoint) if model_checkpoint is not None else None,
+        "optimizer_state": optimizer.state_dict() if optimizer is not None else None,
+        "scheduler_state": lr_scheduler.state_dict() if lr_scheduler is not None else None,
+        "ema_state": ema_model.state_dict() if ema_model is not None else None,
+        "python_random_state": random.getstate(),
+        "torch_random_state": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        with suppress(Exception):
+            state["torch_cuda_random_state_all"] = torch.cuda.get_rng_state_all()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(state, output_path)
+    return output_path
+
+
+def _resolve_resume_state_path(config: dict[str, Any], checkpoint_block: dict[str, Any], output_dir: Path) -> Path | None:
+    resume_raw = (
+        checkpoint_block.get("resume_state")
+        or checkpoint_block.get("resume_from")
+        or config.get("resume_state")
+        or config.get("resume_from")
+        or config.get("resume_checkpoint")
+    )
+    if resume_raw:
+        candidate = Path(str(resume_raw)).expanduser()
+        if candidate.is_dir():
+            states = sorted(candidate.glob("state_step_*.pt"))
+            return states[-1] if states else None
+        if candidate.exists() and candidate.is_file():
+            return candidate
+        raise FileNotFoundError(f"Resume state path not found: {candidate}")
+
+    latest = sorted(output_dir.glob("state_step_*.pt"))
+    return latest[-1] if latest else None
+
+
+def _maybe_restore_training_state(
+    *,
+    resume_state_path: Path | None,
+    train_module: torch.nn.Module,
+    adapter: Any | None,
+    optimizer: torch.optim.Optimizer,
+    lr_scheduler: Any | None,
+    ema_model: EMAModel | None,
+) -> int:
+    if resume_state_path is None:
+        return 1
+
+    state = torch.load(str(resume_state_path), map_location="cpu", weights_only=False)
+    if not isinstance(state, dict):
+        raise RuntimeError(f"Invalid training state file: {resume_state_path}")
+
+    model_checkpoint_raw = state.get("model_checkpoint")
+    if model_checkpoint_raw:
+        model_checkpoint = Path(str(model_checkpoint_raw)).expanduser()
+        if model_checkpoint.exists():
+            if adapter is not None:
+                with suppress(Exception):
+                    adapter.load(str(model_checkpoint))
+            else:
+                if model_checkpoint.suffix.lower() == ".safetensors":
+                    from safetensors.torch import load_file
+
+                    model_state = load_file(str(model_checkpoint))
+                else:
+                    model_state = torch.load(str(model_checkpoint), map_location="cpu", weights_only=True)
+                train_module.load_state_dict(model_state, strict=False)
+
+    optimizer_state = state.get("optimizer_state")
+    if isinstance(optimizer_state, dict):
+        optimizer.load_state_dict(optimizer_state)
+
+    scheduler_state = state.get("scheduler_state")
+    if lr_scheduler is not None and isinstance(scheduler_state, dict):
+        with suppress(Exception):
+            lr_scheduler.load_state_dict(scheduler_state)
+
+    ema_state = state.get("ema_state")
+    if ema_model is not None and isinstance(ema_state, dict):
+        with suppress(Exception):
+            ema_model.load_state_dict(ema_state)
+
+    py_state = state.get("python_random_state")
+    if py_state is not None:
+        with suppress(Exception):
+            random.setstate(py_state)
+    torch_state = state.get("torch_random_state")
+    if torch_state is not None:
+        with suppress(Exception):
+            torch.set_rng_state(torch_state)
+    cuda_state = state.get("torch_cuda_random_state_all")
+    if torch.cuda.is_available() and cuda_state is not None:
+        with suppress(Exception):
+            torch.cuda.set_rng_state_all(cuda_state)
+
+    step = int(state.get("step", 0))
+    next_step = max(1, step + 1)
+    print(f"[native/diffusion] resumed training from state {resume_state_path} (next step={next_step})")
+    return next_step
 
 
 def _maybe_sample(
@@ -1359,6 +1653,139 @@ def _maybe_load_transformer_override(
         print(f"[native/diffusion] warning: failed to load override weights {path}: {exc}")
 
 
+def _run_sd15_vae_finetune(
+    *,
+    config: dict[str, Any],
+    checkpoint_block: dict[str, Any],
+    optimizer_block: dict[str, Any],
+    scheduler_block: dict[str, Any],
+    pipeline: Any,
+    model_type_enum: ModelType,
+    model_path: str,
+    output_dir: Path,
+    pairs: list[tuple[Path, str]],
+    resolution: int,
+    train_device: torch.device,
+    train_dtype: torch.dtype,
+    save_dtype: torch.dtype,
+    max_steps: int,
+    batch_size: int,
+    grad_accum: int,
+    learning_rate: float,
+) -> int:
+    vae = pipeline.vae
+    vae.to(train_device)
+    _set_module_train_state(vae, True)
+
+    params = [param for param in vae.parameters() if param.requires_grad]
+    if not params:
+        raise RuntimeError("No trainable VAE parameters found for fine_tune_vae mode")
+
+    optimizer, optimizer_name = _create_optimizer(
+        params,
+        config=config,
+        optimizer_block=optimizer_block,
+        learning_rate=learning_rate,
+    )
+    total_optimizer_steps = _resolve_optimizer_steps(max_steps, grad_accum)
+    lr_scheduler, scheduler_name = _create_lr_scheduler(
+        optimizer,
+        config=config,
+        scheduler_block=scheduler_block,
+        total_optimizer_steps=total_optimizer_steps,
+    )
+    print(f"[native/diffusion/vae] optimizer={optimizer_name} lr_scheduler={scheduler_name}")
+
+    ema_mode = str(config.get("ema_mode", "off")).strip().lower()
+    ema_decay = float(config.get("ema_decay", 0.999))
+    ema_model: EMAModel | None = None
+    if ema_mode != EMAMode.OFF.value:
+        ema_model = EMAModel(modules=[vae], decay=ema_decay)
+
+    resume_state_path = _resolve_resume_state_path(config, checkpoint_block, output_dir)
+    start_step = _maybe_restore_training_state(
+        resume_state_path=resume_state_path,
+        train_module=vae,
+        adapter=None,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        ema_model=ema_model,
+    )
+
+    max_grad_norm = float(config.get("max_grad_norm", 1.0))
+    save_every = int(
+        checkpoint_block.get("save_every") or config.get("save_every") or config.get("save_every_n_steps") or 0
+    )
+    kl_weight = float(config.get("vae_kl_weight", 1e-6))
+
+    optimizer.zero_grad(set_to_none=True)
+    autocast_enabled = train_device.type == "cuda" and train_dtype in {torch.bfloat16, torch.float16}
+
+    for step in range(start_step, max_steps + 1):
+        selected = random.choices(pairs, k=max(1, batch_size))
+        pixel_values = torch.stack(
+            [_load_image_tensor(image_path, resolution, train_dtype, train_device) for image_path, _ in selected],
+            dim=0,
+        )
+
+        with torch.autocast(device_type=train_device.type, dtype=train_dtype, enabled=autocast_enabled):
+            loss = _compute_vae_loss(
+                vae,
+                pixel_values,
+                kl_weight=kl_weight,
+            )
+
+        scaled_loss = loss / float(max(grad_accum, 1))
+        scaled_loss.backward()
+
+        should_step = (step % max(grad_accum, 1) == 0) or (step == max_steps)
+        if should_step:
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+            optimizer.step()
+            if lr_scheduler is not None:
+                lr_scheduler.step()
+            if ema_model is not None:
+                ema_model.update()
+            optimizer.zero_grad(set_to_none=True)
+
+        if step == start_step or step % 10 == 0 or step == max_steps:
+            print(f"[native/diffusion/vae] step {step}/{max_steps} loss={float(loss.detach().cpu()):.6f}")
+
+        checkpoint_path: Path | None = None
+        if save_every > 0 and step % save_every == 0:
+            checkpoint_path = output_dir / f"vae_step_{step:06d}.safetensors"
+            saved_path = _save_module_state(vae, checkpoint_path, save_dtype=save_dtype)
+            print(f"[native/diffusion/vae] saved VAE checkpoint to {saved_path}")
+            state_path = output_dir / f"state_step_{step:06d}.pt"
+            _save_training_state(
+                state_path,
+                step=step,
+                model_checkpoint=saved_path,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                ema_model=ema_model,
+            )
+
+    final_path = output_dir / "vae_last.safetensors"
+    saved_path = _save_module_state(vae, final_path, save_dtype=save_dtype)
+    final_state_path = output_dir / f"state_step_{max_steps:06d}.pt"
+    _save_training_state(
+        final_state_path,
+        step=max_steps,
+        model_checkpoint=saved_path,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        ema_model=ema_model,
+    )
+    print(f"[native/diffusion/vae] training complete, VAE saved to {saved_path}")
+    print(
+        "[native/diffusion/vae] note: validation sampling in this mode is skipped because sampler reloads from "
+        f"base model path ({model_path}) without injecting fine-tuned VAE weights."
+    )
+    return 0
+
+
 def run_native_diffusion_training(
     config: dict[str, Any],
     *,
@@ -1439,7 +1866,8 @@ def run_native_diffusion_training(
     if training_method in _FULL_TRAINING_METHODS:
         adapter_type, adapter_block = "full", {}
     full_finetune = adapter_type == "full"
-    if training_method == "fine_tune_vae" and family != "sd15":
+    is_vae_finetune = training_method == "fine_tune_vae"
+    if is_vae_finetune and family != "sd15":
         raise ValueError(
             f"Native fine_tune_vae is currently only supported for sd15 family, got '{normalized_model_type}'."
         )
@@ -1506,10 +1934,65 @@ def run_native_diffusion_training(
         ltx_component_paths=ltx_component_paths,
         ltx_template_path=ltx_template_path,
     )
+    if is_vae_finetune:
+        return _run_sd15_vae_finetune(
+            config=config,
+            checkpoint_block=checkpoint_block,
+            optimizer_block=optimizer_block,
+            scheduler_block=scheduler_block,
+            pipeline=pipeline,
+            model_type_enum=model_type_enum,
+            model_path=resolved_model_path,
+            output_dir=output_dir,
+            pairs=pairs,
+            resolution=resolution,
+            train_device=train_device,
+            train_dtype=train_dtype,
+            save_dtype=save_dtype,
+            max_steps=max_steps,
+            batch_size=batch_size,
+            grad_accum=grad_accum,
+            learning_rate=learning_rate,
+        )
+
     train_module = native_model.get_train_module(pipeline)
     dispatched_train_module = _is_dispatched_module(train_module)
 
+    train_primary, text_train_flags, train_vae = _resolve_component_train_flags(
+        config=config,
+        model_block=model_block,
+        family=family,
+        full_finetune=full_finetune,
+        training_method=training_method,
+    )
+    if not train_primary and adapter_type == "full":
+        print("[native/diffusion] warning: primary train module disabled; enabling it to keep objective valid.")
+        train_primary = True
+
+    cache_text_embeddings = _as_bool(
+        data_block.get("cache_text_embeddings", config.get("cache_text_embeddings", True)),
+        True,
+    )
+    text_encoder_training_active = any(text_train_flags.values())
+    if text_encoder_training_active and cache_text_embeddings:
+        cache_text_embeddings = False
+        print("[native/diffusion] disabled cache_text_embeddings because text encoder training is enabled")
+
     _maybe_load_transformer_override(train_module, config, pipeline=pipeline, family=family)
+
+    _set_module_train_state(train_module, full_finetune and train_primary)
+    if train_vae:
+        print(
+            "[native/diffusion] warning: train_vae requested outside fine_tune_vae mode; "
+            "VAE parameters remain frozen in diffusion objective mode."
+        )
+
+    text_encoders = {attr: getattr(pipeline, attr, None) for attr in ("text_encoder", "text_encoder_2", "text_encoder_3")}
+    for attr, module in text_encoders.items():
+        should_train = bool(text_train_flags.get(attr, False))
+        _set_module_train_state(module, should_train)
+        if should_train and module is not None:
+            module.to(train_device)
 
     print(f"[native/diffusion] caching latents+text embeddings for {len(pairs)} samples")
     cached = _cache_training_data(
@@ -1524,6 +2007,8 @@ def run_native_diffusion_training(
         train_dtype,
         allow_video=allow_video_dataset,
         video_frame_count=ltx_video_frame_count,
+        cache_text_embeddings=cache_text_embeddings,
+        keep_text_encoder_on_device=text_encoder_training_active,
     )
     if not cached:
         raise ValueError("No cached samples were produced. Verify dataset paths and conditioning images.")
@@ -1564,10 +2049,10 @@ def run_native_diffusion_training(
         with suppress(Exception):
             train_module.to(train_device)
 
-    for param in train_module.parameters():
-        param.requires_grad_(full_finetune)
-
-    train_module.train()
+    if full_finetune and train_primary:
+        train_module.train()
+    else:
+        train_module.eval()
 
     adapter = None
     if not full_finetune:
@@ -1593,10 +2078,21 @@ def run_native_diffusion_training(
     if adapter is not None and hasattr(adapter, "to") and not dispatched_train_module and not offload_active:
         adapter.to(train_device, dtype=train_dtype)
 
+    trainable_modules: list[torch.nn.Module] = []
+    if full_finetune and train_primary:
+        trainable_modules.append(train_module)
+    if full_finetune:
+        for attr in ("text_encoder", "text_encoder_2", "text_encoder_3"):
+            module = text_encoders.get(attr)
+            if module is not None and text_train_flags.get(attr, False):
+                trainable_modules.append(module)
+
     if adapter is not None:
         params = [param for param in adapter.get_trainable_params() if param.requires_grad]
     else:
-        params = [param for param in train_module.parameters() if param.requires_grad]
+        params = []
+        for module in trainable_modules:
+            params.extend(param for param in module.parameters() if param.requires_grad)
 
     if not params:
         mode = "full-finetune" if full_finetune else f"adapter ({adapter_type})"
@@ -1622,12 +2118,46 @@ def run_native_diffusion_training(
         checkpoint_block.get("save_every") or config.get("save_every") or config.get("save_every_n_steps") or 0
     )
     save_full_model = _as_bool(checkpoint_block.get("save_full_model", config.get("save_full_model", True)), True)
+    ema_mode = str(config.get("ema_mode", "off")).strip().lower()
+    ema_decay = float(config.get("ema_decay", 0.999))
+    ema_model: EMAModel | None = None
+    if ema_mode != EMAMode.OFF.value:
+        if adapter is not None:
+            print("[native/diffusion] warning: EMA is currently applied only to full-finetune modules; skipping for adapter mode")
+        elif trainable_modules:
+            ema_model = EMAModel(modules=trainable_modules, decay=ema_decay)
+
+    resume_state_path = _resolve_resume_state_path(config, checkpoint_block, output_dir)
+    start_step = _maybe_restore_training_state(
+        resume_state_path=resume_state_path,
+        train_module=train_module,
+        adapter=adapter,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        ema_model=ema_model,
+    )
+    if start_step > max_steps:
+        print(
+            f"[native/diffusion] resume state step exceeds max_steps ({start_step}>{max_steps}); nothing to do."
+        )
+        return 0
 
     optimizer.zero_grad(set_to_none=True)
     autocast_enabled = train_device.type == "cuda" and train_dtype in {torch.bfloat16, torch.float16}
 
-    for step in range(1, max_steps + 1):
+    for step in range(start_step, max_steps + 1):
         batch = _pick_batch(cached, batch_size, train_device, train_dtype, family)
+        if batch.prompt_embeds is None:
+            batch = _materialize_batch_prompt_features(
+                model_impl=native_model,
+                pipeline=pipeline,
+                family=family,
+                model_type=model_type_enum,
+                batch=batch,
+                train_device=train_device,
+                train_dtype=train_dtype,
+                requires_grad=text_encoder_training_active,
+            )
 
         forward_ctx = memory_strategy.forward_context() if memory_strategy is not None else nullcontext()
         with forward_ctx:
@@ -1652,6 +2182,8 @@ def run_native_diffusion_training(
             optimizer.step()
             if lr_scheduler is not None:
                 lr_scheduler.step()
+            if ema_model is not None:
+                ema_model.update()
             optimizer.zero_grad(set_to_none=True)
 
         if step == 1 or step % 10 == 0 or step == max_steps:
@@ -1670,28 +2202,57 @@ def run_native_diffusion_training(
         )
 
         if save_every > 0 and step % save_every == 0:
+            saved_path: Path | None = None
             if adapter is not None:
                 ckpt_path = output_dir / f"{adapter_type}_step_{step:06d}.safetensors"
                 adapter.save(str(ckpt_path))
+                saved_path = ckpt_path
             elif save_full_model:
                 stem = "unet" if family in {"sd15", "sdxl"} else "transformer"
                 ckpt_path = output_dir / f"{stem}_step_{step:06d}.safetensors"
                 saved_path = _save_module_state(train_module, ckpt_path, save_dtype=save_dtype)
                 print(f"[native/diffusion] saved full checkpoint to {saved_path}")
+            if saved_path is not None:
+                state_path = output_dir / f"state_step_{step:06d}.pt"
+                _save_training_state(
+                    state_path,
+                    step=step,
+                    model_checkpoint=saved_path,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    ema_model=ema_model,
+                )
 
     if memory_strategy is not None:
         memory_strategy.cleanup()
 
+    final_saved_path: Path | None = None
     if adapter is not None:
         final_path = output_dir / f"{adapter_type}_last.safetensors"
         adapter.save(str(final_path))
         print(f"[native/diffusion] training complete, adapter saved to {final_path}")
+        final_saved_path = final_path
     elif save_full_model:
         stem = "unet" if family in {"sd15", "sdxl"} else "transformer"
         final_path = output_dir / f"{stem}_last.safetensors"
         saved_path = _save_module_state(train_module, final_path, save_dtype=save_dtype)
         print(f"[native/diffusion] training complete, full module saved to {saved_path}")
+        final_saved_path = saved_path
     else:
         print("[native/diffusion] training complete (save_full_model=false, no full checkpoint written)")
+
+    if final_saved_path is not None:
+        final_state_path = output_dir / f"state_step_{max_steps:06d}.pt"
+        _save_training_state(
+            final_state_path,
+            step=max_steps,
+            model_checkpoint=final_saved_path,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            ema_model=ema_model,
+        )
+
+    with suppress(Exception):
+        native_model.offload_text_encoders(pipeline)
 
     return 0

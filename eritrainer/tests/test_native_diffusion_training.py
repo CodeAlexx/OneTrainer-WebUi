@@ -6,18 +6,23 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from eritrainer.cli.native_diffusion import (
+    _compute_vae_loss,
     _build_video_training_pairs,
     _collect_ltx_component_paths,
     _load_media_tensor,
+    _maybe_restore_training_state,
     _maybe_load_transformer_override,
     _maybe_sample,
     _normalize_quantization_mode,
     _normalize_training_method,
     _qwen_pack_latents,
     _qwen_unpack_latents,
+    _resolve_component_train_flags,
     _resolve_ltx_video_frame_count,
+    _save_training_state,
     is_native_diffusion_model_type,
 )
+from eritrainer.training.ema import EMAModel
 from eritrainer.core.interfaces import ModelType
 
 import torch
@@ -85,6 +90,70 @@ def test_native_training_method_normalization():
     assert _normalize_training_method("full_finetune") == "fine_tune"
     assert _normalize_training_method("fine_tune_vae") == "fine_tune_vae"
     assert _normalize_training_method("embedding") == "embedding"
+
+
+def test_resolve_component_train_flags_defaults():
+    train_primary, text_flags, train_vae = _resolve_component_train_flags(
+        config={},
+        model_block={},
+        family="sd15",
+        full_finetune=True,
+        training_method="fine_tune",
+    )
+    assert train_primary is True
+    assert text_flags["text_encoder"] is False
+    assert train_vae is False
+
+
+def test_compute_vae_loss_with_dummy_vae():
+    class _DummyDist:
+        def __init__(self, x):
+            self._x = x
+
+        def sample(self):
+            return self._x
+
+        def kl(self):
+            return torch.zeros(1, device=self._x.device, dtype=self._x.dtype)
+
+    class _DummyVAE(torch.nn.Module):
+        def encode(self, x):
+            return SimpleNamespace(latent_dist=_DummyDist(x))
+
+        def decode(self, z):
+            return SimpleNamespace(sample=z)
+
+    vae = _DummyVAE()
+    pixel_values = torch.randn(2, 3, 16, 16)
+    loss = _compute_vae_loss(vae, pixel_values, kl_weight=1e-6)
+    assert torch.is_tensor(loss)
+    assert float(loss.detach().cpu()) >= 0.0
+
+
+def test_save_and_restore_training_state_roundtrip(tmp_path):
+    module = torch.nn.Linear(4, 4)
+    optimizer = torch.optim.AdamW(module.parameters(), lr=1e-4)
+    ema = EMAModel(modules=[module], decay=0.99)
+    state_path = tmp_path / "state_step_000005.pt"
+
+    _save_training_state(
+        state_path,
+        step=5,
+        model_checkpoint=None,
+        optimizer=optimizer,
+        lr_scheduler=None,
+        ema_model=ema,
+    )
+
+    next_step = _maybe_restore_training_state(
+        resume_state_path=state_path,
+        train_module=module,
+        adapter=None,
+        optimizer=optimizer,
+        lr_scheduler=None,
+        ema_model=ema,
+    )
+    assert next_step == 6
 
 
 def test_collect_ltx_component_paths_prefers_model_block_paths():
