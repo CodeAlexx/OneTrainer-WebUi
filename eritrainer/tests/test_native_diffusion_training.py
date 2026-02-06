@@ -6,10 +6,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from eritrainer.cli.native_diffusion import (
+    _DistributedContext,
     _compute_vae_loss,
     _build_video_training_pairs,
     _collect_ltx_component_paths,
     _load_media_tensor,
+    _maybe_wrap_distributed_module,
     _maybe_restore_training_state,
     _maybe_load_transformer_override,
     _maybe_sample,
@@ -18,6 +20,7 @@ from eritrainer.cli.native_diffusion import (
     _qwen_pack_latents,
     _qwen_unpack_latents,
     _resolve_component_train_flags,
+    _resolve_distributed_context,
     _resolve_ltx_video_frame_count,
     _save_training_state,
     is_native_diffusion_model_type,
@@ -90,6 +93,98 @@ def test_native_training_method_normalization():
     assert _normalize_training_method("full_finetune") == "fine_tune"
     assert _normalize_training_method("fine_tune_vae") == "fine_tune_vae"
     assert _normalize_training_method("embedding") == "embedding"
+
+
+def test_resolve_distributed_context_disabled_by_default():
+    context, device = _resolve_distributed_context({}, {}, torch.device("cpu"))
+    assert context.enabled is False
+    assert device == torch.device("cpu")
+
+
+def test_resolve_distributed_context_initializes_from_env(monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    monkeypatch.setattr(torch.distributed, "init_process_group", lambda **kwargs: calls.update(kwargs))
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda *_args, **_kwargs: None)
+
+    context, device = _resolve_distributed_context(
+        {"distributed": {"enabled": True}},
+        {},
+        torch.device("cuda"),
+    )
+
+    assert context.enabled is True
+    assert context.initialized_here is True
+    assert context.rank == 1
+    assert context.world_size == 2
+    assert context.local_rank == 1
+    assert context.backend == "nccl"
+    assert device == torch.device("cuda", 1)
+    assert calls["rank"] == 1
+    assert calls["world_size"] == 2
+    assert calls["backend"] == "nccl"
+
+
+def test_resolve_distributed_context_uses_existing_group(monkeypatch):
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("RANK", "3")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 3)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
+
+    called: dict[str, bool] = {"init_called": False}
+    monkeypatch.setattr(
+        torch.distributed,
+        "init_process_group",
+        lambda **_kwargs: called.__setitem__("init_called", True),
+    )
+
+    context, device = _resolve_distributed_context(
+        {"distributed": {"enabled": True}},
+        {},
+        torch.device("cpu"),
+    )
+
+    assert context.enabled is True
+    assert context.initialized_here is False
+    assert context.rank == 3
+    assert context.world_size == 4
+    assert device == torch.device("cpu")
+    assert called["init_called"] is False
+
+
+def test_maybe_wrap_distributed_module_wraps_when_enabled(monkeypatch):
+    class _DummyDDP(nn.Module):
+        def __init__(self, module, **kwargs):
+            super().__init__()
+            self.module = module
+            self.kwargs = kwargs
+
+    monkeypatch.setattr("eritrainer.cli.native_diffusion.DistributedDataParallel", _DummyDDP)
+
+    module = nn.Linear(4, 4)
+    context = _DistributedContext(enabled=True, rank=0, world_size=2, local_rank=0, backend="gloo")
+    wrapped = _maybe_wrap_distributed_module(
+        module,
+        context,
+        torch.device("cpu"),
+        find_unused_parameters=True,
+    )
+
+    assert isinstance(wrapped, _DummyDDP)
+    assert wrapped.module is module
+    assert wrapped.kwargs["find_unused_parameters"] is True
+    assert wrapped.kwargs["broadcast_buffers"] is False
 
 
 def test_resolve_component_train_flags_defaults():

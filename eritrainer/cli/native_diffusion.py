@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import inspect
 import math
+import os
 import random
 import subprocess
 from contextlib import nullcontext, suppress
@@ -58,6 +59,7 @@ from eritrainer.training.ema import EMAMode, EMAModel
 
 import torch
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel
 
 import numpy as np
 from PIL import Image
@@ -148,6 +150,142 @@ class _Batch:
     num_frames: int
     height: int
     width: int
+
+
+@dataclass
+class _DistributedContext:
+    enabled: bool = False
+    rank: int = 0
+    world_size: int = 1
+    local_rank: int = 0
+    backend: str | None = None
+    initialized_here: bool = False
+
+    @property
+    def is_main_process(self) -> bool:
+        return self.rank == 0
+
+
+def _resolve_distributed_context(
+    config: dict[str, Any],
+    model_block: dict[str, Any],
+    requested_train_device: torch.device,
+) -> tuple[_DistributedContext, torch.device]:
+    distributed_block = config.get("distributed")
+    distributed_cfg = distributed_block if isinstance(distributed_block, dict) else {}
+
+    explicit_enabled = _as_bool(
+        distributed_cfg.get("enabled", config.get("distributed_enabled", config.get("multi_gpu", False))),
+        False,
+    )
+    env_world_size = _optional_int(os.environ.get("WORLD_SIZE")) or 1
+    cfg_world_size = _optional_int(
+        distributed_cfg.get("world_size", model_block.get("world_size", config.get("world_size")))
+    ) or env_world_size
+    world_size = int(max(1, cfg_world_size or env_world_size))
+    enabled = bool(explicit_enabled or world_size > 1)
+    if not enabled or world_size <= 1:
+        return _DistributedContext(enabled=False), requested_train_device
+
+    if not torch.distributed.is_available():
+        raise RuntimeError("Distributed training was requested, but torch.distributed is unavailable.")
+
+    rank = _optional_int(os.environ.get("RANK"))
+    if rank is None:
+        rank = _optional_int(distributed_cfg.get("rank", config.get("rank")))
+    if rank is None:
+        rank = 0
+    local_rank = _optional_int(os.environ.get("LOCAL_RANK"))
+    if local_rank is None:
+        local_rank = _optional_int(distributed_cfg.get("local_rank", config.get("local_rank")))
+    if local_rank is None:
+        local_rank = rank
+    rank = int(max(0, rank or 0))
+    local_rank = int(max(0, local_rank or 0))
+
+    train_device = requested_train_device
+    if train_device.type == "cuda":
+        device_count = torch.cuda.device_count()
+        if device_count <= 0:
+            raise RuntimeError("Distributed CUDA training requested but no CUDA devices are visible.")
+        if train_device.index is None:
+            train_device = torch.device("cuda", local_rank % device_count)
+
+    backend_default = "nccl" if train_device.type == "cuda" else "gloo"
+    backend = str(distributed_cfg.get("backend", config.get("distributed_backend", backend_default))).strip().lower()
+    if not backend:
+        backend = backend_default
+
+    initialized_here = False
+    if not torch.distributed.is_initialized():
+        master_addr = str(distributed_cfg.get("master_addr", config.get("master_addr", "127.0.0.1")))
+        master_port = str(distributed_cfg.get("master_port", config.get("master_port", "29500")))
+        os.environ.setdefault("MASTER_ADDR", master_addr)
+        os.environ.setdefault("MASTER_PORT", master_port)
+        torch.distributed.init_process_group(
+            backend=backend,
+            rank=rank,
+            world_size=world_size,
+        )
+        initialized_here = True
+    else:
+        rank = int(torch.distributed.get_rank())
+        world_size = int(torch.distributed.get_world_size())
+
+    if train_device.type == "cuda":
+        with suppress(Exception):
+            torch.cuda.set_device(train_device)
+
+    context = _DistributedContext(
+        enabled=True,
+        rank=rank,
+        world_size=world_size,
+        local_rank=local_rank,
+        backend=backend,
+        initialized_here=initialized_here,
+    )
+    print(
+        f"[native/diffusion] distributed enabled rank={context.rank}/{context.world_size} "
+        f"backend={context.backend} device={train_device}"
+    )
+    return context, train_device
+
+
+def _distributed_barrier(context: _DistributedContext) -> None:
+    if not context.enabled:
+        return
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return
+    with suppress(Exception):
+        torch.distributed.barrier()
+
+
+def _finalize_distributed_context(context: _DistributedContext) -> None:
+    if not context.enabled:
+        return
+    _distributed_barrier(context)
+    if context.initialized_here and torch.distributed.is_available() and torch.distributed.is_initialized():
+        with suppress(Exception):
+            torch.distributed.destroy_process_group()
+
+
+def _maybe_wrap_distributed_module(
+    module: torch.nn.Module | None,
+    context: _DistributedContext,
+    train_device: torch.device,
+    *,
+    find_unused_parameters: bool = False,
+) -> torch.nn.Module | None:
+    if module is None or not context.enabled:
+        return module
+    kwargs: dict[str, Any] = {
+        "find_unused_parameters": bool(find_unused_parameters),
+        "broadcast_buffers": False,
+    }
+    if train_device.type == "cuda":
+        kwargs["device_ids"] = [int(train_device.index or 0)]
+        kwargs["output_device"] = int(train_device.index or 0)
+    return DistributedDataParallel(module, **kwargs)
 
 
 def _normalize_training_method(value: Any) -> str:
@@ -1832,8 +1970,15 @@ def run_native_diffusion_training(
     train_dtype = _coerce_dtype(config.get("train_dtype") or model_block.get("dtype") or "bfloat16")
     save_dtype = _coerce_dtype(config.get("output_dtype"), default=train_dtype)
     train_device = torch.device(str(config.get("train_device", "cuda")))
+    distributed_context, train_device = _resolve_distributed_context(
+        config=config,
+        model_block=model_block,
+        requested_train_device=train_device,
+    )
 
     seed = int(config.get("seed", 42))
+    if distributed_context.enabled:
+        seed += int(distributed_context.rank)
     random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -1935,25 +2080,31 @@ def run_native_diffusion_training(
         ltx_template_path=ltx_template_path,
     )
     if is_vae_finetune:
-        return _run_sd15_vae_finetune(
-            config=config,
-            checkpoint_block=checkpoint_block,
-            optimizer_block=optimizer_block,
-            scheduler_block=scheduler_block,
-            pipeline=pipeline,
-            model_type_enum=model_type_enum,
-            model_path=resolved_model_path,
-            output_dir=output_dir,
-            pairs=pairs,
-            resolution=resolution,
-            train_device=train_device,
-            train_dtype=train_dtype,
-            save_dtype=save_dtype,
-            max_steps=max_steps,
-            batch_size=batch_size,
-            grad_accum=grad_accum,
-            learning_rate=learning_rate,
-        )
+        if distributed_context.enabled:
+            _finalize_distributed_context(distributed_context)
+            raise ValueError("fine_tune_vae mode is not supported with distributed native training.")
+        try:
+            return _run_sd15_vae_finetune(
+                config=config,
+                checkpoint_block=checkpoint_block,
+                optimizer_block=optimizer_block,
+                scheduler_block=scheduler_block,
+                pipeline=pipeline,
+                model_type_enum=model_type_enum,
+                model_path=resolved_model_path,
+                output_dir=output_dir,
+                pairs=pairs,
+                resolution=resolution,
+                train_device=train_device,
+                train_dtype=train_dtype,
+                save_dtype=save_dtype,
+                max_steps=max_steps,
+                batch_size=batch_size,
+                grad_accum=grad_accum,
+                learning_rate=learning_rate,
+            )
+        finally:
+            _finalize_distributed_context(distributed_context)
 
     train_module = native_model.get_train_module(pipeline)
     dispatched_train_module = _is_dispatched_module(train_module)
@@ -1977,6 +2128,12 @@ def run_native_diffusion_training(
     if text_encoder_training_active and cache_text_embeddings:
         cache_text_embeddings = False
         print("[native/diffusion] disabled cache_text_embeddings because text encoder training is enabled")
+    if distributed_context.enabled and text_encoder_training_active:
+        _finalize_distributed_context(distributed_context)
+        raise ValueError(
+            "Distributed native diffusion currently supports training only the primary module/adapters; "
+            "text encoder training must be disabled."
+        )
 
     _maybe_load_transformer_override(train_module, config, pipeline=pipeline, family=family)
 
@@ -2078,6 +2235,21 @@ def run_native_diffusion_training(
     if adapter is not None and hasattr(adapter, "to") and not dispatched_train_module and not offload_active:
         adapter.to(train_device, dtype=train_dtype)
 
+    if distributed_context.enabled:
+        if dispatched_train_module:
+            _finalize_distributed_context(distributed_context)
+            raise ValueError("Distributed native diffusion does not support dispatched train modules yet.")
+        if offload_active:
+            _finalize_distributed_context(distributed_context)
+            raise ValueError("Distributed native diffusion is incompatible with layer/activation offloading.")
+
+    train_forward_module = _maybe_wrap_distributed_module(
+        train_module,
+        distributed_context,
+        train_device,
+        find_unused_parameters=bool(not train_primary),
+    )
+
     trainable_modules: list[torch.nn.Module] = []
     if full_finetune and train_primary:
         trainable_modules.append(train_module)
@@ -2140,6 +2312,7 @@ def run_native_diffusion_training(
         print(
             f"[native/diffusion] resume state step exceeds max_steps ({start_step}>{max_steps}); nothing to do."
         )
+        _finalize_distributed_context(distributed_context)
         return 0
 
     optimizer.zero_grad(set_to_none=True)
@@ -2167,7 +2340,7 @@ def run_native_diffusion_training(
                     pipeline,
                     family,
                     batch,
-                    train_module,
+                    train_forward_module,
                     train_dtype,
                     config,
                 )
@@ -2189,19 +2362,20 @@ def run_native_diffusion_training(
         if step == 1 or step % 10 == 0 or step == max_steps:
             print(f"[native/diffusion] step {step}/{max_steps} loss={float(loss.detach().cpu()):.6f}")
 
-        _maybe_sample(
-            config,
-            model_type=model_type_enum,
-            model_path=resolved_model_path,
-            output_dir=output_dir,
-            step=step,
-            train_device=train_device,
-            train_dtype=train_dtype,
-            default_resolution=resolution,
-            default_video_frames=ltx_video_frame_count if allow_video_dataset else None,
-        )
+        if distributed_context.is_main_process:
+            _maybe_sample(
+                config,
+                model_type=model_type_enum,
+                model_path=resolved_model_path,
+                output_dir=output_dir,
+                step=step,
+                train_device=train_device,
+                train_dtype=train_dtype,
+                default_resolution=resolution,
+                default_video_frames=ltx_video_frame_count if allow_video_dataset else None,
+            )
 
-        if save_every > 0 and step % save_every == 0:
+        if distributed_context.is_main_process and save_every > 0 and step % save_every == 0:
             saved_path: Path | None = None
             if adapter is not None:
                 ckpt_path = output_dir / f"{adapter_type}_step_{step:06d}.safetensors"
@@ -2223,25 +2397,27 @@ def run_native_diffusion_training(
                     ema_model=ema_model,
                 )
 
+    _distributed_barrier(distributed_context)
+
     if memory_strategy is not None:
         memory_strategy.cleanup()
 
     final_saved_path: Path | None = None
-    if adapter is not None:
+    if distributed_context.is_main_process and adapter is not None:
         final_path = output_dir / f"{adapter_type}_last.safetensors"
         adapter.save(str(final_path))
         print(f"[native/diffusion] training complete, adapter saved to {final_path}")
         final_saved_path = final_path
-    elif save_full_model:
+    elif distributed_context.is_main_process and save_full_model:
         stem = "unet" if family in {"sd15", "sdxl"} else "transformer"
         final_path = output_dir / f"{stem}_last.safetensors"
         saved_path = _save_module_state(train_module, final_path, save_dtype=save_dtype)
         print(f"[native/diffusion] training complete, full module saved to {saved_path}")
         final_saved_path = saved_path
-    else:
+    elif distributed_context.is_main_process:
         print("[native/diffusion] training complete (save_full_model=false, no full checkpoint written)")
 
-    if final_saved_path is not None:
+    if distributed_context.is_main_process and final_saved_path is not None:
         final_state_path = output_dir / f"state_step_{max_steps:06d}.pt"
         _save_training_state(
             final_state_path,
@@ -2255,4 +2431,5 @@ def run_native_diffusion_training(
     with suppress(Exception):
         native_model.offload_text_encoders(pipeline)
 
+    _finalize_distributed_context(distributed_context)
     return 0
