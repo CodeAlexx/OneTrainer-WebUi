@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import gc
+import json
 import logging
 import math
 import random
+import shutil
 import time
+import traceback
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -93,14 +97,193 @@ class CommandHandler:
 
 
 class BackupManager:
-    """Rolling backup manager for checkpoints and configs."""
+    """Rolling backup manager for checkpoints and configs.
 
-    def __init__(self, output_dir: Path, rolling_count: int = 3) -> None:
+    Provides backup scheduling and management matching OneTrainer's
+    backup system.  Creates timestamped backup directories containing
+    model weights, optimizer state, progress info, and the training
+    config.  Supports rolling backups with auto-pruning of oldest.
+
+    Integrates with ``serenity.checkpoint.CheckpointManager`` when
+    available for the actual save mechanics.
+    """
+
+    def __init__(
+        self,
+        output_dir: Path,
+        rolling_count: int = 3,
+        backup_interval_steps: int = 0,
+        backup_before_save: bool = True,
+    ) -> None:
         self.output_dir = Path(output_dir)
-        self.rolling_count = rolling_count
+        self.rolling_count = max(1, rolling_count)
+        self.backup_interval_steps = backup_interval_steps
+        self.backup_before_save = backup_before_save
+        self._backup_dir = self.output_dir / "backup"
+        self._last_backup_step: int = -1
+
+    @property
+    def backup_dir(self) -> Path:
+        """Root directory containing all backup subdirectories."""
+        return self._backup_dir
 
     def ensure_dir(self) -> None:
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        """Create the backup directory tree if it does not exist."""
+        self._backup_dir.mkdir(parents=True, exist_ok=True)
+
+    def needs_backup(self, current_step: int) -> bool:
+        """Check whether a backup should be created at this step."""
+        if self.backup_interval_steps <= 0:
+            return False
+        if self._last_backup_step < 0:
+            # No backup yet -- backup on first eligible interval
+            return current_step > 0 and current_step % self.backup_interval_steps == 0
+        return (current_step - self._last_backup_step) >= self.backup_interval_steps
+
+    def create_backup(
+        self,
+        progress: TrainProgress,
+        *,
+        model_state: dict[str, Any] | None = None,
+        optimizer_state: dict[str, Any] | None = None,
+        ema_state: dict[str, Any] | None = None,
+        config_data: dict[str, Any] | None = None,
+        label: str | None = None,
+    ) -> Path | None:
+        """Create a backup snapshot.
+
+        Directory layout::
+
+            <backup_dir>/<timestamp>-backup-<step>/
+                model.safetensors    (if model_state provided)
+                optimizer/
+                    optimizer.pt     (if optimizer_state provided)
+                ema/
+                    ema.pt           (if ema_state provided)
+                meta.json            (progress + config)
+
+        After saving, old backups beyond ``rolling_count`` are pruned.
+        Returns the backup path, or None if the save failed.
+        """
+        self.ensure_dir()
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        step_str = f"e{progress.epoch}-s{progress.global_step}"
+        if label:
+            dirname = f"{timestamp}-{label}-{step_str}"
+        else:
+            dirname = f"{timestamp}-backup-{step_str}"
+        backup_path = self._backup_dir / dirname
+
+        try:
+            backup_path.mkdir(parents=True, exist_ok=True)
+
+            # Model weights
+            if model_state is not None:
+                self._save_model_state(backup_path, model_state)
+
+            # Optimizer state
+            if optimizer_state is not None:
+                opt_dir = backup_path / "optimizer"
+                opt_dir.mkdir(parents=True, exist_ok=True)
+                torch.save(optimizer_state, str(opt_dir / "optimizer.pt"))
+
+            # EMA state
+            if ema_state is not None:
+                ema_dir = backup_path / "ema"
+                ema_dir.mkdir(parents=True, exist_ok=True)
+                torch.save(ema_state, str(ema_dir / "ema.pt"))
+
+            # Meta / progress
+            meta: dict[str, Any] = {
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "train_progress": {
+                    "epoch": progress.epoch,
+                    "global_step": progress.global_step,
+                    "ema_loss": progress.ema_loss,
+                },
+            }
+            if config_data is not None:
+                meta["config"] = config_data
+
+            with open(backup_path / "meta.json", "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, default=str)
+
+            self._last_backup_step = progress.global_step
+            logger.info("Backup created at step %d -> %s", progress.global_step, backup_path)
+
+        except Exception:
+            logger.error("Failed to create backup: %s", traceback.format_exc())
+            # Clean up partial backup
+            try:
+                if backup_path.is_dir():
+                    shutil.rmtree(backup_path)
+            except Exception:
+                logger.error("Failed to clean up partial backup: %s", traceback.format_exc())
+            return None
+
+        # Prune old backups
+        self.prune_backups()
+        return backup_path
+
+    def _save_model_state(
+        self,
+        backup_path: Path,
+        model_state: dict[str, Any],
+    ) -> None:
+        """Save model weights, using safetensors if available."""
+        try:
+            from safetensors.torch import save_file
+            save_file(
+                {k: v.detach().cpu().contiguous() for k, v in model_state.items()},
+                str(backup_path / "model.safetensors"),
+            )
+        except ImportError:
+            torch.save(model_state, str(backup_path / "model.pt"))
+
+    def prune_backups(self, keep: int | None = None) -> list[Path]:
+        """Remove old backups, keeping only the *keep* most recent.
+
+        Backups are sorted by directory name (which includes a timestamp
+        prefix) so newest are kept.  Returns list of removed paths.
+        """
+        num_keep = keep if keep is not None else self.rolling_count
+        if not self._backup_dir.is_dir():
+            return []
+
+        backup_dirs = sorted(
+            [d for d in self._backup_dir.iterdir() if d.is_dir()],
+            reverse=True,  # newest first
+        )
+
+        if len(backup_dirs) <= num_keep:
+            return []
+
+        to_remove = backup_dirs[num_keep:]
+        removed: list[Path] = []
+        for dirpath in to_remove:
+            try:
+                shutil.rmtree(dirpath)
+                removed.append(dirpath)
+                logger.info("Removed old backup: %s", dirpath)
+            except Exception:
+                logger.warning("Could not delete old backup: %s", dirpath)
+
+        return removed
+
+    def list_backups(self) -> list[Path]:
+        """Return all backup directories sorted newest-first."""
+        if not self._backup_dir.is_dir():
+            return []
+        return sorted(
+            [d for d in self._backup_dir.iterdir() if d.is_dir()],
+            reverse=True,
+        )
+
+    def get_latest_backup(self) -> Path | None:
+        """Return the most recent backup directory, or None."""
+        backups = self.list_backups()
+        return backups[0] if backups else None
 
 
 class GCScheduler:
@@ -145,7 +328,11 @@ class Trainer:
         self.nan_handler = NaNHandler()
         self.command_handler = CommandHandler()
         self.gc_scheduler = GCScheduler()
-        self.backup_manager = BackupManager(Path(config.output_dir))
+        self.backup_manager = BackupManager(
+            output_dir=Path(config.output_dir),
+            rolling_count=config.rolling_backup_count,
+            backup_before_save=config.backup_before_save,
+        )
 
         # Gradient scaler for mixed precision (created lazily in train())
         self._grad_scaler: torch.amp.GradScaler | None = None
