@@ -1,5 +1,15 @@
 """Memory management utilities."""
 
+from serenity.memory.allocators import (
+    PinnedMemoryPool,
+    StaticActivationAllocator,
+    StaticLayerAllocator,
+    StaticLayerTensorAllocator,
+    SyncEvent,
+    create_stream_context,
+    pin_tensor_,
+    unpin_tensor_,
+)
 from serenity.memory.checkpoint_layer import OffloadCheckpointLayer
 from serenity.memory.conductor import LayerOffloadConductor
 from serenity.memory.manager import MemoryManager
@@ -14,6 +24,14 @@ __all__ = [
     "MemoryStrategy",
     "NoOpMemoryStrategy",
     "LayerOffloadStrategy",
+    "StaticLayerAllocator",
+    "StaticLayerTensorAllocator",
+    "StaticActivationAllocator",
+    "PinnedMemoryPool",
+    "SyncEvent",
+    "create_stream_context",
+    "pin_tensor_",
+    "unpin_tensor_",
     "torch_gc",
     "device_equals",
     "tensors_match_device",
