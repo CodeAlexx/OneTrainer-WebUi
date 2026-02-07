@@ -437,7 +437,7 @@ def _legacy_bridge_opt_in(config: dict[str, Any]) -> bool:
         return True
 
     backend = str(config.get("backend") or config.get("execution_backend") or "").strip().lower()
-    return backend in {"legacy", "onetrainer", "bridge"}
+    return backend in {"legacy", "bridge"}
 
 
 def _run_legacy_bridge(

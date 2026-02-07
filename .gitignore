@@ -4,6 +4,7 @@
 *.pyc
 *.swp
 *~
+*.sh
 debug*.ipynb
 debug*.py
 /debug*
