@@ -1,7 +1,6 @@
 """Quantization utilities for model weight compression.
 
-Ported from OneTrainer's ``modules/module/quantized/`` and
-``modules/util/quantization_util.py``.  Supports:
+Supports:
 
 - **NF4** quantization via bitsandbytes (4-bit NormalFloat)
 - **FP8** quantization (float8_e4m3fn per-tensor scaling)
@@ -73,7 +72,7 @@ class QuantMethod(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# Mixin ABCs (mirroring OneTrainer's QuantizedModuleMixin / QuantizedLinearMixin)
+# Mixin ABCs for quantized modules
 # ---------------------------------------------------------------------------
 
 class QuantizedModuleMixin(ABC):

@@ -1,6 +1,5 @@
 """Diffusion schedule coefficients for epsilon-prediction models.
 
-Parity with OneTrainer's DiffusionScheduleCoefficients.
 Pre-computes all standard DDPM quantities from a beta schedule.
 """
 

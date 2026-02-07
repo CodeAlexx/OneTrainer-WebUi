@@ -1,7 +1,6 @@
 """Textual Inversion / Embedding training utilities.
 
-Parity with OneTrainer's embedding training (ModelSetupEmbeddingMixin,
-AdditionalEmbeddingWrapper) for SD1.5, SDXL, and other architectures.
+Supports embedding training for SD1.5, SDXL, and other architectures.
 """
 
 from __future__ import annotations

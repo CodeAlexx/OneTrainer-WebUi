@@ -1,6 +1,5 @@
 """Learning rate scheduler factory with warmup support.
 
-Parity with OneTrainer's create_lr_scheduler / lr_scheduler_util.
 Includes cosine with restarts, hard restarts, REX, Adafactor, and custom.
 """
 
@@ -29,7 +28,7 @@ class SchedulerType(str, Enum):
 
 
 # --------------------------------------------------------------------------- #
-# Lambda functions (pure, stateless, following OneTrainer's lr_scheduler_util)
+# Lambda functions (pure, stateless)
 # --------------------------------------------------------------------------- #
 
 
@@ -164,7 +163,6 @@ def create_lr_scheduler(
 ) -> LRScheduler:
     """Create a learning rate scheduler with optional warmup.
 
-    Parity with OneTrainer's create_lr_scheduler / lr_scheduler_util.
     All schedules are implemented as LambdaLR for consistency.
     """
     if isinstance(scheduler_type, str):

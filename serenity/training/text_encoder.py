@@ -1,6 +1,5 @@
 """Text encoder training utilities: LoRA, freeze/unfreeze, separate LRs.
 
-Parity with OneTrainer's text encoder training setup across model setups.
 Supports CLIP, T5, Llama, and dual-encoder configurations.
 """
 

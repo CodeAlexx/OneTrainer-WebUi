@@ -1,7 +1,4 @@
-"""Mixed precision utilities: autocast, grad scaler, and dtype helpers.
-
-Parity with OneTrainer's dtype_util.py.
-"""
+"""Mixed precision utilities: autocast, grad scaler, and dtype helpers."""
 
 from __future__ import annotations
 

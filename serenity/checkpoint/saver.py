@@ -1,10 +1,7 @@
 """Model saving in safetensors, diffusers, and internal checkpoint formats.
 
-Ported from OneTrainer's modelSaver hierarchy:
-- DtypeModelSaverMixin  -> dtype conversion + safetensors header
-- LoRASaverMixin        -> LoRA/adapter safetensors
-- InternalModelSaverMixin -> optimizer + EMA + meta.json
-- StableDiffusionModelSaver -> diffusers save_pretrained
+Handles dtype conversion, safetensors headers, LoRA/adapter weights,
+optimizer + EMA + meta.json checkpoints, and diffusers save_pretrained.
 
 Serenity collapses the deep mixin/class-per-model tree into a single
 ``ModelSaver`` that dispatches on format and training method.
@@ -53,7 +50,7 @@ def _convert_state_dict_dtype(
 ) -> dict[str, Tensor]:
     """Move every tensor to CPU and optionally cast to *dtype*.
 
-    Mirrors OneTrainer ``DtypeModelSaverMixin._convert_state_dict_dtype``.
+    Moves every tensor to CPU and optionally casts to the target dtype.
     """
     if dtype is None:
         return {k: v.detach().cpu().contiguous() for k, v in state_dict.items()}
@@ -82,9 +79,7 @@ def _build_safetensors_header(
 ) -> dict[str, str]:
     """Build a safetensors metadata header.
 
-    Compatible with the header format produced by OneTrainer's
-    ``DtypeModelSaverMixin._create_safetensors_header`` but uses Serenity
-    branding.
+    Compatible with standard safetensors header format.
     """
     header: dict[str, str] = {}
 
@@ -286,8 +281,8 @@ class ModelSaver:
     ) -> Path:
         """Save a full training checkpoint (model + optimizer + EMA + meta).
 
-        Mirrors OneTrainer's ``InternalModelSaverMixin._save_internal_data``
-        but keeps everything under one directory.
+        Saves model weights, optimizer state, EMA state, and metadata
+        under one directory.
 
         Layout::
 

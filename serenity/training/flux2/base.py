@@ -8,7 +8,7 @@ Key features:
 - Flow matching training objective (velocity prediction)
 - Qwen3 text encoder with stacked layer embeddings
 - 32→128 channel VAE patchification
-- Conductor-based memory management (like OneTrainer)
+- Conductor-based memory management
 - Integrated checkpointing + activation offloading + layer offloading
 """
 
@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-# Import conductor-based checkpointing (OneTrainer-style)
+# Import conductor-based checkpointing
 from serenity.training.checkpointing import (
     enable_checkpointing_for_flux2_transformer,
     LayerOffloadConductor,
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 class GradientCheckpointingMethod(str, Enum):
-    """Gradient checkpointing modes matching OneTrainer."""
+    """Gradient checkpointing modes."""
     OFF = "off"
     ON = "on"
     CPU_OFFLOADED = "cpu_offloaded"
@@ -75,7 +75,7 @@ class Flux2TrainerConfig:
     timestep_bias: float = 0.0  # Bias towards low (negative) or high (positive) timesteps
     velocity_weighting: str = "uniform"  # "uniform", "sigma_sqrt", "snr"
 
-    # VRAM optimization (conductor-based, matching OneTrainer)
+    # VRAM optimization (conductor-based)
     gradient_checkpointing: str = "cpu_offloaded"  # "off", "on", "cpu_offloaded"
     enable_activation_offloading: bool = True  # Offload activations to CPU during forward
     layer_offload_fraction: float = 0.0  # Fraction of layers to keep offloaded (0.9 = 90% on CPU)
@@ -191,7 +191,7 @@ class Flux2BaseTrainer(ABC):
         """
         Set up model for training with conductor-based memory management.
 
-        This implements OneTrainer's unified approach where:
+        The unified approach:
         1. Gradient checkpointing wraps each transformer block
         2. Activation offloading saves activations to CPU during forward
         3. Layer offloading moves layers between CPU/GPU as needed
@@ -262,10 +262,9 @@ class Flux2BaseTrainer(ABC):
         """
         Create LayerOffloadConductor with proper block wrapping.
 
-        This follows OneTrainer's enable_checkpointing_for_flux2_transformer pattern:
-        - Wraps transformer_blocks with OffloadCheckpointLayer
-        - Wraps single_transformer_blocks with OffloadCheckpointLayer
-        - Creates conductor that manages all memory operations
+        Wraps transformer_blocks and single_transformer_blocks with
+        OffloadCheckpointLayer and creates a conductor that manages all
+        memory operations.
         """
         gc_method = self.config.get_gradient_checkpointing_method()
 
@@ -393,7 +392,7 @@ class Flux2BaseTrainer(ABC):
         Sample timesteps for flow matching training.
 
         FLUX.2 uses DISCRETE timesteps with resolution-dependent shift.
-        OneTrainer formula: timestep = N * shift * u / ((shift - 1) * u + N)
+        Shift formula: timestep = N * shift * u / ((shift - 1) * u + N)
 
         Args:
             batch_size: Number of timesteps to sample
@@ -405,7 +404,7 @@ class Flux2BaseTrainer(ABC):
         """
         import math
 
-        # Calculate resolution-dependent shift (matching OneTrainer)
+        # Calculate resolution-dependent shift
         # Uses scheduler config defaults: base_shift=0.5, max_shift=1.15
         base_seq_len = 256
         max_seq_len = 4096
@@ -422,7 +421,7 @@ class Flux2BaseTrainer(ABC):
         num_train_timesteps = 1000
         u = torch.rand(batch_size, device=self.train_device)
 
-        # Apply proper shift transformation (matching OneTrainer)
+        # Apply proper shift transformation
         # First scale u to [0, N], then apply shift
         t_scaled = u * num_train_timesteps
         t = num_train_timesteps * shift * t_scaled / ((shift - 1) * t_scaled + num_train_timesteps)
@@ -485,7 +484,7 @@ class Flux2BaseTrainer(ABC):
         """
         Compute noisy latents using flow matching interpolation.
 
-        OneTrainer formula: sigma = (timestep + 1) / num_train_timesteps
+        Formula: sigma = (timestep + 1) / num_train_timesteps
         Interpolation: x_t = sigma * noise + (1 - sigma) * latents
 
         Args:
@@ -497,7 +496,7 @@ class Flux2BaseTrainer(ABC):
         Returns:
             Tuple of (noisy latents [B, C, H, W], sigma [B, 1, 1, 1])
         """
-        # Compute sigma from discrete timestep (matches OneTrainer)
+        # Compute sigma from discrete timestep
         # +1 ensures sigma is never 0 (ranges from 1/1000 to 1.0)
         sigma = ((timesteps.float() + 1) / num_train_timesteps).view(-1, 1, 1, 1)
 

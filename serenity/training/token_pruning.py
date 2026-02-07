@@ -2,9 +2,7 @@
 
 Reduces token count by removing padding/low-importance tokens,
 saving memory and compute during transformer forward passes.
-
-Parity with OneTrainer's token pruning in ChromaModel and QwenModel
-(attention-mask-based sequence trimming with 16-aligned padding).
+Uses attention-mask-based sequence trimming with 16-aligned padding.
 """
 
 from __future__ import annotations

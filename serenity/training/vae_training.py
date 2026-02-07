@@ -1,6 +1,6 @@
 """VAE training utilities: encoder/decoder fine-tuning, KL + reconstruction loss.
 
-Parity with OneTrainer's VAE fine-tuning support for SD1.5 and SDXL.
+Supports VAE fine-tuning for SD1.5 and SDXL.
 """
 
 from __future__ import annotations

@@ -298,7 +298,7 @@ def _apply_caps_randomization(
 def _apply_tag_processing(caption: str, text_config: ConceptTextConfig) -> str:
     """Apply tag dropout, caps randomization, and shuffling to a caption.
 
-    Processing order matches OneTrainer:
+    Processing order:
     1. Tag dropout (with special tag handling)
     2. Caps randomization
     3. Tag shuffling

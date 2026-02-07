@@ -1,8 +1,7 @@
 """Config versioning and migration system.
 
-Provides version-based migration for Serenity training configs, modeled
-after OneTrainer's ``BaseConfig.from_dict`` migration chain.  Each saved
-config embeds a ``__version`` key.  When loading, the system applies
+Provides version-based migration for Serenity training configs.  Each
+saved config embeds a ``__version`` key.  When loading, the system applies
 registered migration functions in sequence to bring the data up to the
 current schema version.
 

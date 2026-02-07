@@ -1,8 +1,8 @@
 """Named parameter groups for per-component learning rates.
 
-Ported from OneTrainer's ``NamedParameterGroup`` / ``NamedParameterGroupCollection``
-(``modules/util/NamedParameterGroup.py``).  Serenity simplifies the API while
-keeping full PyTorch optimizer compatibility.
+Provides ``NamedParameterGroup`` and ``NamedParameterGroupCollection`` for
+building per-component optimizer parameter groups with independent learning
+rates while keeping full PyTorch optimizer compatibility.
 
 Each group is a dict following the PyTorch convention::
 
@@ -50,8 +50,8 @@ class NamedParameterGroupCollection:
     """Collect multiple ``NamedParameterGroup`` entries and convert to
     PyTorch optimizer ``param_groups`` format.
 
-    Mirrors OneTrainer's ``NamedParameterGroupCollection`` but avoids the
-    coupling to ``TrainConfig`` for the LR scaler.
+    Decoupled from ``TrainConfig`` for the LR scaler, allowing standalone
+    usage with any optimizer.
     """
 
     def __init__(self) -> None:

@@ -1,8 +1,7 @@
 """Per-component model weight dtype management.
 
-Mirrors OneTrainer's ``ModelWeightDtypes`` class and ``dtype_util.py``
-helpers.  Provides a centralized way to track which dtype each model
-component should use, enabling mixed-precision training configurations.
+Provides a centralized way to track which dtype each model component
+should use, enabling mixed-precision training configurations.
 
 Usage::
 

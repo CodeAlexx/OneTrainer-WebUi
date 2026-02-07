@@ -1,6 +1,5 @@
 """Static memory allocators, pinned memory pools, and sync event wrappers.
 
-Parity with OneTrainer's ``LayerOffloadConductor`` internals:
 - ``StaticLayerAllocator`` / ``StaticLayerTensorAllocator``: pre-allocate
   GPU buffers to avoid fragmentation during layer offloading.
 - ``StaticActivationAllocator``: pre-allocate activation cache buffers.

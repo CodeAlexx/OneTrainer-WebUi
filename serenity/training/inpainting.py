@@ -1,6 +1,6 @@
 """Inpainting training utilities: masked loss, conditioning input, prior preservation.
 
-Parity with OneTrainer's inpainting training for SD1.5 (9-channel) and SDXL.
+Supports inpainting training for SD1.5 (9-channel) and SDXL.
 """
 
 from __future__ import annotations

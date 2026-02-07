@@ -4,11 +4,6 @@ Provides unified model saving in safetensors and diffusers formats,
 training checkpoint persistence (optimizer + EMA + progress), and
 rolling checkpoint management with automatic cleanup.
 
-Ported from OneTrainer's ``modules/modelSaver/`` and
-``modules/modelLoader/`` hierarchies.  Serenity collapses the deep
-per-model class trees into a small set of composable functions and
-dataclasses.
-
 Quick start::
 
     from serenity.checkpoint import ModelSaver, CheckpointManager

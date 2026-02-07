@@ -1,8 +1,6 @@
 """Path utilities for file discovery, safe naming, and atomic writes.
 
-Provides helpers matching OneTrainer's ``path_util`` module, plus
-additional utilities for safe filename generation and atomic file
-operations.
+Provides helpers for safe filename generation and atomic file operations.
 """
 
 from __future__ import annotations

@@ -1,8 +1,7 @@
 """Video data loading and frame extraction for training datasets.
 
 Provides frame extraction from video files with configurable frame counts,
-format support, and temporal sampling strategies matching OneTrainer's
-LoadVideo pipeline module.
+format support, and temporal sampling strategies.
 """
 
 from __future__ import annotations

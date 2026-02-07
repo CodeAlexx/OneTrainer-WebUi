@@ -1,8 +1,7 @@
 """Sample generation configuration.
 
 Defines ``SampleConfig`` for controlling periodic sample generation
-during training, matching OneTrainer's SampleConfig fields with
-Serenity-style dataclass conventions.
+during training.
 """
 
 from __future__ import annotations

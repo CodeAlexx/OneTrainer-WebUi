@@ -2,8 +2,6 @@
 
 Converts between diffusers, safetensors, and legacy checkpoint formats.
 Also handles LoRA key mapping between formats (OMI, diffusers, legacy).
-
-Parity with OneTrainer's ``modules/util/convert/`` hierarchy.
 """
 
 from __future__ import annotations

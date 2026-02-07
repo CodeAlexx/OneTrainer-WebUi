@@ -1,7 +1,6 @@
 """Validation loop for between-epoch or interval-based validation.
 
-Parity with OneTrainer's ``GenericTrainer.__validate`` which computes
-per-concept validation losses and logs them to TensorBoard.
+Computes per-concept validation losses and logs them to TensorBoard.
 """
 
 from __future__ import annotations
@@ -55,9 +54,9 @@ class ValidationConfig:
 class ValidationRunner:
     """Runs a validation loop over a separate dataset.
 
-    Follows OneTrainer's pattern: iterate the validation DataLoader with
-    ``torch.no_grad()``, accumulate per-concept losses, compute averages,
-    and report them to a logger callback.
+    Iterates the validation DataLoader with ``torch.no_grad()``, accumulates
+    per-concept losses, computes averages, and reports them to a logger
+    callback.
 
     Usage::
 
@@ -140,7 +139,7 @@ class ValidationRunner:
         accumulated_loss: dict[str, float] = defaultdict(float)
         concept_counts: dict[str, int] = defaultdict(int)
 
-        # Label collision handling (OneTrainer parity)
+        # Label collision handling
         seed_to_label: dict[int, str] = {}
         label_to_seed: dict[str, int] = {}
 
@@ -242,9 +241,8 @@ class ValidationRunner:
     ) -> str:
         """Resolve a unique label for each concept, handling collisions.
 
-        Follows OneTrainer's label collision resolution strategy:
-        if two different concept seeds map to the same label, add a
-        numeric suffix to disambiguate.
+        If two different concept seeds map to the same label, a numeric
+        suffix is added to disambiguate.
         """
         concept_name = ""
         concept_path = ""

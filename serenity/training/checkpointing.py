@@ -1,7 +1,6 @@
 """
 Gradient checkpointing utilities for Serenity.
 
-Ported from OneTrainer's modules/util/checkpointing_util.py.
 Provides layer-specific gradient checkpointing with optional activation offloading.
 """
 
@@ -282,8 +281,6 @@ def enable_checkpointing(
     """
     Enable gradient checkpointing with optional layer/activation offloading.
 
-    Follows OneTrainer's enable_checkpointing signature exactly.
-
     Args:
         model: Model to enable checkpointing on
         config: TrainerConfig with memory settings
@@ -299,7 +296,6 @@ def enable_checkpointing(
     train_device = torch.device("cuda")
     temp_device = torch.device("cpu")
 
-    # Create conductor matching OneTrainer's approach
     gc_method = config.memory.get_gradient_checkpointing_method()
     conductor = LayerOffloadConductor(
         module=model,
@@ -356,8 +352,6 @@ def enable_checkpointing_for_z_image_transformer(
     """
     Enable gradient checkpointing for Z-Image transformer.
 
-    Follows OneTrainer's signature exactly.
-
     Args:
         model: ZImageTransformer2DModel
         config: TrainerConfig with memory settings
@@ -379,8 +373,6 @@ def enable_checkpointing_for_flux_transformer(
     """
     Enable gradient checkpointing for Flux transformer.
 
-    Follows OneTrainer's signature exactly.
-
     Args:
         model: FluxTransformer2DModel
         config: TrainerConfig with memory settings
@@ -401,8 +393,8 @@ def enable_checkpointing_for_flux2_transformer(
     """
     Enable gradient checkpointing for Flux 2 transformer.
 
-    Follows OneTrainer's signature exactly. Flux 2 has the same layer
-    structure as Flux 1 (transformer_blocks + single_transformer_blocks).
+    Flux 2 has the same layer structure as Flux 1
+    (transformer_blocks + single_transformer_blocks).
 
     Args:
         model: Flux2Transformer2DModel

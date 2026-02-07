@@ -60,7 +60,7 @@ class ModelType(str, Enum):
     QWEN_IMAGE_EDIT = "qwen_image_edit"
 
     # ------------------------------------------------------------------
-    # Helper methods (matching OneTrainer's ModelType helpers)
+    # Helper methods
     # ------------------------------------------------------------------
 
     def is_stable_diffusion(self) -> bool:

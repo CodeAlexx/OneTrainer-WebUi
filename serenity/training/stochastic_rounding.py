@@ -1,6 +1,5 @@
 """bf16 stochastic rounding for more precise optimizer updates.
 
-Parity with OneTrainer's bf16_stochastic_rounding.py.
 Stochastic rounding reduces the bias introduced by truncation when
 converting float32 optimizer states to bfloat16.
 """

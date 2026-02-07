@@ -25,7 +25,7 @@ def _load_config(path: Path) -> dict[str, Any]:
     raise ValueError(f"Unsupported config format: {path.suffix}")
 
 
-def _is_onetrainer_config(config: dict[str, Any]) -> bool:
+def _is_legacy_config(config: dict[str, Any]) -> bool:
     return "base_model_name" in config or "output_model_destination" in config
 
 
@@ -100,7 +100,7 @@ MODEL_TYPE_MAP: dict[str, str] = {
     "flux2_klein_9b": "FLUX_2",
 }
 
-_ONETRAINER_TO_SERENITY_MODEL_TYPE: dict[str, str] = {
+_LEGACY_TO_SERENITY_MODEL_TYPE: dict[str, str] = {
     "FLUX_DEV_1": "flux_dev",
     "FLUX_FILL_DEV_1": "flux_fill_dev",
     "FLUX_2": "flux_2",
@@ -131,7 +131,7 @@ _MODEL_FILE_SUFFIXES = {
 }
 
 
-def _normalize_onetrainer_model_type(value: Any) -> str:
+def _normalize_legacy_model_type(value: Any) -> str:
     if value is None:
         return ""
     text = str(value).strip().upper().replace("-", "_")
@@ -171,7 +171,7 @@ def _coerce_ot_gradient_checkpointing(value: Any) -> str | None:
     return None
 
 
-def _collect_concepts_from_onetrainer_config(config: dict[str, Any], source_path: Path) -> list[dict[str, Any]]:
+def _collect_concepts_from_legacy_config(config: dict[str, Any], source_path: Path) -> list[dict[str, Any]]:
     concepts = config.get("concepts")
     if isinstance(concepts, list) and concepts:
         out: list[dict[str, Any]] = []
@@ -231,13 +231,13 @@ def _normalize_output_dir(output_destination: str, source_path: Path) -> str:
     return str(candidate)
 
 
-def _convert_onetrainer_to_serenity(config: dict[str, Any], source_path: Path) -> dict[str, Any]:
-    ot_model_type = _normalize_onetrainer_model_type(config.get("model_type"))
-    normalized_model_type = _ONETRAINER_TO_SERENITY_MODEL_TYPE.get(ot_model_type, _normalize_model_type(ot_model_type))
+def _convert_legacy_to_serenity(config: dict[str, Any], source_path: Path) -> dict[str, Any]:
+    ot_model_type = _normalize_legacy_model_type(config.get("model_type"))
+    normalized_model_type = _LEGACY_TO_SERENITY_MODEL_TYPE.get(ot_model_type, _normalize_model_type(ot_model_type))
 
     model_path = str(config.get("base_model_name") or config.get("base_model") or config.get("model_path") or "")
     if not model_path:
-        raise ValueError("Missing model path in OneTrainer config (`base_model_name`/`base_model`/`model_path`).")
+        raise ValueError("Missing model path in legacy config (`base_model_name`/`base_model`/`model_path`).")
 
     training_method_raw = str(config.get("training_method") or "").strip().lower().replace("-", "_")
     training_method = {
@@ -282,9 +282,9 @@ def _convert_onetrainer_to_serenity(config: dict[str, Any], source_path: Path) -
     if train_dtype is None:
         train_dtype = "bfloat16"
 
-    data_concepts = _collect_concepts_from_onetrainer_config(config, source_path)
+    data_concepts = _collect_concepts_from_legacy_config(config, source_path)
     if not data_concepts:
-        raise ValueError("No concepts found in OneTrainer config; provide `concepts` or a valid `concept_file_name`.")
+        raise ValueError("No concepts found in legacy config; provide `concepts` or a valid `concept_file_name`.")
 
     converted: dict[str, Any] = {
         "model_type": normalized_model_type,
@@ -432,24 +432,24 @@ def _native_diffusion_opt_in(config: dict[str, Any]) -> bool:
     )
 
 
-def _onetrainer_bridge_opt_in(config: dict[str, Any]) -> bool:
-    if _is_truthy(os.environ.get("SERENITY_ENABLE_ONETRAINER_BRIDGE")):
+def _legacy_bridge_opt_in(config: dict[str, Any]) -> bool:
+    if _is_truthy(os.environ.get("SERENITY_ENABLE_LEGACY_BRIDGE")):
         return True
 
     backend = str(config.get("backend") or config.get("execution_backend") or "").strip().lower()
-    return backend in {"onetrainer", "bridge"}
+    return backend in {"legacy", "onetrainer", "bridge"}
 
 
-def _run_onetrainer_bridge(
+def _run_legacy_bridge(
     config: dict[str, Any],
     *,
     config_path: Path,
     steps_override: int | None = None,
 ) -> int:
-    if _is_onetrainer_config(config):
+    if _is_legacy_config(config):
         train_cfg = config
     else:
-        train_cfg = _convert_serenity_to_onetrainer(
+        train_cfg = _convert_serenity_to_legacy(
             config,
             source_path=config_path,
             steps_override=steps_override,
@@ -556,7 +556,7 @@ def _extract_adapter_block(config: dict[str, Any]) -> tuple[str, dict[str, Any]]
     return peft_type, {}
 
 
-def _convert_serenity_to_onetrainer(
+def _convert_serenity_to_legacy(
     config: dict[str, Any],
     source_path: Path,
     steps_override: int | None = None,
@@ -565,7 +565,7 @@ def _convert_serenity_to_onetrainer(
     if not normalized_model_type:
         raise ValueError("Missing model_type in config.")
 
-    onetrainer_model_type = _map_model_type(normalized_model_type)
+    legacy_model_type = _map_model_type(normalized_model_type)
     structured = _is_structured_config(config)
 
     model_block = config.get("model", {}) if structured and isinstance(config.get("model"), dict) else {}
@@ -776,7 +776,7 @@ def _convert_serenity_to_onetrainer(
     train_dict: dict[str, Any] = {
         "__version": 10,
         "training_method": training_method_name,
-        "model_type": onetrainer_model_type,
+        "model_type": legacy_model_type,
         "peft_type": peft_type,
         "base_model_name": resolved_model,
         "output_model_destination": output_dir,
@@ -858,12 +858,12 @@ def _convert_serenity_to_onetrainer(
         train_dict["lokr_use_tucker"] = bool(lokr_block.get("use_tucker", False))
         train_dict["lokr_full_matrix"] = bool(lokr_block.get("full_matrix", False))
 
-    if onetrainer_model_type in {"FLUX_2", "Z_IMAGE", "QWEN", "STABLE_DIFFUSION_3", "STABLE_DIFFUSION_35"}:
+    if legacy_model_type in {"FLUX_2", "Z_IMAGE", "QWEN", "STABLE_DIFFUSION_3", "STABLE_DIFFUSION_35"}:
         train_dict["transformer"] = {
             "weight_dtype": transformer_weight_dtype,
             "train": True,
         }
-    if onetrainer_model_type in {"STABLE_DIFFUSION_XL_10_BASE", "STABLE_DIFFUSION_15"}:
+    if legacy_model_type in {"STABLE_DIFFUSION_XL_10_BASE", "STABLE_DIFFUSION_15"}:
         train_dict["unet"] = {
             "weight_dtype": unet_weight_dtype,
             "train": True,
@@ -874,7 +874,7 @@ def _convert_serenity_to_onetrainer(
         text_encoder_config["train"] = bool(train_text_encoder)
     train_dict["text_encoder"] = text_encoder_config
 
-    if onetrainer_model_type == "STABLE_DIFFUSION_XL_10_BASE":
+    if legacy_model_type == "STABLE_DIFFUSION_XL_10_BASE":
         text_encoder_2_config = {"weight_dtype": text_encoder_weight_dtype}
         if train_text_encoder_2 is not None:
             text_encoder_2_config["train"] = bool(train_text_encoder_2)
@@ -990,8 +990,8 @@ def train_command(args: list[str] | None = None) -> int:
     if not isinstance(cfg, dict):
         raise ValueError("Config root must be a mapping/object")
 
-    if _is_onetrainer_config(cfg):
-        cfg = _convert_onetrainer_to_serenity(cfg, source_path=config_path)
+    if _is_legacy_config(cfg):
+        cfg = _convert_legacy_to_serenity(cfg, source_path=config_path)
 
     normalized_model_type = _normalize_model_type(
         cfg.get("model_type") or (cfg.get("model", {}).get("type") if isinstance(cfg.get("model"), dict) else None)
@@ -1015,8 +1015,8 @@ def train_command(args: list[str] | None = None) -> int:
             steps_override=getattr(ns, "steps", None),
         )
 
-    if _onetrainer_bridge_opt_in(cfg):
-        return _run_onetrainer_bridge(
+    if _legacy_bridge_opt_in(cfg):
+        return _run_legacy_bridge(
             cfg,
             config_path=config_path,
             steps_override=getattr(ns, "steps", None),
@@ -1025,5 +1025,5 @@ def train_command(args: list[str] | None = None) -> int:
     raise ValueError(
         "Unsupported model_type for native Serenity backend: "
         f"{normalized_model_type or '<missing>'}. "
-        "Set `backend: onetrainer` (or SERENITY_ENABLE_ONETRAINER_BRIDGE=1) only if you explicitly want bridge mode."
+        "Set `backend: legacy` (or SERENITY_ENABLE_LEGACY_BRIDGE=1) only if you explicitly want bridge mode."
     )

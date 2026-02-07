@@ -52,3 +52,35 @@ config_diff.txt
 /serenity/output/
 /serenity/workspace/
 /serenity/.cache/
+
+# local-only directories (not pushed to remote)
+.claude/
+.planning/
+inference_app/
+modules/.eri-rpg/
+oldpics/
+resources/icons/
+
+# local config/test files
+serenity_*.json
+serenity_*.yaml
+eritrainer_*.json
+eritrainer_*.yaml
+test_*.yaml
+test_*.py
+!serenity/tests/test_*.py
+diagnose_*.py
+scripts/
+docs/serenity_ltx2_alignment.md
+docs/eritrainer_ltx2_alignment.md
+docs/FLUX2_INTEGRATION_MAPPING.md
+docs/HANDOFF_ZIMAGE_OOM_FIX.md
+docs/QWEN_OOM_FIX.md
+docs/ZIMAGE_FIXES.md
+
+# legacy/removed directories
+eritrainer/
+training_presets/
+
+# AGENTS file
+AGENTS.md

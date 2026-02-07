@@ -1,7 +1,7 @@
 """Exponential moving average helpers.
 
-Parity with OneTrainer's EMAModuleWrapper: warmup decay, cross-device
-shadow storage, temp store/restore for sampling during training.
+Provides parameter-level EMA with warmup decay, cross-device shadow
+storage, and temp store/restore for sampling during training.
 """
 
 from __future__ import annotations
@@ -22,15 +22,15 @@ class EMAMode(str, Enum):
 
 
 # --------------------------------------------------------------------------- #
-# Parameter-level EMA wrapper (OneTrainer EMAModuleWrapper parity)
+# Parameter-level EMA wrapper
 # --------------------------------------------------------------------------- #
 
 
 class EMAParameterWrapper:
     """Tracks EMA for a list of parameters with warmup and cross-device support.
 
-    This matches OneTrainer's EMAModuleWrapper which operates on raw
-    ``nn.Parameter`` iterables rather than full module state dicts.
+    Operates on raw ``nn.Parameter`` iterables rather than full module
+    state dicts.
     """
 
     def __init__(

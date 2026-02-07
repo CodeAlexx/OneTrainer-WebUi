@@ -1,9 +1,6 @@
 """Per-model training setup classes.
 
-Ported from OneTrainer's ``modules/modelSetup/`` hierarchy.  OneTrainer has a
-deep per-model/per-method class tree (``BaseModelSetup`` -> ``BaseSDXLSetup``
--> ``SDXLFineTuneSetup``, etc.).  Serenity collapses this into a single
-``ModelSetup`` base with thin per-model subclasses.
+Provides a single ``ModelSetup`` base with thin per-model subclasses.
 
 Each setup class handles:
 - ``setup_model()``:  Prepare model for training (freeze layers, inject LoRA, etc.)
@@ -35,7 +32,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class ModelSetup(ABC):
-    """Base training setup -- mirrors OneTrainer ``BaseModelSetup``.
+    """Base training setup for all model families.
 
     Subclasses implement the abstract hooks for each model family.
     """
@@ -87,7 +84,7 @@ class ModelSetup(ABC):
         base_lr: float = getattr(config, "learning_rate", 1e-4)
         return collection.for_optimizer(base_lr)
 
-    # -- shared helpers (from OneTrainer BaseModelSetup) --
+    # -- shared helpers --
 
     def _add_model_part_parameters(
         self,
@@ -99,8 +96,6 @@ class ModelSetup(ABC):
         freeze_filters: list[str] | None = None,
     ) -> None:
         """Add a model component's parameters to the collection.
-
-        Mirrors OneTrainer's ``_create_model_part_parameters``.
 
         Parameters
         ----------
@@ -158,7 +153,6 @@ class ModelSetup(ABC):
     ) -> None:
         """Enable or disable gradients for a model component.
 
-        Mirrors OneTrainer's ``_setup_model_part_requires_grad``.
         """
         if module is None:
             return

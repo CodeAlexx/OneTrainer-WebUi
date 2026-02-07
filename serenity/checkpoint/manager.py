@@ -1,8 +1,7 @@
 """Checkpoint lifecycle management -- rolling saves, backups, and cleanup.
 
-Mirrors the checkpoint-management logic scattered across OneTrainer's
-``GenericTrainer``, ``BackupManager``, and ``InternalModelSaverMixin``,
-unified into a single ``CheckpointManager`` class.
+Unified into a single ``CheckpointManager`` class that handles rolling
+saves, backups, and automatic cleanup.
 """
 
 from __future__ import annotations

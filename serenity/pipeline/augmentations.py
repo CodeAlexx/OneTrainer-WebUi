@@ -1,10 +1,9 @@
 """Image augmentation pipeline for training datasets.
 
-Provides per-concept configurable augmentations matching OneTrainer's
-augmentation module set: flip, rotate, crop jitter, brightness, contrast,
-saturation, hue, circular shift, noise injection, and Gaussian blur.  Each
-augmentation can operate in random (stochastic per sample) or fixed
-(deterministic per sample) mode.
+Provides per-concept configurable augmentations: flip, rotate, crop jitter,
+brightness, contrast, saturation, hue, circular shift, noise injection, and
+Gaussian blur.  Each augmentation can operate in random (stochastic per
+sample) or fixed (deterministic per sample) mode.
 
 All transforms operate on [C, H, W] float tensors in [0, 1] or [-1, 1].
 """
@@ -262,7 +261,7 @@ def apply_augmentations(
 ) -> AugmentationResult:
     """Apply the full augmentation pipeline for a concept's image config.
 
-    Applies augmentations in OneTrainer order:
+    Processing order:
     1. Random flip
     2. Random rotate
     3. Random brightness

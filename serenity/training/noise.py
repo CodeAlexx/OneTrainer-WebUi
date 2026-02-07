@@ -1,7 +1,4 @@
-"""Noise creation and timestep sampling distributions for diffusion training.
-
-Parity with OneTrainer's ModelSetupNoiseMixin.
-"""
+"""Noise creation and timestep sampling distributions for diffusion training."""
 
 from __future__ import annotations
 

@@ -237,7 +237,7 @@ class Flux2KleinModel(BaseModel):
         return self._variant_config["text_encoder_hidden"]
 
     # =========================================================================
-    # Timestep Shift Calculation (matching OneTrainer)
+    # Timestep Shift Calculation
     # =========================================================================
 
     def calculate_timestep_shift(self, latent_height: int, latent_width: int) -> float:
@@ -940,13 +940,13 @@ class Flux2KleinModel(BaseModel):
         scaled_latent = self.normalize_latents(patchified_latent)
 
         # 4. Sample timestep with resolution-dependent shift
-        # Use proper OneTrainer formula:
+        # Shift formula:
         # t_scaled = u * N, then t_shifted = N * shift * t_scaled / ((shift - 1) * t_scaled + N)
         shift = self.calculate_timestep_shift(latent_height * 2, latent_width * 2)
         num_train_timesteps = 1000  # Default scheduler timesteps
 
         u = torch.rand(batch_size, device=device, dtype=dtype)
-        # Apply proper shift transformation (matching OneTrainer)
+        # Apply proper shift transformation
         t_scaled = u * num_train_timesteps
         timestep = num_train_timesteps * shift * t_scaled / ((shift - 1) * t_scaled + num_train_timesteps)
         timestep_int = timestep.long().clamp(0, num_train_timesteps - 1)

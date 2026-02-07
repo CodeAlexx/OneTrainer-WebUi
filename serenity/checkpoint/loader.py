@@ -1,10 +1,8 @@
 """Checkpoint and adapter weight loading.
 
-Ported from OneTrainer's modelLoader hierarchy:
-- BaseModelLoader._load_internal_state  -> optimizer / EMA / meta.json
-- safetensors.torch.load_file           -> LoRA state dicts
-
-Serenity provides simple free-functions instead of a class-per-model tree.
+Provides loading for optimizer state, EMA snapshots, meta.json, and LoRA
+state dicts.  Serenity uses simple free-functions instead of a class-per-model
+tree.
 """
 
 from __future__ import annotations
@@ -48,7 +46,7 @@ def detect_format(path: str | Path) -> str:
     ----------
     * Single ``.safetensors`` file -> ``SAFETENSORS``
     * Single ``.pt`` / ``.bin`` file -> ``TORCH_PT``
-    * Directory with ``meta.json`` -> ``INTERNAL`` (Serenity/OneTrainer)
+    * Directory with ``meta.json`` -> ``INTERNAL`` (Serenity internal)
     * Directory with ``model_index.json`` -> ``DIFFUSERS``
     * Directory with any ``.safetensors`` -> ``DIFFUSERS`` (likely)
     """
@@ -129,7 +127,7 @@ class CheckpointData:
 
 
 def load_checkpoint(path: str | Path) -> CheckpointData:
-    """Load a Serenity / OneTrainer internal checkpoint directory.
+    """Load a Serenity internal checkpoint directory.
 
     Expected layout::
 

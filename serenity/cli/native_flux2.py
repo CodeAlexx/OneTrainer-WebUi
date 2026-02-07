@@ -1,7 +1,6 @@
 """Native FLUX.2/Klein training path for Serenity.
 
-This module intentionally avoids the OneTrainer bridge and runs a minimal
-native training loop for FLUX.2/Klein variants using Serenity components.
+Native Flux 2 training pipeline without bridge mode.
 """
 
 from __future__ import annotations

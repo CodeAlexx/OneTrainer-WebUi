@@ -9,8 +9,7 @@ from dataclasses import dataclass, field
 class TrainProgress:
     """Track epoch, step, and loss metrics throughout training.
 
-    Follows OneTrainer's TrainProgress contract while adding loss
-    history and LR tracking for richer diagnostics.
+    Tracks loss history and LR for richer diagnostics.
     """
 
     epoch: int = 0

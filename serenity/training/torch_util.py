@@ -1,8 +1,7 @@
 """
 Torch utilities for Serenity.
 
-Ported from OneTrainer's modules/util/torch_util.py for checkpointing
-and layer offloading support.
+Provides helpers for checkpointing and layer offloading support.
 """
 
 import gc

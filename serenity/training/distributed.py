@@ -1,8 +1,7 @@
 """Multi-GPU / DDP utilities.
 
-Ported from OneTrainer's ``modules/util/multi_gpu_util.py``.  Provides
-distributed training setup/teardown, rank management, gradient reduction,
-synchronization barriers, and parameter broadcasting helpers.
+Provides distributed training setup/teardown, rank management, gradient
+reduction, synchronization barriers, and parameter broadcasting helpers.
 """
 
 from __future__ import annotations
@@ -115,8 +114,7 @@ def sequential_execution(enabled: bool = True) -> Generator[None, None, None]:
     """Execute code sequentially across all ranks.
 
     Yields once per rank in order, with barriers between each.
-    Mirrors OneTrainer's ``sequential()`` generator pattern, but as a
-    context manager for safer usage.
+    Implemented as a context manager for safer usage.
     """
     if not enabled or not is_enabled():
         yield
@@ -130,10 +128,7 @@ def sequential_execution(enabled: bool = True) -> Generator[None, None, None]:
 
 @contextmanager
 def main_process_first(enabled: bool = True) -> Generator[None, None, None]:
-    """Execute code on the main process first, then all others.
-
-    Mirrors OneTrainer's ``master_first()`` pattern.
-    """
+    """Execute code on the main process first, then all others."""
     if not enabled or not is_enabled():
         yield
         return

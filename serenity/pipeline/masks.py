@@ -1,8 +1,8 @@
 """Mask loading, generation, and augmentation for training datasets.
 
-Provides mask utilities matching OneTrainer's mask pipeline: loading masks
-from files, generating default masks, random circular mask shrinking, and
-mask-aware rotate/crop augmentations.
+Provides mask utilities for loading masks from files, generating default
+masks, random circular mask shrinking, and mask-aware rotate/crop
+augmentations.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def load_mask_for_image(
 ) -> torch.Tensor | None:
     """Load the mask file associated with an image, if it exists.
 
-    OneTrainer convention: mask file is ``{image_stem}{suffix}{ext}``
+    Convention: mask file is ``{image_stem}{suffix}{ext}``
     in the same directory as the image.
     """
     mask_path = image_path.parent / f"{image_path.stem}{mask_suffix}{mask_extension}"
@@ -126,7 +126,6 @@ def apply_circular_mask_shrink(
 ) -> torch.Tensor:
     """Shrink a mask toward its center of mass using a circular falloff.
 
-    Matches OneTrainer's RandomCircularMaskShrink behavior.
     ``mask`` should be [1, H, W] or [H, W].
     """
     if random.random() > probability:
@@ -174,8 +173,8 @@ def apply_mask_rotate_crop(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply a random rotation and crop centered on the mask region.
 
-    Matches OneTrainer's RandomMaskRotateCrop for focused augmentation on
-    masked areas.  Operates on [1, H, W] mask and [C, H, W] image.
+    Performs focused augmentation on masked areas.
+    Operates on [1, H, W] mask and [C, H, W] image.
 
     Returns (cropped_mask, cropped_image).
     """

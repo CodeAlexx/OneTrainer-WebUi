@@ -1,158 +1,302 @@
-# OneTrainer
+# Serenity
 
-OneTrainer is a one-stop solution for all your Diffusion training needs.
+**A modular diffusion model training framework for fine-tuning and adapting generative image and video models.**
 
-<a href="https://discord.gg/KwgcQd5scF"><img src="https://discord.com/api/guilds/1102003518203756564/widget.png" alt="OneTrainer Discord"/></a><br>
+<!-- Badges: CI status, Python version, License, PyPI version -->
+<!-- ![CI](https://img.shields.io/github/actions/workflow/status/CodeAlexx/Serenity/ci.yml) -->
+<!-- ![Python](https://img.shields.io/badge/python-3.10%2B-blue) -->
+<!-- ![License](https://img.shields.io/github/license/CodeAlexx/Serenity) -->
 
-## Features
+---
 
--   **Supported models**: Z-Image, Qwen Image, FLUX.1, Flux.2 Dev and Klein, Chroma, Stable Diffusion 1.5, 2.0, 2.1, 3.0, 3.5, SDXL, Würstchen-v2, Stable Cascade,
-    PixArt-Alpha, PixArt-Sigma, Sana, Hunyuan Video and inpainting models
--   **Model formats**: diffusers and ckpt models
--   **Training methods**: Full fine-tuning, LoRA, embeddings
--   **Masked Training**: Let the training focus on just certain parts of the samples
--   **Automatic backups**: Fully back up your training progress regularly during training. This includes all information to seamlessly continue training
--   **Image augmentation**: Apply random transforms such as rotation, brightness, contrast or saturation to each image sample to quickly create a more diverse dataset
--   **TensorBoard**: A simple TensorBoard integration to track the training progress
--   **Multiple prompts per image**: Train the model on multiple different prompts per image sample
--   **Noise Scheduler Rescaling**: From the paper
-    [Common Diffusion Noise Schedules and Sample Steps are Flawed](https://arxiv.org/abs/2305.08891)
--   **EMA**: Train your own EMA model. Optionally keep EMA weights in CPU memory to reduce VRAM usage
--   **Aspect Ratio Bucketing**: Automatically train on multiple aspect ratios at a time. Just select the target resolutions, buckets are created automatically
--   **Multi-Resolution Training**: Train multiple resolutions at the same time
--   **Dataset Tooling**: Automatically caption your dataset using BLIP, BLIP2 and WD-1.4, or create masks for masked training using ClipSeg or Rembg
--   **Model Tooling**: Convert between different model formats from a simple UI
--   **Sampling UI**: Sample the model during training without switching to a different application
+## Overview
 
-![OneTrainerGUI.gif](resources/images/OneTrainerGUI.gif)
+Serenity is a Python framework for fine-tuning and training diffusion models across a wide range of architectures. It provides a unified training pipeline that supports over 15 model families -- from classic Stable Diffusion 1.5 and SDXL through modern architectures like Flux 2, Chroma, Z-Image, and video models such as LTX2 and HunyuanVideo. Whether you are training a small LoRA adapter on an 8 GB GPU or running a full fine-tune across multiple GPUs, Serenity offers the configuration surface and memory management tools to get it done.
 
-> [!NOTE]
-> Explore our 📚 wiki for essential tips and tutorials after installing. Start [here!](https://github.com/Nerogar/OneTrainer/wiki).
-> For command-line usage, see the [CLI Mode section](#cli-mode).
+The framework is built around a clean separation of concerns: model adapters, data pipeline, training utilities, and memory management each live in their own layer with well-defined interfaces. Configuration is handled through YAML or JSON files with over 150 tunable fields, automatic enum coercion, and a migration system that keeps older configs compatible as the schema evolves. A rich set of optimizers (45+), learning rate schedulers, loss functions, and noise strategies gives you fine-grained control over every aspect of the training loop.
 
+Serenity also supports LyCORIS adapters (LoHa, LoKR, full-matrix decomposition), textual inversion / embedding training, VAE fine-tuning, EMA weight averaging, mixed-precision training with stochastic rounding, aspect-ratio bucketing, disk-based latent and text-encoder caching, and sample generation during training for visual progress tracking. It is designed for researchers, hobbyists, and production teams who need a flexible, extensible training toolkit.
+
+## Key Features
+
+### Model Support
+- **Stable Diffusion 1.5** -- including inpainting variants
+- **Stable Diffusion 2.0 / 2.1** -- base, inpainting, and depth variants
+- **SDXL 1.0** -- base and inpainting
+- **Stable Diffusion 3 / 3.5** -- flow-matching based architectures
+- **Flux 1** -- Dev, Schnell, and Fill (inpainting) variants
+- **Flux 2** -- including Klein 4B and Klein 9B compact models
+- **Chroma** -- Chroma 1 diffusion model
+- **Z-Image** -- high-quality image generation
+- **LTX2** -- video generation model
+- **HunyuanVideo** -- video generation
+- **Qwen** -- image generation and image editing modes
+- **PixArt Alpha / Sigma** -- efficient text-to-image
+- **Sana** -- lightweight image generation
+- **HiDream** -- HiDream Full
+- **Wuerstchen 2 / Stable Cascade** -- multi-stage generation
+
+### Training Methods
+- **LoRA** -- low-rank adaptation with configurable rank, alpha, and layer filtering
+- **LyCORIS** -- LoKR (Kronecker product), LoHa, full-matrix, Tucker decomposition, weight decomposition (DoRA), RS-LoRA
+- **Embedding / Textual Inversion** -- train new token embeddings with norm preservation
+- **Full Fine-Tune** -- unrestricted weight updates across the entire model
+- **VAE Fine-Tune** -- train the variational autoencoder independently
+
+### Optimizers (45+)
+- **Standard**: Adam, AdamW, SGD, RMSprop, Adagrad
+- **8-bit (bitsandbytes)**: AdamW 8-bit, Adam 8-bit, SGD 8-bit, Lion 8-bit, LAMB 8-bit, LARS 8-bit, RMSprop 8-bit, Adagrad 8-bit, AdEMAMix 8-bit, CAME 8-bit
+- **Adaptive LR**: Prodigy, Prodigy+ScheduleFree, D-Adaptation (SGD, Adam, Adan, AdaGrad, Lion)
+- **Schedule-Free**: ScheduleFree AdamW, ScheduleFree SGD
+- **Advanced**: Lion, LAMB, LARS, AdEMAMix, CAME, Muon, AdaMuon, ADOPT, SignSGD
+- **Research**: AdaBelief, Tiger, Aida, Yogi
+- **Fused back-pass** support for Adafactor, CAME, Prodigy+, and advanced optimizer variants
+
+### Learning Rate Schedulers
+- Constant, Linear, Cosine, Cosine with Restarts, Cosine with Hard Restarts
+- REX scheduler
+- Adafactor internal scheduler
+- Custom scheduler (user-defined Python callable)
+- Configurable warmup steps, cycle count, and minimum LR factor
+
+### Loss Functions & Weighting
+- **Functions**: MSE (L2), MAE (L1), Huber, Log-Cosh, VB (variational bound)
+- **Weighting**: Constant, MIN_SNR_GAMMA, P2, Debiased Estimation, Sigma
+- **Scaling**: Per-batch, global-batch, gradient-accumulation, and combined modes
+- **Masking**: Spatial loss masking with per-image masks, random circular masks, and masked prior preservation
+
+### Noise & Timestep Control
+- Offset noise with generalized mode
+- Perturbation noise injection
+- Zero terminal SNR rescaling
+- V-prediction and epsilon-prediction forcing
+- 6 timestep distributions: Uniform, Sigmoid, Logit-Normal, Heavy-Tail, CosMap, Inverted Parabola
+- Configurable min/max noising strength, shift, and dynamic timestep shifting
+
+### EMA (Exponential Moving Average)
+- GPU or CPU weight averaging
+- Configurable decay rate and update interval
+- Non-EMA sampling option for comparison
+
+### Precision & Quantization
+- fp16, bf16, tf32, fp32 training dtypes
+- bf16 stochastic rounding for improved low-precision training
+- Mixed precision with GradScaler
+- Quantization: NF4, FP8, INT8, GGUF (including GGUF A8 float/int variants)
+- Per-component weight dtype control (transformer, text encoders, VAE)
+
+### Data Pipeline
+- Aspect ratio bucketing with configurable resolution
+- Disk-based latent caching and text-encoder output caching
+- Video frame extraction for video model training
+- Multi-threaded data loading
+- Concept-based dataset organization with per-concept captions and settings
+
+### Augmentations
+- Random crop, horizontal flip
+- Rotation, circular padding shift
+- Noise injection, Gaussian blur
+- Per-concept augmentation configuration
+
+### Masking
+- Per-image mask support (PNG masks)
+- Random circular mask generation
+- Mask augmentation and normalization
+- Masked prior preservation weighting
+- Inpainting model support with conditioning images
+
+### Checkpointing & Output
+- SafeTensors, Diffusers directory format, CKPT, ComfyUI LoRA, internal format
+- Rolling backups with configurable count
+- Periodic saving by epoch, step, or time interval
+- Backup-before-save safety
+- Resume from last backup
+
+### Multi-GPU
+- DDP (DistributedDataParallel) training
+- Fused and async gradient reduction
+- Per-device index selection
+- Global batch loss and LR scaling
+
+### Memory Management
+- Gradient checkpointing (on-device and CPU-offloaded)
+- Layer offloading with configurable fraction
+- Async activation offloading
+- Pinned memory pools and allocation strategies
+- Memory conductor for coordinated offloading
+
+### Monitoring & Callbacks
+- TensorBoard logging with optional port exposure
+- Sample image/video generation during training
+- Validation loops with configurable frequency
+- Training progress tracking
+
+### Configuration System
+- YAML and JSON config file support
+- 150+ configurable fields
+- Automatic enum coercion with alias support
+- Config migration system for schema evolution
+- Preset loading for common VRAM tiers
+- Per-component sub-configs (transformer, text encoders, VAE, optimizer)
+
+---
 
 ## Installation
 
-> [!IMPORTANT]
-> Installing OneTrainer requires Python >=3.10 and <3.13.
-> You can download Python at https://www.python.org/downloads/windows/.
-> Then follow the below steps.
+```bash
+git clone https://github.com/CodeAlexx/Serenity.git
+cd Serenity
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-#### Automatic installation
+### Prerequisites
 
-1. Clone the repository `git clone https://github.com/Nerogar/OneTrainer.git`
-2. Run:
-    - Windows: Double click or execute `install.bat`
-    - Linux and Mac: Execute `install.sh`
+- Python 3.10 or later
+- PyTorch 2.0+ with CUDA support
+- NVIDIA GPU with 8 GB+ VRAM (24 GB+ recommended for full fine-tuning)
 
-#### Manual installation
+---
 
-1. Clone the repository `git clone https://github.com/Nerogar/OneTrainer.git`
-2. Navigate into the cloned directory `cd OneTrainer`
-3. Set up a virtual environment `python -m venv venv`
-4. Activate the new venv:
-    - Windows: `venv\scripts\activate`
-    - Linux and Mac: Depends on your shell, activate the venv accordingly
-5. Install the requirements `pip install -r requirements.txt`
+## Quick Start
 
-> [!Tip]
-> Some Linux distributions are missing required packages for instance: On Ubuntu you must install `libGL`:
->
-> ```bash
-> sudo apt-get update
-> sudo apt-get install libgl1
-> ```
->
-> Additionally it's been reported Alpine, Arch and Xubuntu Linux may be missing `tkinter`. Install it via `apk add py3-tk` for Alpine and `sudo pacman -S tk` for Arch.
+Create a minimal YAML configuration file:
 
-## Updating
+```yaml
+# config.yaml
+model_type: sdxl
+training_method: lora
+transformer_path: "stabilityai/stable-diffusion-xl-base-1.0"
+output_dir: "output/"
+output_model_destination: "output/my_lora.safetensors"
 
-#### Automatic update
+learning_rate: 1.0e-4
+epochs: 10
+batch_size: 1
+resolution: "1024"
+train_dtype: BFLOAT_16
 
--   Run `update.bat` or `update.sh`
+lora_rank: 16
+lora_alpha: 1.0
 
-#### Manual update
+optimizer:
+  optimizer: ADAMW
 
-1. Cd to folder containing the repo `cd OneTrainer`
-2. Pull changes `git pull`
-3. Activate the venv `venv/scripts/activate`
-4. Re-install all requirements `pip install -r requirements.txt --force-reinstall`
+concepts:
+  - name: "my_subject"
+    path: "training_data/my_subject"
+    prompt:
+      source: "txt"
+```
 
-## Usage
+Run training:
 
-OneTrainer can be used in **two primary modes**: a graphical user interface (GUI) and a **command-line interface (CLI)** for finer control.
+```bash
+python -m serenity.cli.commands train config.yaml
+```
 
-For a technically focused quick start, see the [Quick Start Guide](docs/QuickStartGuide.md) and for a broader overview, see the [Overview documentation](docs/Overview.md). Otherwise visit [our wiki!](https://github.com/Nerogar/OneTrainer)
+---
 
-### GUI Mode
+## Project Structure
 
-#### Windows
+```
+serenity/
+├── core/           # Config, interfaces, enums, trainer loop
+├── models/         # Model adapters (SD15, SDXL, SD3, Flux 1/2, Chroma,
+│                   #   Z-Image, LTX2, HunyuanVideo, Qwen, PixArt, Sana, etc.)
+├── training/       # Optimizers, schedulers, losses, EMA, precision,
+│                   #   gradient management, distributed, embedding training
+├── pipeline/       # Dataset loading, bucketing, caching, augmentations,
+│                   #   concepts, masks, video frame extraction
+├── data/           # Data utilities and dataloader
+├── checkpoint/     # Save, load, convert, and resume checkpoints
+├── memory/         # Memory conductor, layer offloading, allocation strategies
+├── sampling/       # Inference sampling during training
+├── presets/        # VRAM-tier preset configurations (8GB, 16GB, 24GB)
+├── cli/            # Command-line interface
+├── adapters/       # Adapter layer (LoRA, LyCORIS)
+├── components/     # Shared model components
+├── monitoring/     # TensorBoard and logging utilities
+├── utils/          # General utilities
+└── tests/          # Test suite
+```
 
--   To start the UI, navigate to the OneTrainer folder and double-click `start-ui.bat`
+---
 
-#### Unix-based systems
+## Configuration
 
--   Execute `start-ui.sh` and the GUI will pop up.
+Serenity uses a dataclass-based configuration system (`TrainConfig`) with over 150 fields organized into logical sections:
 
-### CLI Mode
+| Section | Key Fields |
+|---------|-----------|
+| **Model** | `model_type`, `training_method`, `transformer_path`, `base_model_name` |
+| **Training** | `learning_rate`, `epochs`, `batch_size`, `gradient_accumulation_steps`, `seed` |
+| **Optimizer** | Nested `optimizer` config with type, betas, eps, weight decay, and optimizer-specific params |
+| **Precision** | `train_dtype`, `output_dtype`, `fallback_train_dtype`, per-component `weight_dtype` |
+| **LoRA** | `lora_rank`, `lora_alpha`, `peft_type`, `lora_weight_dtype`, layer filtering |
+| **LyCORIS/LoKR** | `lokr_dim`, `lokr_alpha`, `lokr_factor`, Tucker, weight decompose, full matrix |
+| **Loss** | `mse_strength`, `mae_strength`, `huber_strength`, `loss_weight_fn`, `loss_scaler` |
+| **Noise** | `offset_noise_weight`, `timestep_distribution`, `min_noising_strength` |
+| **Data** | `concepts`, `resolution`, `aspect_ratio_bucketing`, `latent_caching` |
+| **Sampling** | `sample_after`, `sample_after_unit`, `sample_image_format` |
+| **Checkpointing** | `backup_after`, `rolling_backup`, `output_model_format` |
+| **Multi-GPU** | `multi_gpu`, `device_indexes`, `fused_gradient_reduce` |
+| **Memory** | `gradient_checkpointing`, `layer_offload_fraction`, `enable_async_offloading` |
 
-If you need more control or a headless approach OT also supports the command-line interface. All commands **need** to be run inside the active venv created during installation.
+Configs can be written in YAML or JSON. Older config files are automatically migrated to the current schema version when loaded.
 
-All functionality is split into different scripts located in the `scripts` directory. This currently includes:
+---
 
--   `train.py` The central training script
--   `train_ui.py` A UI for training
--   `caption_ui.py` A UI for manual or automatic captioning and mask creation for masked training
--   `convert_model_ui.py` A UI for model conversions
--   `convert_model.py` A utility to convert between different model formats
--   `sample.py` A utility to sample any model
--   `create_train_files.py` A utility to create files needed when training only from the CLI
--   `generate_captions.py` A utility to automatically create captions for your dataset
--   `generate_masks.py` A utility to automatically create masks for your dataset
--   `calculate_loss.py` A utility to calculate the training loss of every image in your dataset
+## Supported Models
 
-To learn more about the different parameters, execute `<script-name> -h`. For example `python scripts\train.py -h`
+| Model Family | LoRA | Full Fine-Tune | Embedding/TI | Inpainting | Notes |
+|-------------|------|---------------|-------------|------------|-------|
+| SD 1.5 | Yes | Yes | Yes | Yes | Classic architecture |
+| SD 2.0 / 2.1 | Yes | Yes | Yes | Yes | Includes depth variant |
+| SDXL 1.0 | Yes | Yes | Yes | Yes | Dual text encoder |
+| SD 3 / 3.5 | Yes | Yes | -- | -- | Flow matching |
+| Flux 1 (Dev/Schnell) | Yes | Yes | -- | Yes (Fill) | Flow matching |
+| Flux 2 | Yes | Yes | -- | -- | Next-gen Flux |
+| Flux 2 Klein 4B/9B | Yes | Yes | -- | -- | Compact variants |
+| Chroma | Yes | Yes | -- | -- | Flow matching |
+| Z-Image | Yes | Yes | -- | -- | High quality |
+| LTX2 | Yes | Yes | -- | -- | Video model |
+| HunyuanVideo | Yes | Yes | -- | -- | Video model |
+| Qwen | Yes | Yes | -- | -- | Image editing mode |
+| PixArt Alpha/Sigma | Yes | Yes | -- | -- | Efficient T2I |
+| Sana | Yes | Yes | -- | -- | Lightweight |
+| HiDream | Yes | Yes | -- | -- | Full model |
+| Wuerstchen 2 / Cascade | Yes | Yes | -- | -- | Multi-stage |
 
-If you are on Mac or Linux, you can also read [the launch script documentation](LAUNCH-SCRIPTS.md) for detailed information about how to run OneTrainer and its various scripts on your system.
+---
 
-## Troubleshooting
+## Version
 
-For general troubleshooting or questions, ask in [Discussions](https://github.com/Nerogar/OneTrainer/discussions), check the [Wiki](https://github.com/Nerogar/OneTrainer/wiki) or join our [Discord](https://discord.gg/KwgcQd5scF).
+**pre-alpha 0.055**
 
-If you encounter a reproducible error you first must run update.bat or update.sh and confirm the issue is still able to be reproduced. Then export anonymized debug information to help us solve an issue you are facing and upload it as part of your Github Issues submission.
+This project is in active early development. APIs, configuration schemas, and behavior may change between versions.
 
--   On Windows double click `export_debug.bat`
--   On Unix-based systems execute `./run-cmd.sh generate_debug_report`
+---
 
-These will both create a `debug_report.log`.
+## License
 
-> [!WARNING]
-> We require this file for GitHub issues going forward. Failure to provide it or not manually providing the necessary info will lead to the issue being closed in most circumstances
+See [LICENSE](LICENSE) file for details.
+
+---
 
 ## Contributing
 
-Contributions are always welcome in any form. You can open issues, participate in discussions, or even open pull
-requests for new or improved functionality. You can find more information about contributing [here](docs/Contributing.md).
+Contributions are welcome. Serenity is currently in pre-alpha, so expect breaking changes and rough edges. If you would like to contribute:
 
-Before you start looking at the code, I recommend reading about the project structure [here](docs/ProjectStructure.md).
-For in depth discussions, you should consider joining the [Discord](https://discord.gg/KwgcQd5scF) server.
+1. Fork the repository
+2. Create a feature branch
+3. Submit a pull request with a clear description of the change
 
-You also **NEED** to **install the required developer dependencies** for your current user and enable the Git commit hooks, via the following commands (works on all platforms; Windows, Linux and Mac):
+Bug reports, feature requests, and documentation improvements are all appreciated. Please open an issue before starting large changes to discuss the approach.
 
-> [!IMPORTANT]
-> Be sure to run those commands _without activating your venv or Conda environment_, since [pre-commit](https://pre-commit.com/) is supposed to be installed outside any environment.
+---
 
-```sh
-cd OneTrainer
-pip install -r requirements-dev.txt
-pre-commit install
-```
+## Acknowledgments
 
-Now all of your commits will automatically be verified for common errors and code style issues, so that code reviewers can focus on the architecture of your changes without wasting time on style/formatting issues, thus greatly improving the chances that your pull request will be accepted quickly and effortlessly.
-
-## Related Projects
-
--   **[MGDS](https://github.com/Nerogar/mgds)**: A custom dataset implementation for Pytorch that is built around the idea of a node based graph.
--   **[Stability Matrix](https://github.com/LykosAI/StabilityMatrix)**: A swiss-army knife installer which wraps and installs a broad range of diffusion software packages including OneTrainer
--   **[Visions of Chaos](https://softology.pro/voc.htm)**: A collection of machine learning tools that also includes OneTrainer.
--   **[StableTuner](https://github.com/devilismyfriend/StableTuner)**: A now defunct (archived) training application for Stable Diffusion. OneTrainer takes a lot of inspiration from StableTuner and wouldn't exist without it.
+Serenity builds on the shoulders of the open-source diffusion model community. Special thanks to the teams behind PyTorch, Diffusers, bitsandbytes, LyCORIS, and the many optimizer and scheduler libraries that make this work possible.

@@ -1,7 +1,7 @@
 """TensorBoard logging wrapper for Serenity training.
 
-Parity with OneTrainer's GenericTrainer tensorboard integration:
-loss/train_step, smooth_loss/train_step, lr/*, ema_decay, sample images.
+Logs loss/train_step, smooth_loss/train_step, lr/*, ema_decay, and
+sample images.
 """
 
 from __future__ import annotations

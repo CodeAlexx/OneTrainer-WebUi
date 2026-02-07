@@ -1,9 +1,8 @@
 """Custom gradient scaler with fused backward pass support.
 
-Parity with OneTrainer's ``CustomGradScaler`` (~65 lines) which extends
-``torch.amp.GradScaler`` with per-parameter unscale/step methods for
-fused backward passes that combine loss scaling with backward to reduce
-peak memory.
+Extends ``torch.amp.GradScaler`` with per-parameter unscale/step methods
+for fused backward passes that combine loss scaling with backward to
+reduce peak memory.
 """
 
 from __future__ import annotations
@@ -105,8 +104,7 @@ class CustomGradScaler(GradScaler):
     ) -> None:
         """Step the optimizer for a single parameter if no inf/nan detected.
 
-        The optimizer must implement ``step_parameter(parameter, param_group, i)``
-        (as OneTrainer's custom optimizers do).
+        The optimizer must implement ``step_parameter(parameter, param_group, i)``.
         """
         optimizer_state = self._per_optimizer_states[id(optimizer)]
 

@@ -99,10 +99,9 @@ class CommandHandler:
 class BackupManager:
     """Rolling backup manager for checkpoints and configs.
 
-    Provides backup scheduling and management matching OneTrainer's
-    backup system.  Creates timestamped backup directories containing
-    model weights, optimizer state, progress info, and the training
-    config.  Supports rolling backups with auto-pruning of oldest.
+    Creates timestamped backup directories containing model weights,
+    optimizer state, progress info, and the training config.  Supports
+    rolling backups with auto-pruning of oldest.
 
     Integrates with ``serenity.checkpoint.CheckpointManager`` when
     available for the actual save mechanics.

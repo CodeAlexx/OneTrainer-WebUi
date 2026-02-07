@@ -1,8 +1,8 @@
 """Training callback system for lifecycle events.
 
 Provides a ``TrainCallbacks`` registry that dispatches training lifecycle
-events to registered handlers.  Inspired by OneTrainer's callback system
-but uses a multi-listener pattern for extensibility.
+events to registered handlers using a multi-listener pattern for
+extensibility.
 """
 
 from __future__ import annotations

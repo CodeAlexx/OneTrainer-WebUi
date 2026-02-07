@@ -1,6 +1,7 @@
 """Loss functions, weighting, scaling, and masking for diffusion training.
 
-Parity with OneTrainer's ModelSetupDiffusionLossMixin, masked_loss, and vb_loss.
+Provides loss functions, weighting schemes, scaling, and spatial masking
+for diffusion model training.
 """
 
 from __future__ import annotations

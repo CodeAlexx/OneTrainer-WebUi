@@ -1,6 +1,6 @@
 """Optimizer factory with support for standard and optional third-party optimizers.
 
-Parity with OneTrainer's create_optimizer() - all 35+ optimizer types.
+Factory function for all supported optimizer types (35+).
 Each third-party optimizer uses conditional imports (try/except).
 """
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class OptimizerType(str, Enum):
-    """Supported optimizer types matching OneTrainer's Optimizer enum."""
+    """Supported optimizer types."""
 
     # Torch built-in
     ADAM = "adam"
@@ -195,7 +195,7 @@ def create_optimizer(
     # Catch-all for forward compatibility
     **kwargs: Any,
 ) -> torch.optim.Optimizer:
-    """Create an optimizer by type with sensible defaults matching OneTrainer parity.
+    """Create an optimizer by type with sensible defaults.
 
     All optimizer-specific parameters are keyword-only. Unknown kwargs are
     logged and silently dropped so callers can forward a superset of options.
