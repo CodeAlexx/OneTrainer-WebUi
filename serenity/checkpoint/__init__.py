@@ -33,6 +33,12 @@ from serenity.checkpoint.loader import (
     load_lora,
 )
 from serenity.checkpoint.manager import CheckpointManager, create_manager
+from serenity.checkpoint.resume import (
+    progress_from_dict,
+    progress_to_dict,
+    resume_from_checkpoint,
+    save_training_checkpoint,
+)
 
 # Convenience aliases used by the assignment spec
 save_model = create_saver
@@ -53,4 +59,9 @@ __all__ = [
     # Manager
     "CheckpointManager",
     "create_manager",
+    # Resume
+    "progress_to_dict",
+    "progress_from_dict",
+    "save_training_checkpoint",
+    "resume_from_checkpoint",
 ]
