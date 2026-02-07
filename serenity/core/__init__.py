@@ -9,6 +9,11 @@ from serenity.core.config_migration import (
     register_migration,
     needs_migration,
 )
+from serenity.core.weight_dtypes import (
+    ModelWeightDtypes,
+    create_weight_dtypes,
+    dtype_from_config_value,
+)
 from serenity.core.trainer import Trainer
 from serenity.core.progress import TrainProgress
 
@@ -24,6 +29,9 @@ __all__ = [
     "migrate_config",
     "register_migration",
     "needs_migration",
+    "ModelWeightDtypes",
+    "create_weight_dtypes",
+    "dtype_from_config_value",
     "Trainer",
     "TrainProgress",
 ]
