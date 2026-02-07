@@ -1,0 +1,28 @@
+{
+    "model_type": "flux_dev",
+    "training_method": "lora",
+    "base_model_name": "black-forest-labs/FLUX.1-dev",
+    "resolution": "768",
+    "batch_size": 1,
+    "learning_rate": 0.0003,
+    "output_model_format": "safetensors",
+    "vram_tier": "24gb",
+    "gradient_checkpointing": "on",
+    "train_dtype": "bfloat16",
+    "timestep_distribution": "logit_normal",
+    "vae": {
+        "weight_dtype": "float32"
+    },
+    "transformer": {
+        "train": true,
+        "weight_dtype": "nfloat4"
+    },
+    "text_encoder": {
+        "train": false,
+        "weight_dtype": "bfloat16"
+    },
+    "text_encoder_2": {
+        "train": false,
+        "weight_dtype": "nfloat4"
+    }
+}

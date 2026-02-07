@@ -1,0 +1,22 @@
+{
+    "model_type": "sd15",
+    "training_method": "lora",
+    "base_model_name": "stable-diffusion-v1-5/stable-diffusion-v1-5",
+    "resolution": "512",
+    "batch_size": 1,
+    "learning_rate": 0.0003,
+    "output_model_format": "safetensors",
+    "vram_tier": "8gb",
+    "gradient_checkpointing": "on",
+    "train_dtype": "float16",
+    "vae": {
+        "weight_dtype": "float32"
+    },
+    "unet": {
+        "weight_dtype": "float16"
+    },
+    "text_encoder": {
+        "train": false,
+        "weight_dtype": "float16"
+    }
+}
