@@ -603,7 +603,12 @@ class NoiseConfig:
 
 
 def load_config(path: str | Path) -> TrainConfig:
-    """Load a config file (JSON/YAML) into a TrainConfig."""
+    """Load a config file (JSON/YAML) into a TrainConfig.
+
+    Automatically applies config migrations if the file's ``__version``
+    is older than the current schema version.
+    """
+    from serenity.core.config_migration import migrate_config, needs_migration
 
     path = Path(path)
     if not path.exists():
@@ -620,6 +625,10 @@ def load_config(path: str | Path) -> TrainConfig:
         data = yaml.safe_load(path.read_text())
     else:
         raise ValueError(f"Unsupported config format: {path.suffix}")
+
+    # Apply config migrations if needed
+    if needs_migration(data):
+        data = migrate_config(data)
 
     # Filter to only fields the dataclass accepts
     import dataclasses
