@@ -39,6 +39,14 @@ from serenity.checkpoint.resume import (
     resume_from_checkpoint,
     save_training_checkpoint,
 )
+from serenity.checkpoint.conversion import (
+    ModelFormat,
+    detect_model_format,
+    convert_diffusers_to_safetensors,
+    convert_safetensors_to_diffusers,
+    convert_lora_format,
+    convert_checkpoint,
+)
 
 # Convenience aliases used by the assignment spec
 save_model = create_saver
@@ -64,4 +72,11 @@ __all__ = [
     "progress_from_dict",
     "save_training_checkpoint",
     "resume_from_checkpoint",
+    # Conversion
+    "ModelFormat",
+    "detect_model_format",
+    "convert_diffusers_to_safetensors",
+    "convert_safetensors_to_diffusers",
+    "convert_lora_format",
+    "convert_checkpoint",
 ]
