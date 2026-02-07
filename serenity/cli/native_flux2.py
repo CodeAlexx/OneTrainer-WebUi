@@ -849,6 +849,7 @@ def _maybe_sample(
     step: int,
     train_device: torch.device,
     train_dtype: torch.dtype,
+    live_adapter: Any = None,
     default_resolution: int | None = None,
 ) -> None:
     sample_block = config.get("sample", {}) if isinstance(config.get("sample"), dict) else {}
@@ -875,35 +876,78 @@ def _maybe_sample(
         sample_block.get("num_inference_steps") or sample_block.get("sample_steps") or sample_block.get("steps")
     )
     sample_guidance = _optional_float(sample_block.get("guidance_scale") or sample_block.get("cfg_scale"))
-
-    sampler = create_sampler(model_type, model={"path": model_path})
     samples_dir = output_dir / "samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
-    for prompt_index, prompt in enumerate(prompts_to_run):
-        seed = seeds[prompt_index % len(seeds)]
-        out_path = samples_dir / f"step_{step:06d}_p{prompt_index:02d}_s{seed}{output_ext}"
-        sample_kwargs: dict[str, Any] = {
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "model_path": model_path,
-            "seed": seed,
-            "device": train_device,
-            "dtype": train_dtype,
-            "output_path": out_path,
-            "unload": prompt_index == len(prompts_to_run) - 1,
-        }
-        if sample_height is not None:
-            sample_kwargs["height"] = sample_height
-        if sample_width is not None:
-            sample_kwargs["width"] = sample_width
-        if sample_steps is not None:
-            sample_kwargs["num_inference_steps"] = sample_steps
-        if sample_guidance is not None:
-            sample_kwargs["guidance_scale"] = sample_guidance
+    sample_assistant_lora_path: Path | None = None
+    sample_assistant_lora_strength = _optional_float(
+        sample_block.get("assistant_lora_inference_strength") or sample_block.get("assistant_lora_strength")
+    )
+    if live_adapter is not None and hasattr(live_adapter, "save"):
+        try:
+            adapter_cache_dir = samples_dir / ".adapter_cache"
+            adapter_cache_dir.mkdir(parents=True, exist_ok=True)
+            sample_assistant_lora_path = adapter_cache_dir / f"step_{step:06d}.safetensors"
+            live_adapter.save(str(sample_assistant_lora_path))
+            if sample_assistant_lora_strength is None:
+                sample_assistant_lora_strength = 1.0
+        except Exception as exc:
+            print(f"[native/flux2] warning: failed to snapshot live adapter for sampling: {exc}")
+            sample_assistant_lora_path = None
 
-        sampler.sample(
-            **sample_kwargs,
-        )
+    sample_device_raw = sample_block.get("device") or sample_block.get("sample_device") or config.get("sample_device")
+    sample_device = torch.device(str(sample_device_raw)) if sample_device_raw else train_device
+    sample_dtype = _coerce_dtype(sample_block.get("dtype") or sample_block.get("sample_dtype"), default=train_dtype)
+    allow_cpu_fallback = _as_bool(sample_block.get("oom_fallback_cpu"), False)
+    if sample_device.type == "cpu":
+        sample_dtype = torch.float32
+
+    def _run_sampling(device: torch.device, dtype: torch.dtype) -> None:
+        sampler_model: dict[str, Any] = {"path": model_path}
+        if sample_assistant_lora_path is not None:
+            sampler_model["assistant_lora_path"] = str(sample_assistant_lora_path)
+            if sample_assistant_lora_strength is not None:
+                sampler_model["assistant_lora_inference_strength"] = float(sample_assistant_lora_strength)
+        sampler = create_sampler(model_type, model=sampler_model)
+        for prompt_index, prompt in enumerate(prompts_to_run):
+            seed = seeds[prompt_index % len(seeds)]
+            out_path = samples_dir / f"step_{step:06d}_p{prompt_index:02d}_s{seed}{output_ext}"
+            sample_kwargs: dict[str, Any] = {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "model_path": model_path,
+                "seed": seed,
+                "device": device,
+                "dtype": dtype,
+                "output_path": out_path,
+                "unload": prompt_index == len(prompts_to_run) - 1,
+            }
+            if sample_height is not None:
+                sample_kwargs["height"] = sample_height
+            if sample_width is not None:
+                sample_kwargs["width"] = sample_width
+            if sample_steps is not None:
+                sample_kwargs["num_inference_steps"] = sample_steps
+            if sample_guidance is not None:
+                sample_kwargs["guidance_scale"] = sample_guidance
+
+            sampler.sample(**sample_kwargs)
+
+    try:
+        _run_sampling(sample_device, sample_dtype)
+    except RuntimeError as exc:
+        # FLUX.2 9B sampling may OOM on 24GB cards while training.
+        message = str(exc).lower()
+        if sample_device.type == "cuda" and "out of memory" in message:
+            print("[native/flux2] warning: sampling OOM on CUDA")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if not allow_cpu_fallback:
+                print("[native/flux2] warning: skipping sample (set sample.oom_fallback_cpu=true to retry on CPU)")
+                return
+            print("[native/flux2] warning: retrying sample on CPU")
+            _run_sampling(torch.device("cpu"), torch.float32)
+            return
+        raise
 
 
 def run_native_flux2_training(
@@ -1087,6 +1131,21 @@ def run_native_flux2_training(
     max_grad_norm = float(config.get("max_grad_norm", 1.0))
     save_every = int(checkpoint_block.get("save_every") or config.get("save_every") or 0)
     save_full_model = _as_bool(checkpoint_block.get("save_full_model", config.get("save_full_model", True)), True)
+    sample_block = config.get("sample", {}) if isinstance(config.get("sample"), dict) else {}
+    sample_at_start = _as_bool(sample_block.get("sample_at_start"), False)
+
+    if sample_at_start:
+        _maybe_sample(
+            config,
+            model_type=flux_model_type,
+            model_path=resolved_model_path,
+            output_dir=output_dir,
+            step=0,
+            train_device=train_device,
+            train_dtype=train_dtype,
+            live_adapter=adapter,
+            default_resolution=resolution,
+        )
 
     optimizer.zero_grad(set_to_none=True)
     autocast_enabled = train_device.type == "cuda" and train_dtype in {torch.bfloat16, torch.float16}
@@ -1122,6 +1181,7 @@ def run_native_flux2_training(
             step=step,
             train_device=train_device,
             train_dtype=train_dtype,
+            live_adapter=adapter,
             default_resolution=resolution,
         )
 

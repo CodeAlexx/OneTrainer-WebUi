@@ -1504,6 +1504,7 @@ def _maybe_sample(
     step: int,
     train_device: torch.device,
     train_dtype: torch.dtype,
+    live_adapter: Any = None,
     default_resolution: int | None = None,
     default_video_frames: int | None = None,
 ) -> None:
@@ -1519,8 +1520,28 @@ def _maybe_sample(
     if not prompts:
         return
 
+    sample_assistant_lora_path: Path | None = None
+    sample_assistant_lora_strength = _optional_float(
+        sample_block.get("assistant_lora_inference_strength") or sample_block.get("assistant_lora_strength")
+    )
+    if live_adapter is not None and hasattr(live_adapter, "save"):
+        try:
+            adapter_cache_dir = output_dir / "samples" / ".adapter_cache"
+            adapter_cache_dir.mkdir(parents=True, exist_ok=True)
+            sample_assistant_lora_path = adapter_cache_dir / f"step_{step:06d}.safetensors"
+            live_adapter.save(str(sample_assistant_lora_path))
+            if sample_assistant_lora_strength is None:
+                sample_assistant_lora_strength = 1.0
+        except Exception as exc:
+            print(f"[native/diffusion] warning: failed to snapshot live adapter for sampling: {exc}")
+            sample_assistant_lora_path = None
+
     sampler_model: dict[str, Any] = {"path": model_path}
-    if model_type in {ModelType.ZIMAGE, ModelType.Z_IMAGE}:
+    if sample_assistant_lora_path is not None:
+        sampler_model["assistant_lora_path"] = str(sample_assistant_lora_path)
+        if sample_assistant_lora_strength is not None:
+            sampler_model["assistant_lora_inference_strength"] = float(sample_assistant_lora_strength)
+    elif model_type in {ModelType.ZIMAGE, ModelType.Z_IMAGE}:
         assistant_path = config.get("assistant_lora_path") or config.get("turbo_adapter_path")
         if assistant_path:
             sampler_model["assistant_lora_path"] = str(assistant_path)
@@ -2371,6 +2392,7 @@ def run_native_diffusion_training(
                 step=step,
                 train_device=train_device,
                 train_dtype=train_dtype,
+                live_adapter=adapter,
                 default_resolution=resolution,
                 default_video_frames=ltx_video_frame_count if allow_video_dataset else None,
             )

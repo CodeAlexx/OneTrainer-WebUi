@@ -347,6 +347,39 @@ def _load_assistant_lora_into_transformer(
     return True
 
 
+def _load_assistant_lora_into_pipeline(
+    *,
+    pipeline: Any,
+    lora_path: Path,
+    adapter_name: str = "assistant",
+    weight_name: str | None = None,
+    strength: float | None = None,
+) -> bool:
+    load_fn = getattr(pipeline, "load_lora_weights", None)
+    if load_fn is None:
+        return False
+
+    load_kwargs: dict[str, Any] = {
+        "adapter_name": adapter_name,
+        "local_files_only": True,
+    }
+    if weight_name is not None:
+        load_kwargs["weight_name"] = weight_name
+
+    _call_with_filtered_kwargs(load_fn, str(lora_path), **load_kwargs)
+
+    with suppress(Exception):
+        if hasattr(pipeline, "set_adapters"):
+            if strength is None:
+                pipeline.set_adapters([adapter_name])
+            else:
+                pipeline.set_adapters([adapter_name], [float(strength)])
+        elif hasattr(pipeline, "set_adapter"):
+            pipeline.set_adapter(adapter_name)
+
+    return True
+
+
 class BaseSampler:
     """Base interface for Serenity sampling."""
 
@@ -367,6 +400,7 @@ class DiffusersSampler(BaseSampler):
     resolution_multiple: int = 8
     use_cpu_offload_on_cuda: bool = False
     use_sequential_cpu_offload_on_cuda: bool = False
+    use_generic_assistant_lora: bool = True
     extra_pretrained_kwargs: dict[str, Any] = {}
 
     def __init__(self, model: Any = None, *, model_type: ModelType | None = None) -> None:
@@ -375,6 +409,7 @@ class DiffusersSampler(BaseSampler):
         self._pipeline_source = None
         self._pipeline_device: torch.device | None = None
         self._pipeline_dtype: torch.dtype | None = None
+        self._assistant_signature: tuple[str, str | None, float | None] | None = None
 
     def _candidate_pipeline_names(self, **_: Any) -> tuple[str, ...]:
         return self.pipeline_candidates
@@ -461,6 +496,33 @@ class DiffusersSampler(BaseSampler):
         detail = " | ".join(errors) if errors else "No candidate pipelines configured."
         raise RuntimeError(f"Could not load a pipeline for {self.model_type}: {detail}")
 
+    def _apply_assistant_lora(self, pipeline: Any):
+        if not self.use_generic_assistant_lora:
+            return pipeline
+
+        path, weight_name, strength = _extract_assistant_lora_settings(self.model)
+        if path is None:
+            return pipeline
+
+        signature = (str(path), weight_name, strength)
+        if self._assistant_signature == signature:
+            return pipeline
+
+        try:
+            loaded = _load_assistant_lora_into_pipeline(
+                pipeline=pipeline,
+                lora_path=path,
+                adapter_name="assistant",
+                weight_name=weight_name,
+                strength=strength,
+            )
+            if loaded:
+                self._assistant_signature = signature
+                print(f"[sampler] loaded assistant LoRA from {path}")
+        except Exception as exc:
+            print(f"[sampler] warning: failed to load assistant LoRA {path}: {exc}")
+        return pipeline
+
     def _ensure_pipeline(
         self,
         *,
@@ -488,7 +550,7 @@ class DiffusersSampler(BaseSampler):
                     else:
                         self._pipeline.to(device)
                     self._pipeline_device = device
-                return self._pipeline
+                return self._apply_assistant_lora(self._pipeline)
 
         if self._is_pipeline_instance():
             pipeline = self.model
@@ -511,14 +573,14 @@ class DiffusersSampler(BaseSampler):
             self._pipeline_source = model_source
             self._pipeline_dtype = dtype
             self._pipeline_device = device
-            return pipeline
+            return self._apply_assistant_lora(pipeline)
 
         pipeline = self._load_pipeline(model_source=model_source, device=device, dtype=dtype, image=image)
         self._pipeline = pipeline
         self._pipeline_source = model_source
         self._pipeline_dtype = dtype
         self._pipeline_device = device
-        return pipeline
+        return self._apply_assistant_lora(pipeline)
 
     def unload_pipeline(self) -> None:
         if self._pipeline is not None:
@@ -561,7 +623,7 @@ class DiffusersSampler(BaseSampler):
         if negative_prompt is not None:
             if "negative_prompt" in params:
                 kwargs["negative_prompt"] = negative_prompt
-            elif "negative_prompt_embeds" in params:
+            elif "negative_prompt_embeds" in params and not isinstance(negative_prompt, str | list):
                 kwargs["negative_prompt_embeds"] = negative_prompt
 
         if image is not None and "image" in params:
@@ -739,6 +801,13 @@ class Flux2Sampler(DiffusersSampler):
     default_steps = 30
     default_guidance = 4.0
     resolution_multiple = 64
+    use_cpu_offload_on_cuda = True
+    use_sequential_cpu_offload_on_cuda = True
+    use_generic_assistant_lora = False
+
+    def __init__(self, model: Any = None, *, model_type: ModelType | None = None) -> None:
+        super().__init__(model=model, model_type=model_type)
+        self._assistant_signature: tuple[str, str | None, float | None] | None = None
 
     def _candidate_pipeline_names(self, **_: Any) -> tuple[str, ...]:
         klein_types = {
@@ -752,12 +821,45 @@ class Flux2Sampler(DiffusersSampler):
             return ("Flux2KleinPipeline", "Flux2Pipeline")
         return ("Flux2Pipeline", "Flux2KleinPipeline")
 
+    def _ensure_pipeline(
+        self,
+        *,
+        model_source: str,
+        device: torch.device,
+        dtype: torch.dtype,
+        image: Any = None,
+    ):
+        pipeline = super()._ensure_pipeline(model_source=model_source, device=device, dtype=dtype, image=image)
+        path, weight_name, strength = _extract_assistant_lora_settings(self.model)
+        if path is None:
+            return pipeline
+
+        signature = (str(path), weight_name, strength)
+        if self._assistant_signature == signature:
+            return pipeline
+
+        try:
+            loaded = _load_assistant_lora_into_transformer(
+                pipeline=pipeline,
+                lora_path=path,
+                adapter_name="assistant",
+                weight_name=weight_name,
+                strength=strength,
+            )
+            if loaded:
+                self._assistant_signature = signature
+                print(f"[sampler] loaded FLUX.2 assistant LoRA from {path}")
+        except Exception as exc:
+            print(f"[sampler] warning: failed to load FLUX.2 assistant LoRA {path}: {exc}")
+        return pipeline
+
 
 class ZImageSampler(DiffusersSampler):
     pipeline_candidates = ("ZImagePipeline",)
     default_steps = 20
     default_guidance = 5.0
     resolution_multiple = 64
+    use_generic_assistant_lora = False
 
     def __init__(self, model: Any = None, *, model_type: ModelType | None = None) -> None:
         super().__init__(model=model, model_type=model_type)
