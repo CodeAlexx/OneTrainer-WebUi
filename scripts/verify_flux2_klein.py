@@ -138,11 +138,11 @@ def main():
         print(f"LoRA: {args.lora} (scale={args.lora_scale})")
     print()
 
-    # Import eritrainer modules
+    # Import serenity modules
     try:
-        from eritrainer.models.flux2_klein import Flux2KleinModelLoader, Flux2KleinSampler
+        from serenity.models.flux2_klein import Flux2KleinModelLoader, Flux2KleinSampler
     except ImportError as e:
-        print(f"Error: Could not import eritrainer modules: {e}")
+        print(f"Error: Could not import serenity modules: {e}")
         print("Make sure you're running from the OneTrainer directory.")
         sys.exit(1)
 

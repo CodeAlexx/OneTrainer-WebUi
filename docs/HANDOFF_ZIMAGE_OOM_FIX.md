@@ -8,9 +8,9 @@
 
 ## Problem Summary
 
-Z-Image LoRA training with BF16 (no quantization) causes OOM in EriTrainer but works in OneTrainer.
+Z-Image LoRA training with BF16 (no quantization) causes OOM in Serenity but works in OneTrainer.
 
-- **EriTrainer**: OOM at 22GB allocated on 24GB GPU
+- **Serenity**: OOM at 22GB allocated on 24GB GPU
 - **OneTrainer**: Runs fine with ~8GB peak VRAM
 
 User explicitly stated: **"we DO NOT QUANTIZE ZIMAGE!!!!!!!!!!!!!!!!!!! BP16 !"**
@@ -22,7 +22,7 @@ User explicitly stated: **"we DO NOT QUANTIZE ZIMAGE!!!!!!!!!!!!!!!!!!! BP16 !"*
 Standard `from_pretrained()` loading doubles memory during the load phase:
 
 ```python
-# BAD - What EriTrainer was doing:
+# BAD - What Serenity was doing:
 self._transformer = ZImageTransformer2DModel.from_pretrained(
     model_path,
     subfolder="transformer",
@@ -55,7 +55,7 @@ Reference: `/home/alex/OneTrainer/modules/modelLoader/mixin/HFModelLoaderMixin.p
 
 ## Partial Fix Applied
 
-File: `eritrainer/models/zimage.py`
+File: `serenity/models/zimage.py`
 
 ### Added Imports
 ```python
@@ -122,7 +122,7 @@ del state_dict
 
 ## Status: FIX VERIFIED WORKING
 
-The memory-efficient loading code IS fully implemented in `eritrainer/models/zimage.py`:
+The memory-efficient loading code IS fully implemented in `serenity/models/zimage.py`:
 - Lines 51-108: Helper functions for loading sharded safetensors
 - Lines 197-222: Transformer loading with `accelerate.init_empty_weights()`
 
@@ -143,7 +143,7 @@ The fix works. Memory usage is now stable and training completes without OOM.
 
 ## Test Config
 
-File: `eritrainer_zimage_test.yaml`
+File: `serenity_zimage_test.yaml`
 
 ```yaml
 model_type: zimage
@@ -172,7 +172,7 @@ epochs: 1
 
 ## Related Fix
 
-Also fixed dtype mismatch in `eritrainer/utils/quantization.py:230-233`:
+Also fixed dtype mismatch in `serenity/utils/quantization.py:230-233`:
 
 ```python
 # Fixed dequantized weight dtype for sampling
@@ -193,5 +193,5 @@ bias = self.bias.to(x.dtype) if self.bias is not None else None
 ## Command to Test
 
 ```bash
-python -m eritrainer --config eritrainer_zimage_test.yaml
+python -m serenity --config serenity_zimage_test.yaml
 ```

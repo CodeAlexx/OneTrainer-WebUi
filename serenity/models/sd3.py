@@ -150,7 +150,7 @@ def _load_transformer(
 
 
 class SD3Model(BaseModelImpl):
-    """Native SD3 model behavior used by EriTrainer training paths."""
+    """Native SD3 model behavior used by Serenity training paths."""
 
     family = "sd3"
     resolution_multiple = 16

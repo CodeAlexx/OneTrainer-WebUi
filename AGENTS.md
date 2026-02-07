@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 - `modules/`: core OneTrainer training logic (models, loaders, trainers, utilities).
 - `web_ui/`: alpha web interface; `backend/` FastAPI + WebSockets, `frontend/` React/TypeScript (Vite).
-- `eritrainer/`: parallel simplified trainer used for EriUI integration.
+- `serenity/`: parallel simplified trainer used for EriUI integration.
 - `scripts/`: CLI utilities (for example, `train.py`, captioning, conversion tools).
 - `configs/`, `training_presets/`, `training_concepts/`: config and preset data.
 - `datasets/`, `models/`, `output/`, `workspace/`: data, checkpoints, outputs.
@@ -44,7 +44,7 @@ Testing:
 - PRs should include a concise summary, testing performed, and screenshots for UI changes.
 - Link related issues/configs when applicable.
 
-## Safety & Model Loading (EriTrainer)
+## Safety & Model Loading (Serenity)
 - Never auto-download models; all `from_pretrained()` calls must use `local_files_only=True`.
 - Validate model paths and required files before loading; fail fast if missing.
 - Log any file writes or network operations.

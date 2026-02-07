@@ -17,7 +17,7 @@ Actual: 22.62 GB → OOM on 24 GB GPU
 
 ### Bug 1: Step 0 Sampling Triggered Incorrectly
 
-**Location:** `eritrainer/sampling/sampler.py`
+**Location:** `serenity/sampling/sampler.py`
 
 **Issue:** The `should_sample()` method incorrectly triggered sampling at step 0 even when `sample_at_start=False` and `interval=25`.
 
@@ -66,7 +66,7 @@ def should_sample(self, progress: TrainProgress) -> bool:
 
 ### Bug 2: Sampling Bypassed Layer Offload Conductor
 
-**Location:** `eritrainer/training/trainer.py` (two locations)
+**Location:** `serenity/training/trainer.py` (two locations)
 
 **Issue:** After sampling completed, the code reloaded the transformer using raw `module.to(device)` which bypassed the layer offload conductor, causing ALL layers to load onto GPU.
 
@@ -130,15 +130,15 @@ With 50% layer offload and int8 quantization:
 
 ## Affected Files
 
-1. `eritrainer/sampling/sampler.py` - Fixed step 0 sampling logic
-2. `eritrainer/training/trainer.py` - Fixed transformer reload after sampling (2 locations)
+1. `serenity/sampling/sampler.py` - Fixed step 0 sampling logic
+2. `serenity/training/trainer.py` - Fixed transformer reload after sampling (2 locations)
 
 ## Testing
 
 To verify the fix, run:
 
 ```bash
-python -m eritrainer train eritrainer_qwen_image_edit_25step.yaml
+python -m serenity train serenity_qwen_image_edit_25step.yaml
 ```
 
 Expected output:

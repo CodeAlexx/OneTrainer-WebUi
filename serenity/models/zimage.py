@@ -136,7 +136,7 @@ def _format_chat_prompt(tokenizer: Any, prompt: str) -> str:
 
 
 class ZImageModel(BaseModelImpl):
-    """Native Z-Image behavior used by EriTrainer training paths."""
+    """Native Z-Image behavior used by Serenity training paths."""
 
     family = "zimage"
     resolution_multiple = 64

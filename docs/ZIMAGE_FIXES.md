@@ -4,7 +4,7 @@
 
 ## Summary
 
-Fixed critical bugs in OneTrainer's Z-Image implementation that caused poor training and sampling results. Also fixed EriTrainer VAE decoding.
+Fixed critical bugs in OneTrainer's Z-Image implementation that caused poor training and sampling results. Also fixed Serenity VAE decoding.
 
 ## Bugs Fixed
 
@@ -184,9 +184,9 @@ if cfg_scale > 1.0:
 
 **Impact**: More robust handling of variable-length outputs.
 
-### 8. EriTrainer VAE Missing shift_factor (2026-01-21)
+### 8. Serenity VAE Missing shift_factor (2026-01-21)
 
-**File**: `eritrainer/sampling/sampler.py`
+**File**: `serenity/sampling/sampler.py`
 
 **Problem**: VAE decoding only used scaling_factor, ignoring shift_factor:
 ```python
@@ -209,9 +209,9 @@ latents_scaled = (latents / vae_scale) + vae_shift
 
 ## Klein (FLUX.2) Fixes
 
-### 9. EriTrainer Klein Missing Chat Template (2026-01-21)
+### 9. Serenity Klein Missing Chat Template (2026-01-21)
 
-**File**: `eritrainer/models/flux2_klein.py`
+**File**: `serenity/models/flux2_klein.py`
 
 **Problem**: Text encoding was missing Qwen3 chat template:
 ```python

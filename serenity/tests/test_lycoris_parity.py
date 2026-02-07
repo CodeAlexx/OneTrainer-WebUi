@@ -1,10 +1,10 @@
 """
 LyCORIS Feature Parity Verification Tests
 
-Verifies that EriTrainer has feature parity with SimpleTuner for:
+Verifies that Serenity has feature parity with SimpleTuner for:
 - Z-Image: Full LyCORIS support
 - SDXL: Full LyCORIS support
-- SD 3.5: Full LyCORIS support (EriTrainer EXCEEDS SimpleTuner here!)
+- SD 3.5: Full LyCORIS support (Serenity EXCEEDS SimpleTuner here!)
 
 Run: python -m pytest serenity/tests/test_lycoris_parity.py -v
 """

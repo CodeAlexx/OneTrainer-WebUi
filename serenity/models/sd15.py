@@ -12,7 +12,7 @@ from serenity.models.base import BaseModelImpl
 
 
 class SD15Model(BaseModelImpl):
-    """Native SD1.5 behavior used by EriTrainer training paths."""
+    """Native SD1.5 behavior used by Serenity training paths."""
 
     family = "sd15"
     resolution_multiple = 8

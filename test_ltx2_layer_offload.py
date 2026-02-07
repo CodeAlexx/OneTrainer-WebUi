@@ -48,7 +48,7 @@ def main():
 
     # Import layer offload manager
     print("\n2. Setting up layer offloading...")
-    from eritrainer.utils.layer_offload import LayerOffloadManager
+    from serenity.utils.layer_offload import LayerOffloadManager
 
     layers = list(transformer.transformer_blocks)
     print(f"   Found {len(layers)} transformer blocks")

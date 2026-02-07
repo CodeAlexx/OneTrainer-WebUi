@@ -1,1 +1,1 @@
-# EriTrainer Test Suite
+# Serenity Test Suite

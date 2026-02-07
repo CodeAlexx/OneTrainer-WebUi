@@ -1,4 +1,4 @@
-"""EriTrainer package.
+"""Serenity package.
 
 This package provides a lightweight training stack with clean boundaries between
 models, pipeline/data, memory, and training utilities.

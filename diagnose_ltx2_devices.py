@@ -14,7 +14,7 @@ def main():
     print("=" * 60)
 
     # Import and load model
-    from eritrainer.models.ltx2 import LTX2Model
+    from serenity.models.ltx2 import LTX2Model
 
     print("\n1. Loading model...")
     model = LTX2Model(

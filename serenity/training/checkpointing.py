@@ -1,5 +1,5 @@
 """
-Gradient checkpointing utilities for EriTrainer.
+Gradient checkpointing utilities for Serenity.
 
 Ported from OneTrainer's modules/util/checkpointing_util.py.
 Provides layer-specific gradient checkpointing with optional activation offloading.

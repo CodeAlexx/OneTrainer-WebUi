@@ -90,7 +90,7 @@ def _find_ltx_template_root(explicit_template: Any = None) -> Path | None:
     if explicit is not None:
         candidates.append(explicit)
 
-    env_template = _resolve_component_path(os.environ.get("ERITRAINER_LTX_TEMPLATE_PATH"))
+    env_template = _resolve_component_path(os.environ.get("SERENITY_LTX_TEMPLATE_PATH"))
     if env_template is not None:
         candidates.append(env_template)
 
@@ -280,7 +280,7 @@ def _build_ltx_bundle(
     tokenizer_source = _resolve_tokenizer_source(tokenizer_source_raw, text_encoder_source)
     scheduler_source = _resolve_scheduler_source(scheduler_source_raw)
 
-    with tempfile.TemporaryDirectory(prefix="eritrainer_ltx_bundle_") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="serenity_ltx_bundle_") as temp_dir:
         bundle_root = Path(temp_dir)
         _try_link_or_copy(template_root / "model_index.json", bundle_root / "model_index.json")
 
@@ -431,7 +431,7 @@ def adjust_video_frames(frame_count: int) -> int:
 
 
 class LTX2Model(BaseModelImpl):
-    """Native LTX behavior used by EriTrainer training paths."""
+    """Native LTX behavior used by Serenity training paths."""
 
     family = "ltx2"
     resolution_multiple = 32
@@ -483,7 +483,7 @@ class LTX2Model(BaseModelImpl):
         if template_root is None:
             raise FileNotFoundError(
                 "Could not locate a local LTX template snapshot. "
-                "Set model.ltx_template_path/template_path or ERITRAINER_LTX_TEMPLATE_PATH."
+                "Set model.ltx_template_path/template_path or SERENITY_LTX_TEMPLATE_PATH."
             )
 
         pipeline = _build_ltx_bundle(

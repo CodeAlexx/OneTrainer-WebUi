@@ -1,4 +1,4 @@
-"""CLI command implementations for EriTrainer."""
+"""CLI command implementations for Serenity."""
 
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ MODEL_TYPE_MAP: dict[str, str] = {
     "flux2_klein_9b": "FLUX_2",
 }
 
-_ONETRAINER_TO_ERITRAINER_MODEL_TYPE: dict[str, str] = {
+_ONETRAINER_TO_SERENITY_MODEL_TYPE: dict[str, str] = {
     "FLUX_DEV_1": "flux_dev",
     "FLUX_FILL_DEV_1": "flux_fill_dev",
     "FLUX_2": "flux_2",
@@ -231,9 +231,9 @@ def _normalize_output_dir(output_destination: str, source_path: Path) -> str:
     return str(candidate)
 
 
-def _convert_onetrainer_to_eritrainer(config: dict[str, Any], source_path: Path) -> dict[str, Any]:
+def _convert_onetrainer_to_serenity(config: dict[str, Any], source_path: Path) -> dict[str, Any]:
     ot_model_type = _normalize_onetrainer_model_type(config.get("model_type"))
-    normalized_model_type = _ONETRAINER_TO_ERITRAINER_MODEL_TYPE.get(ot_model_type, _normalize_model_type(ot_model_type))
+    normalized_model_type = _ONETRAINER_TO_SERENITY_MODEL_TYPE.get(ot_model_type, _normalize_model_type(ot_model_type))
 
     model_path = str(config.get("base_model_name") or config.get("base_model") or config.get("model_path") or "")
     if not model_path:
@@ -406,7 +406,7 @@ def _should_use_native_flux2_backend(config: dict[str, Any], normalized_model_ty
         return True
 
     # Backward compatibility: "flux2"/"flux_2"/"flux_2_dev" were historically
-    # used for Klein checkpoints in EriTrainer presets.
+    # used for Klein checkpoints in Serenity presets.
     if normalized_model_type not in {"flux", "flux2", "flux_2", "flux_2_dev", "flux2_dev"}:
         return False
 
@@ -424,7 +424,7 @@ def _is_truthy(value: Any) -> bool:
 
 def _native_diffusion_opt_in(config: dict[str, Any]) -> bool:
     # Keep native diffusion behind explicit opt-in while it is still experimental.
-    if _is_truthy(os.environ.get("ERITRAINER_ENABLE_NATIVE_DIFFUSION")):
+    if _is_truthy(os.environ.get("SERENITY_ENABLE_NATIVE_DIFFUSION")):
         return True
     return any(
         _is_truthy(config.get(key))
@@ -433,7 +433,7 @@ def _native_diffusion_opt_in(config: dict[str, Any]) -> bool:
 
 
 def _onetrainer_bridge_opt_in(config: dict[str, Any]) -> bool:
-    if _is_truthy(os.environ.get("ERITRAINER_ENABLE_ONETRAINER_BRIDGE")):
+    if _is_truthy(os.environ.get("SERENITY_ENABLE_ONETRAINER_BRIDGE")):
         return True
 
     backend = str(config.get("backend") or config.get("execution_backend") or "").strip().lower()
@@ -449,7 +449,7 @@ def _run_onetrainer_bridge(
     if _is_onetrainer_config(config):
         train_cfg = config
     else:
-        train_cfg = _convert_eritrainer_to_onetrainer(
+        train_cfg = _convert_serenity_to_onetrainer(
             config,
             source_path=config_path,
             steps_override=steps_override,
@@ -556,7 +556,7 @@ def _extract_adapter_block(config: dict[str, Any]) -> tuple[str, dict[str, Any]]
     return peft_type, {}
 
 
-def _convert_eritrainer_to_onetrainer(
+def _convert_serenity_to_onetrainer(
     config: dict[str, Any],
     source_path: Path,
     steps_override: int | None = None,
@@ -950,7 +950,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="serenity")
     subparsers = parser.add_subparsers(dest="command")
 
-    train_parser = subparsers.add_parser("train", help="Run training with an EriTrainer preset")
+    train_parser = subparsers.add_parser("train", help="Run training with a Serenity preset")
     train_parser.add_argument("config_positional", nargs="?", help="Path to config file")
     train_parser.add_argument("--config", dest="config_flag", help="Path to config file")
     train_parser.add_argument("--steps", type=int, default=None, help="Optional short-run step override")
@@ -991,7 +991,7 @@ def train_command(args: list[str] | None = None) -> int:
         raise ValueError("Config root must be a mapping/object")
 
     if _is_onetrainer_config(cfg):
-        cfg = _convert_onetrainer_to_eritrainer(cfg, source_path=config_path)
+        cfg = _convert_onetrainer_to_serenity(cfg, source_path=config_path)
 
     normalized_model_type = _normalize_model_type(
         cfg.get("model_type") or (cfg.get("model", {}).get("type") if isinstance(cfg.get("model"), dict) else None)
@@ -1023,7 +1023,7 @@ def train_command(args: list[str] | None = None) -> int:
         )
 
     raise ValueError(
-        "Unsupported model_type for native EriTrainer backend: "
+        "Unsupported model_type for native Serenity backend: "
         f"{normalized_model_type or '<missing>'}. "
-        "Set `backend: onetrainer` (or ERITRAINER_ENABLE_ONETRAINER_BRIDGE=1) only if you explicitly want bridge mode."
+        "Set `backend: onetrainer` (or SERENITY_ENABLE_ONETRAINER_BRIDGE=1) only if you explicitly want bridge mode."
     )

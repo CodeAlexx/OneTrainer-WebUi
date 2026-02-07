@@ -12,7 +12,7 @@ from serenity.models.base import BaseModelImpl
 
 
 class SDXLModel(BaseModelImpl):
-    """Native SDXL behavior used by EriTrainer training paths."""
+    """Native SDXL behavior used by Serenity training paths."""
 
     family = "sdxl"
     resolution_multiple = 8

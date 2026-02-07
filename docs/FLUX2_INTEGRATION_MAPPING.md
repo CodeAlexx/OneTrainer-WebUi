@@ -1,8 +1,8 @@
-# FLUX.2 Integration Mapping: SimpleTuner → EriTrainer
+# FLUX.2 Integration Mapping: SimpleTuner → Serenity
 
 ## Executive Summary
 
-This document maps SimpleTuner's FLUX.2 training implementation to EriTrainer's architecture, providing a complete integration plan for FLUX.2 Klein 4B/9B support.
+This document maps SimpleTuner's FLUX.2 training implementation to Serenity's architecture, providing a complete integration plan for FLUX.2 Klein 4B/9B support.
 
 **Key Decision**: Create new `Flux2KleinModel` class rather than extending existing `FluxModel` because:
 1. Different text encoders (Qwen3 vs CLIP+T5)
@@ -14,7 +14,7 @@ This document maps SimpleTuner's FLUX.2 training implementation to EriTrainer's 
 
 ## Architecture Comparison
 
-### FLUX.1 (Current EriTrainer)
+### FLUX.1 (Current Serenity)
 ```
 Text Encoders: CLIP (768d) + T5 (4096d)
 Embedding: T5 last_hidden_state → [B, 512, 4096]
@@ -38,7 +38,7 @@ Blocks:
 
 ## Component Mapping
 
-| SimpleTuner Component | Location | EriTrainer Target | Notes |
+| SimpleTuner Component | Location | Serenity Target | Notes |
 |----------------------|----------|-------------------|-------|
 | `Flux2TransformerBlock` | `helpers/models/flux2/transformer.py:528` | Use diffusers native | No custom implementation needed |
 | `AutoencoderKLFlux2` | `helpers/models/flux2/autoencoder.py` | Use diffusers native | Handle batch norm separately |
@@ -54,7 +54,7 @@ Blocks:
 
 ### Phase 1: Core Implementation
 
-#### 1. Enums (`eritrainer/core/enums.py`)
+#### 1. Enums (`serenity/core/enums.py`)
 
 **ADD** to `ModelType`:
 ```python
@@ -81,7 +81,7 @@ def is_flux_2_klein(self) -> bool:
 
 ---
 
-#### 2. Model Wrapper (`eritrainer/models/flux2_klein.py`)
+#### 2. Model Wrapper (`serenity/models/flux2_klein.py`)
 
 **NEW FILE** - ~400 lines
 
@@ -118,7 +118,7 @@ class Flux2KleinModel(ShiftScaleLatentScaler, VAELoaderMixin, TextEncoderLoaderM
 
 ---
 
-#### 3. Model Loader (`eritrainer/components/model_loader.py`)
+#### 3. Model Loader (`serenity/components/model_loader.py`)
 
 **ADD** new loader class:
 ```python
@@ -142,7 +142,7 @@ def create_model_loader(model_type):
 
 ---
 
-#### 4. Forward Pass (`eritrainer/training/predict.py`)
+#### 4. Forward Pass (`serenity/training/predict.py`)
 
 **ADD** predictor for FLUX.2:
 ```python
@@ -185,7 +185,7 @@ def predict_flux2_klein(model, batch, config):
 
 ---
 
-#### 5. Model Setup (`eritrainer/components/model_setup.py`)
+#### 5. Model Setup (`serenity/components/model_setup.py`)
 
 **ADD** setup for FLUX.2:
 ```python
@@ -437,5 +437,5 @@ memory:
 
 - SimpleTuner FLUX.2: `/home/alex/SimpleTuner/simpletuner/helpers/models/flux2/`
 - SimpleTuner Docs: `/home/alex/SimpleTuner/documentation/quickstart/FLUX2.md`
-- EriTrainer Flux: `/home/alex/OneTrainer/eritrainer/models/flux.py`
-- EriTrainer Enums: `/home/alex/OneTrainer/eritrainer/core/enums.py`
+- Serenity Flux: `/home/alex/OneTrainer/serenity/models/flux.py`
+- Serenity Enums: `/home/alex/OneTrainer/serenity/core/enums.py`

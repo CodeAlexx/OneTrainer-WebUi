@@ -49,7 +49,7 @@ def _load_flux2_pipeline(model_path: str, dtype: torch.dtype):
 
 
 class Flux2Model(BaseModelImpl):
-    """Flux 2 adapter used by native EriTrainer training."""
+    """Flux 2 adapter used by native Serenity training."""
 
     family = "flux2"
     resolution_multiple = 64

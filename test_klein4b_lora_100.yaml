@@ -1,4 +1,4 @@
-# EriTrainer Klein 4B LoRA 100-step Test
+# Serenity Klein 4B LoRA 100-step Test
 # Dataset: eri2 (118 images)
 
 model_type: flux_2_klein_4b_base

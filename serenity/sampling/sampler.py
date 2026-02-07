@@ -1,4 +1,4 @@
-"""Native EriTrainer samplers backed by diffusers pipelines."""
+"""Native Serenity samplers backed by diffusers pipelines."""
 
 from __future__ import annotations
 
@@ -348,7 +348,7 @@ def _load_assistant_lora_into_transformer(
 
 
 class BaseSampler:
-    """Base interface for EriTrainer sampling."""
+    """Base interface for Serenity sampling."""
 
     def __init__(self, model: Any = None, *, model_type: ModelType | None = None) -> None:
         self.model = model

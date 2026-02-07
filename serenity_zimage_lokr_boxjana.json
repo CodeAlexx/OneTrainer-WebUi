@@ -1,0 +1,55 @@
+{
+  "model_type": "z_image",
+  "training_method": "lora",
+  "peft_type": "lokr",
+  "base_model": "Tongyi-MAI/Z-Image",
+  "disable_assistant_lora": true,
+
+  "max_steps": 3000,
+  "batch_size": 1,
+  "gradient_accumulation_steps": 1,
+  "learning_rate": 0.0003,
+  "train_dtype": "bfloat16",
+
+  "concepts": [
+    {
+      "path": "/home/alex/boxjana_workspace (Copy)/boxjana",
+      "caption_file_ext": ".txt",
+      "num_repeats": 1
+    }
+  ],
+
+  "resolution": "1024",
+  "cache_latents": true,
+  "cache_text_embeddings": true,
+
+  "train_device": "cuda",
+  "temp_device": "cpu",
+
+  "optimizer": {
+    "optimizer": "adamw",
+    "weight_decay": 0.01
+  },
+  "lr_scheduler": "cosine",
+
+  "lokr": {
+    "rank": 16,
+    "alpha": 1.0,
+    "decompose_both": false,
+    "rs_lora": true
+  },
+
+  "output_dir": "/home/alex/OneTrainer/output/zimage_lokr_boxjana",
+  "save_every": 500,
+  "output_dtype": "float32",
+
+  "sample_every": 500,
+  "gradient_checkpointing": "on",
+  "enable_activation_offloading": true,
+  "enable_async_offloading": true,
+  "quantize_transformer": true,
+  "quantization_method": "w8a8",
+  "compile": true,
+  "ema_mode": "off",
+  "seed": 42
+}

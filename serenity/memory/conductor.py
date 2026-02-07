@@ -1,4 +1,4 @@
-"""Layer and activation offloading conductor for native EriTrainer."""
+"""Layer and activation offloading conductor for native Serenity."""
 
 from __future__ import annotations
 

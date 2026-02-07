@@ -1,4 +1,4 @@
-"""Native non-bridge diffusion training path for EriTrainer.
+"""Native non-bridge diffusion training path for Serenity.
 
 Supports native adapter/full training for:
 - Flux 1.x (dev/schnell/fill)

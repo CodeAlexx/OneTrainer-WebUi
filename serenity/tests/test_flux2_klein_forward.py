@@ -2,7 +2,7 @@
 FLUX.2 Klein Forward/Backward Pass Test
 
 Tests the actual forward and backward pass with the correct dimensions
-using EriTrainer's custom Flux2Transformer2DModel which is compatible with
+using Serenity's custom Flux2Transformer2DModel which is compatible with
 FLUX.2 Klein weight naming.
 
 Klein 4B config:
@@ -76,7 +76,7 @@ class TestKleinModelLoading:
     """Test loading Klein transformer with correct dimensions."""
 
     def test_load_transformer_with_custom_loader(self):
-        """Load transformer using EriTrainer's Flux2Transformer2DModel."""
+        """Load transformer using Serenity's Flux2Transformer2DModel."""
         transformer_path = get_klein_4b_path()
         if transformer_path is None or not transformer_path.exists():
             print("  SKIPPED: Model not downloaded")

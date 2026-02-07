@@ -1,7 +1,7 @@
 """
 Test LTX2 Parity with SimpleTuner
 
-Verifies that EriTrainer's LTX2 implementation matches SimpleTuner's:
+Verifies that Serenity's LTX2 implementation matches SimpleTuner's:
 1. Latent normalization using VAE mean/std
 2. Pack/unpack functions produce correct shapes
 3. Flow matching interpolation is correct
@@ -419,7 +419,7 @@ def test_ltx_prompt_max_length_respects_tokenizer_limit():
 def run_all_tests():
     """Run all parity tests."""
     print("=" * 60)
-    print("LTX2 Parity Tests: EriTrainer vs SimpleTuner")
+    print("LTX2 Parity Tests: Serenity vs SimpleTuner")
     print("=" * 60)
 
     test_normalize_latents()

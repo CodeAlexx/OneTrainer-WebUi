@@ -1,4 +1,4 @@
-# EriTrainer Architecture Report
+# Serenity Architecture Report
 
 ## MODEL LAYER (known from FLUX.2 implementation)
 

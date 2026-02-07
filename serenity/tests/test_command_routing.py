@@ -6,7 +6,7 @@ from pathlib import Path
 
 from serenity.cli import commands
 from serenity.cli.commands import (
-    _convert_onetrainer_to_eritrainer,
+    _convert_onetrainer_to_serenity,
     _native_diffusion_opt_in,
     _onetrainer_bridge_opt_in,
     _should_use_native_flux2_backend,
@@ -61,7 +61,7 @@ def test_native_diffusion_opt_in_accepts_explicit_flag():
     assert _native_diffusion_opt_in(cfg)
 
 
-def test_convert_onetrainer_to_eritrainer_maps_model_and_paths(tmp_path):
+def test_convert_onetrainer_to_serenity_maps_model_and_paths(tmp_path):
     cfg = {
         "model_type": "FLUX_2_KLEIN_9B_BASE",
         "base_model_name": "/models/black-forest-labs/FLUX.2-klein-base-9B",
@@ -74,7 +74,7 @@ def test_convert_onetrainer_to_eritrainer_maps_model_and_paths(tmp_path):
         "lora_alpha": 16,
     }
 
-    converted = _convert_onetrainer_to_eritrainer(cfg, source_path=Path("test.json"))
+    converted = _convert_onetrainer_to_serenity(cfg, source_path=Path("test.json"))
 
     assert converted["model_type"] == "flux_2_klein_9b_base"
     assert converted["model"]["path"] == cfg["base_model_name"]
@@ -83,7 +83,7 @@ def test_convert_onetrainer_to_eritrainer_maps_model_and_paths(tmp_path):
     assert converted["adapter"]["type"] == "lora"
 
 
-def test_convert_onetrainer_to_eritrainer_maps_qwen_edit_flags():
+def test_convert_onetrainer_to_serenity_maps_qwen_edit_flags():
     cfg = {
         "model_type": "QWEN",
         "base_model_name": "/models/Qwen-Image",
@@ -92,11 +92,11 @@ def test_convert_onetrainer_to_eritrainer_maps_qwen_edit_flags():
         "custom_conditioning_image": True,
         "training_method": "LORA",
     }
-    converted = _convert_onetrainer_to_eritrainer(cfg, source_path=Path("test.json"))
+    converted = _convert_onetrainer_to_serenity(cfg, source_path=Path("test.json"))
     assert converted["model_type"] == "qwen_image_edit"
 
 
-def test_convert_onetrainer_to_eritrainer_preserves_embedding_method():
+def test_convert_onetrainer_to_serenity_preserves_embedding_method():
     cfg = {
         "model_type": "STABLE_DIFFUSION_15",
         "base_model_name": "/models/sd15",
@@ -104,7 +104,7 @@ def test_convert_onetrainer_to_eritrainer_preserves_embedding_method():
         "concepts": [{"path": "/datasets/disney"}],
         "training_method": "EMBEDDING",
     }
-    converted = _convert_onetrainer_to_eritrainer(cfg, source_path=Path("test.json"))
+    converted = _convert_onetrainer_to_serenity(cfg, source_path=Path("test.json"))
     assert converted["training_method"] == "embedding"
     assert converted["adapter"]["type"] == "lora"
 

@@ -87,7 +87,7 @@ class NoOpMemoryStrategy(MemoryStrategy):
 
 
 class LayerOffloadStrategy(MemoryStrategy):
-    """Layer offload strategy used by native EriTrainer paths."""
+    """Layer offload strategy used by native Serenity paths."""
 
     def __init__(self, config: MemoryConfig | Any):
         self.config = config

@@ -76,7 +76,7 @@ def _resolve_snapshot_path(path: str | Path) -> Path | None:
 
 
 def _resolve_fallback_t5_path() -> Path | None:
-    env_path = os.environ.get("ERITRAINER_FLUX_T5_PATH")
+    env_path = os.environ.get("SERENITY_FLUX_T5_PATH")
     if env_path:
         snapshot = _resolve_snapshot_path(env_path)
         if snapshot is not None:
@@ -94,7 +94,7 @@ def _resolve_fallback_t5_path() -> Path | None:
 
 
 def _resolve_fallback_clip_path() -> Path | None:
-    env_path = os.environ.get("ERITRAINER_FLUX_CLIP_PATH")
+    env_path = os.environ.get("SERENITY_FLUX_CLIP_PATH")
     if env_path:
         snapshot = _resolve_snapshot_path(env_path)
         if snapshot is not None:
@@ -122,7 +122,7 @@ def _has_transformers_weights(checkpoint_dir: Path) -> bool:
 
 
 def _resolve_local_t5_safetensor() -> Path | None:
-    env_path = os.environ.get("ERITRAINER_FLUX_T5_SAFETENSORS")
+    env_path = os.environ.get("SERENITY_FLUX_T5_SAFETENSORS")
     if env_path:
         path = Path(env_path).expanduser()
         if path.exists():
@@ -158,7 +158,7 @@ def _materialize_single_file_checkpoint(
 
 
 class Flux1Model(BaseModelImpl):
-    """Flux 1.x adapter used by native EriTrainer training."""
+    """Flux 1.x adapter used by native Serenity training."""
 
     family = "flux"
     resolution_multiple = 64
@@ -207,7 +207,7 @@ class Flux1Model(BaseModelImpl):
         if fallback_clip_path is None:
             raise RuntimeError(
                 "Flux text_encoder weights are missing in the model snapshot and no fallback CLIP cache was found. "
-                "Set ERITRAINER_FLUX_CLIP_PATH to a local CLIP checkpoint directory."
+                "Set SERENITY_FLUX_CLIP_PATH to a local CLIP checkpoint directory."
             ) from original_error
         if fallback_t5_path is None or not _has_transformers_weights(fallback_t5_path):
             local_t5_weights = _resolve_local_t5_safetensor()
@@ -223,8 +223,8 @@ class Flux1Model(BaseModelImpl):
         if fallback_t5_path is None or not _has_transformers_weights(fallback_t5_path):
             raise RuntimeError(
                 "Flux text_encoder_2 weights are missing in the model snapshot and no fallback T5 cache was found. "
-                "Set ERITRAINER_FLUX_T5_PATH to a local T5 checkpoint directory or "
-                "ERITRAINER_FLUX_T5_SAFETENSORS to a local safetensors weight file."
+                "Set SERENITY_FLUX_T5_PATH to a local T5 checkpoint directory or "
+                "SERENITY_FLUX_T5_SAFETENSORS to a local safetensors weight file."
             ) from original_error
 
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(

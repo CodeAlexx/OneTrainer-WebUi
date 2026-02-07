@@ -1,0 +1,55 @@
+{
+  "model_type": "z_image",
+  "training_method": "lora",
+  "peft_type": "lora",
+  "base_model": "Tongyi-MAI/Z-Image",
+  "disable_assistant_lora": true,
+
+  "max_steps": 20,
+  "batch_size": 1,
+  "gradient_accumulation_steps": 1,
+  "learning_rate": 0.0004,
+  "train_dtype": "bfloat16",
+
+  "concepts": [
+    {
+      "path": "/home/alex/datasets/AlinaAignatova",
+      "caption_file_ext": ".txt",
+      "num_repeats": 1
+    }
+  ],
+
+  "resolution": "1024",
+  "cache_latents": true,
+  "cache_text_embeddings": true,
+
+  "train_device": "cuda",
+  "temp_device": "cpu",
+
+  "optimizer": {
+    "optimizer": "adamw",
+    "weight_decay": 0.01
+  },
+  "lr_scheduler": "constant",
+
+  "lora": {
+    "rank": 16,
+    "alpha": 16.0,
+    "dropout": 0.0,
+    "target_modules": ["to_q", "to_k", "to_v", "to_out.0"]
+  },
+
+  "output_dir": "/home/alex/OneTrainer/output/zimage_lora_test",
+  "save_every": 999999,
+  "output_dtype": "float32",
+
+  "sample_every": 999999,
+  "gradient_checkpointing": "on",
+  "enable_activation_offloading": true,
+  "enable_async_offloading": true,
+  "quantize_transformer": true,
+  "quantization_method": "w8a8",
+  "compile": false,
+  "ema_mode": "off",
+  "seed": 42
+}

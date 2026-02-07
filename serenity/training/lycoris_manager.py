@@ -1,4 +1,4 @@
-"""Native LyCORIS adapter management for EriTrainer."""
+"""Native LyCORIS adapter management for Serenity."""
 
 from __future__ import annotations
 
@@ -355,7 +355,7 @@ class LyCORISManager:
         preset_key = hashlib.sha1(
             json.dumps(preset_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        preset_dir = Path(tempfile.gettempdir()) / "eritrainer_lycoris_presets"
+        preset_dir = Path(tempfile.gettempdir()) / "serenity_lycoris_presets"
         preset_dir.mkdir(parents=True, exist_ok=True)
         preset_path = preset_dir / f"{preset_key}.toml"
 

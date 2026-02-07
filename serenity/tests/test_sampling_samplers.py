@@ -1,4 +1,4 @@
-"""Tests for native EriTrainer sampler implementations."""
+"""Tests for native Serenity sampler implementations."""
 
 from __future__ import annotations
 
