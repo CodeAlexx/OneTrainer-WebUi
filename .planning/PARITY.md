@@ -73,28 +73,28 @@ However, Serenity is missing the **entire training pipeline** (training loop, op
 
 | # | Item | Domain | Gap Report | Status |
 |---|------|--------|-----------|--------|
-| 2.1 | **Loss function system** - MSE, MAE, Huber, log-cosh, VB loss with type selection | Pipeline | PIPELINE + MODEL | [ ] |
-| 2.2 | **Loss weighting** - MIN_SNR_GAMMA, P2, DEBIASED_ESTIMATION, SIGMA, CONSTANT | Pipeline | PIPELINE | [ ] |
-| 2.3 | **Loss scaling** - Batch, gradient accumulation, global batch scaling | Pipeline | PIPELINE | [ ] |
-| 2.4 | **Masked loss** - Spatial mask support, prior preservation | Pipeline + Model | PIPELINE + MODEL | [ ] |
-| 2.5 | **Noise creation** - Offset noise, perturbation noise, generalized offset | Pipeline | PIPELINE | [ ] |
-| 2.6 | **Timestep distributions** - Full set (uniform, sigmoid, logit_normal, heavy_tail, cos_map, inverted_parabola) | Pipeline | PIPELINE | [ ] |
-| 2.7 | **EMA improvements** - Warmup decay, cross-device CPU/GPU, temp_store/restore for sampling | Pipeline | PIPELINE + MODEL | [ ] |
-| 2.8 | **Mixed precision** - Autocast context manager, gradient scaler, fp16/bf16 handling | Pipeline | PIPELINE | [ ] |
-| 2.9 | **Multi-GPU / DDP** - Gradient reduction, rank management, sync commands | Pipeline | PIPELINE | [ ] |
-| 2.10 | **Diffusion schedule coefficients** - Pre-computed alphas_cumprod etc. for SD1.5/SDXL | Pipeline | PIPELINE | [ ] |
-| 2.11 | **Named parameter groups** - Per-component learning rates (text encoder, transformer, etc.) | Model | MODEL | [ ] |
-| 2.12 | **Fine-tune setup classes** - Per-model parameter group configuration | Model | MODEL | [ ] |
-| 2.13 | **Training resume** - Save/load optimizer state, EMA state, progress to disk | Model + Pipeline | MODEL + PIPELINE | [ ] |
-| 2.14 | **Backup system** - Rolling backups with configurable intervals | Config/Data | CONFIG_DATA | [ ] |
-| 2.15 | **Augmentation pipeline** - Random flip, crop jitter, scale/crop | Config/Data | CONFIG_DATA | [ ] |
-| 2.16 | **Caption handling** - Tag shuffling, tag dropout, prompt source selection | Config/Data | CONFIG_DATA | [ ] |
-| 2.17 | **Remaining optimizers** - All 40+ from OneTrainer (CAME, Muon, ADOPT, schedule-free, etc.) | Pipeline | PIPELINE | [ ] |
-| 2.18 | **LR scheduler completions** - Cosine with restarts, hard restarts, REX, Adafactor, custom | Pipeline | PIPELINE | [ ] |
-| 2.19 | **Config versioning** - Migration pipeline (10 versions) | Config/Data | CONFIG_DATA | [ ] |
-| 2.20 | **Model weight dtypes** - `ModelWeightDtypes` for per-component dtype management | Config/Data | CONFIG_DATA | [ ] |
-| 2.21 | **Quantization utilities** - General framework (NF4, GGUF, SVD quantized layers) | Model | MODEL | [ ] |
-| 2.22 | **Stochastic rounding** - bf16 copy/add/addcdiv with stochastic rounding | Pipeline | PIPELINE | [ ] |
+| 2.1 | **Loss function system** - MSE, MAE, Huber, log-cosh, VB loss with type selection | Pipeline | PIPELINE + MODEL | [x] fcc17376 |
+| 2.2 | **Loss weighting** - MIN_SNR_GAMMA, P2, DEBIASED_ESTIMATION, SIGMA, CONSTANT | Pipeline | PIPELINE | [x] fcc17376 |
+| 2.3 | **Loss scaling** - Batch, gradient accumulation, global batch scaling | Pipeline | PIPELINE | [x] fcc17376 |
+| 2.4 | **Masked loss** - Spatial mask support, prior preservation | Pipeline + Model | PIPELINE + MODEL | [x] fcc17376 |
+| 2.5 | **Noise creation** - Offset noise, perturbation noise, generalized offset | Pipeline | PIPELINE | [x] d1a7e1b3 |
+| 2.6 | **Timestep distributions** - Full set (uniform, sigmoid, logit_normal, heavy_tail, cos_map, inverted_parabola) | Pipeline | PIPELINE | [x] d1a7e1b3 |
+| 2.7 | **EMA improvements** - Warmup decay, cross-device CPU/GPU, temp_store/restore for sampling | Pipeline | PIPELINE + MODEL | [x] 05e02fe4 |
+| 2.8 | **Mixed precision** - Autocast context manager, gradient scaler, fp16/bf16 handling | Pipeline | PIPELINE | [x] c345a143 |
+| 2.9 | **Multi-GPU / DDP** - Gradient reduction, rank management, sync commands | Pipeline | PIPELINE | [x] 476199df |
+| 2.10 | **Diffusion schedule coefficients** - Pre-computed alphas_cumprod etc. for SD1.5/SDXL | Pipeline | PIPELINE | [x] 4ec918f9 |
+| 2.11 | **Named parameter groups** - Per-component learning rates (text encoder, transformer, etc.) | Model | MODEL | [x] 6619112d |
+| 2.12 | **Fine-tune setup classes** - Per-model parameter group configuration | Model | MODEL | [x] 2a2a09ac |
+| 2.13 | **Training resume** - Save/load optimizer state, EMA state, progress to disk | Model + Pipeline | MODEL + PIPELINE | [x] 0e31a825 |
+| 2.14 | **Backup system** - Rolling backups with configurable intervals | Config/Data | CONFIG_DATA | [x] e6cb0e51 |
+| 2.15 | **Augmentation pipeline** - Random flip, crop jitter, scale/crop | Config/Data | CONFIG_DATA | [x] 389f90f5 |
+| 2.16 | **Caption handling** - Tag shuffling, tag dropout, prompt source selection | Config/Data | CONFIG_DATA | [x] 0cd403aa |
+| 2.17 | **Remaining optimizers** - All 40+ from OneTrainer (CAME, Muon, ADOPT, schedule-free, etc.) | Pipeline | PIPELINE | [x] dbe9f09c |
+| 2.18 | **LR scheduler completions** - Cosine with restarts, hard restarts, REX, Adafactor, custom | Pipeline | PIPELINE | [x] 48d5f6f3 |
+| 2.19 | **Config versioning** - Migration pipeline (10 versions) | Config/Data | CONFIG_DATA | [x] 9e3cdc1d |
+| 2.20 | **Model weight dtypes** - `ModelWeightDtypes` for per-component dtype management | Config/Data | CONFIG_DATA | [x] 1bd6bd42 |
+| 2.21 | **Quantization utilities** - General framework (NF4, GGUF, SVD quantized layers) | Model | MODEL | [x] cb5a2a84 |
+| 2.22 | **Stochastic rounding** - bf16 copy/add/addcdiv with stochastic rounding | Pipeline | PIPELINE | [x] 64a052ea |
 
 ### Phase 3: Feature Completeness (MEDIUM)
 *Goal: Full OneTrainer feature coverage*
@@ -219,16 +219,15 @@ However, Serenity is missing the **entire training pipeline** (training loop, op
 
 ### Overall Progress
 - Phase 1: 14/14 items complete ✅
-- Phase 2: 0/22 items complete
+- Phase 2: 22/22 items complete ✅
 - Phase 3: 0/20 items complete
 - Phase 4: 0/15 items complete (OUT OF SCOPE except 4.3, 4.6, 4.7, 4.8, 4.12, 4.13, 4.14)
-- **Total: 14/71 items (20%)**
+- **Total: 36/71 items (51%)**
 
 ### Next Steps
-1. Review this checklist and confirm priorities
-2. Start Phase 1 implementation (training foundation)
-3. Begin with 1.1 (TrainConfig), 1.4 (training loop), 1.7 (data pipeline) in parallel
-4. Each completed item gets checked off and committed
+1. Start Phase 3 implementation (feature completeness)
+2. Launch 3 teammates in parallel across Config+Data, Training, and Models domains
+3. Each completed item gets checked off and committed
 
 ---
 
