@@ -1,13 +1,18 @@
-"""Learning rate scheduler factory with warmup support."""
+"""Learning rate scheduler factory with warmup support.
+
+Parity with OneTrainer's create_lr_scheduler / lr_scheduler_util.
+Includes cosine with restarts, hard restarts, REX, Adafactor, and custom.
+"""
 
 from __future__ import annotations
 
+import importlib
 import math
 from collections.abc import Callable
 from enum import Enum
 
 import torch
-from torch.optim.lr_scheduler import LambdaLR, LRScheduler
+from torch.optim.lr_scheduler import LambdaLR, LRScheduler, SequentialLR
 
 
 class SchedulerType(str, Enum):
@@ -19,6 +24,8 @@ class SchedulerType(str, Enum):
     COSINE_WITH_RESTARTS = "cosine_with_restarts"
     COSINE_WITH_HARD_RESTARTS = "cosine_with_hard_restarts"
     REX = "rex"
+    ADAFACTOR = "adafactor"
+    CUSTOM = "custom"
 
 
 # --------------------------------------------------------------------------- #
@@ -145,23 +152,20 @@ def create_lr_scheduler(
     num_cycles: float = 1.0,
     min_lr_factor: float = 0.0,
     last_epoch: int = -1,
+    # Adafactor-specific
+    initial_lr: float | None = None,
+    # Custom scheduler
+    custom_class: str | None = None,
+    custom_params: list[dict[str, str]] | None = None,
+    learning_rate: float | None = None,
+    num_epochs: int | None = None,
+    steps_per_epoch: int | None = None,
+    gradient_accumulation_steps: int = 1,
 ) -> LRScheduler:
     """Create a learning rate scheduler with optional warmup.
 
     Parity with OneTrainer's create_lr_scheduler / lr_scheduler_util.
     All schedules are implemented as LambdaLR for consistency.
-
-    Args:
-        scheduler_type: The schedule shape (constant, linear, cosine, etc.).
-        optimizer: The optimizer whose LR groups will be scheduled.
-        num_training_steps: Total training steps *after* warmup.
-        num_warmup_steps: Number of linear warmup steps (0 = no warmup).
-        num_cycles: Number of restart cycles (for restart schedules).
-        min_lr_factor: Minimum LR multiplier floor (0.0 = decay to zero).
-        last_epoch: Passed through to LambdaLR for resuming.
-
-    Returns:
-        A PyTorch LRScheduler instance.
     """
     if isinstance(scheduler_type, str):
         scheduler_type = SchedulerType(scheduler_type.lower())
@@ -190,6 +194,69 @@ def create_lr_scheduler(
 
         case SchedulerType.REX:
             lr_lambda = _lr_lambda_rex(scheduler_steps, min_lr_factor)
+
+        case SchedulerType.ADAFACTOR:
+            try:
+                from transformers.optimization import AdafactorSchedule
+            except ImportError as exc:
+                raise ImportError(
+                    "transformers is required for AdafactorSchedule. "
+                    "Install with: pip install transformers"
+                ) from exc
+            eff_lr = initial_lr
+            if eff_lr is None:
+                # Fall back to optimizer's param group initial_lr
+                eff_lr = optimizer.state_dict()["param_groups"][0].get("initial_lr", 1e-3)
+            return AdafactorSchedule(optimizer, initial_lr=eff_lr)
+
+        case SchedulerType.CUSTOM:
+            if not custom_class:
+                raise ValueError("Must specify custom_class when using CUSTOM scheduler.")
+            if "." not in custom_class:
+                raise ValueError("custom_class must be in format <module>.<ClassName>")
+
+            klass_name = custom_class.split(".")[-1]
+            module_name = custom_class.removesuffix("." + klass_name)
+            mod = importlib.import_module(module_name)
+            klass = getattr(mod, klass_name)
+
+            # Build kwargs from custom_params
+            custom_kwargs: dict[str, object] = {}
+            total_steps = num_training_steps
+            for pd in (custom_params or []):
+                key = pd["key"]
+                value = pd["value"]
+                # Special value substitutions
+                if value == "%LR%":
+                    value = learning_rate or 1e-4
+                elif value == "%EPOCHS%":
+                    value = num_epochs or 1
+                elif value == "%STEPS_PER_EPOCH%":
+                    value = steps_per_epoch or total_steps
+                elif value == "%TOTAL_STEPS%":
+                    value = total_steps
+                elif value == "%SCHEDULER_STEPS%":
+                    value = scheduler_steps
+                else:
+                    import ast
+                    value = ast.literal_eval(value)
+                custom_kwargs[key] = value
+
+            scheduler = klass(optimizer=optimizer, last_epoch=last_epoch, **custom_kwargs)
+
+            if num_warmup_steps > 0:
+                warmup_scheduler = LambdaLR(
+                    optimizer=optimizer,
+                    lr_lambda=_lr_lambda_warmup(num_warmup_steps, _lr_lambda_constant()),
+                    last_epoch=last_epoch,
+                )
+                scheduler = SequentialLR(
+                    optimizer,
+                    schedulers=[warmup_scheduler, scheduler],
+                    milestones=[num_warmup_steps],
+                    last_epoch=last_epoch,
+                )
+            return scheduler
 
         case _:
             raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
