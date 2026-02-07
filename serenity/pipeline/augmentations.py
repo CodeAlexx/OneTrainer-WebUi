@@ -2,8 +2,9 @@
 
 Provides per-concept configurable augmentations matching OneTrainer's
 augmentation module set: flip, rotate, crop jitter, brightness, contrast,
-saturation, and hue adjustments.  Each augmentation can operate in random
-(stochastic per sample) or fixed (deterministic per sample) mode.
+saturation, hue, circular shift, noise injection, and Gaussian blur.  Each
+augmentation can operate in random (stochastic per sample) or fixed
+(deterministic per sample) mode.
 
 All transforms operate on [C, H, W] float tensors in [0, 1] or [-1, 1].
 """
@@ -12,7 +13,8 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import torch
 
@@ -323,14 +325,223 @@ def apply_augmentations(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Additional augmentations (beyond Phase 2 set)
+# ---------------------------------------------------------------------------
+
+def apply_circular_shift(
+    tensor: torch.Tensor,
+    enable_random: bool = False,
+    enable_fixed: bool = False,
+    max_shift_h: float = 0.0,
+    max_shift_w: float = 0.0,
+) -> torch.Tensor:
+    """Circular shift (roll) the image along H and/or W axes.
+
+    Shift amounts are fractions of the image dimension.  Fixed mode uses
+    +max values, random mode samples [-max, +max].
+    """
+    if not enable_random and not enable_fixed:
+        return tensor
+
+    _, h, w = tensor.shape
+
+    if enable_fixed:
+        shift_h = int(max_shift_h * h)
+        shift_w = int(max_shift_w * w)
+    else:
+        shift_h = int(random.uniform(-max_shift_h, max_shift_h) * h)
+        shift_w = int(random.uniform(-max_shift_w, max_shift_w) * w)
+
+    if shift_h == 0 and shift_w == 0:
+        return tensor
+
+    return torch.roll(tensor, shifts=(shift_h, shift_w), dims=(-2, -1))
+
+
+def apply_noise_injection(
+    tensor: torch.Tensor,
+    enable_random: bool = False,
+    enable_fixed: bool = False,
+    max_strength: float = 0.0,
+) -> torch.Tensor:
+    """Add Gaussian noise to the image tensor.
+
+    Fixed mode uses max_strength as std deviation.  Random mode samples
+    a std in [0, max_strength].
+    """
+    if not enable_random and not enable_fixed:
+        return tensor
+    if max_strength <= 0.0:
+        return tensor
+
+    if enable_fixed:
+        std = max_strength
+    else:
+        std = random.uniform(0.0, max_strength)
+
+    noise = torch.randn_like(tensor) * std
+    return tensor + noise
+
+
+def apply_gaussian_blur(
+    tensor: torch.Tensor,
+    enable_random: bool = False,
+    enable_fixed: bool = False,
+    max_kernel_size: int = 5,
+) -> torch.Tensor:
+    """Apply Gaussian blur to the image tensor.
+
+    Kernel size must be odd.  Fixed mode uses max_kernel_size.  Random mode
+    picks an odd value in [3, max_kernel_size].
+    """
+    if not enable_random and not enable_fixed:
+        return tensor
+    if max_kernel_size < 3:
+        return tensor
+
+    # Ensure odd
+    max_kernel_size = max_kernel_size | 1
+
+    if enable_fixed:
+        k = max_kernel_size
+    else:
+        # Pick a random odd kernel size
+        choices = list(range(3, max_kernel_size + 1, 2))
+        k = random.choice(choices) if choices else 3
+
+    sigma = 0.3 * ((k - 1) * 0.5 - 1) + 0.8
+
+    # Build 1D Gaussian kernel
+    ax = torch.arange(k, dtype=tensor.dtype, device=tensor.device) - (k - 1) / 2.0
+    kernel_1d = torch.exp(-0.5 * (ax / sigma) ** 2)
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    kernel_2d = kernel_1d.unsqueeze(0) * kernel_1d.unsqueeze(1)
+
+    c = tensor.shape[0]
+    kernel = kernel_2d.unsqueeze(0).unsqueeze(0).expand(c, 1, k, k)
+
+    # Pad and convolve
+    pad = k // 2
+    padded = torch.nn.functional.pad(tensor.unsqueeze(0), (pad, pad, pad, pad), mode="reflect")
+    blurred = torch.nn.functional.conv2d(padded, kernel, groups=c)
+    return blurred.squeeze(0)
+
+
+# ---------------------------------------------------------------------------
+# Compose function for chaining augmentations from config
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AugmentationSpec:
+    """Specification for a single augmentation in a compose chain."""
+
+    name: str
+    fn: Callable[..., torch.Tensor]
+    kwargs: dict = field(default_factory=dict)
+
+
+def compose_augmentations(
+    specs: list[AugmentationSpec],
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Create a composed augmentation function from a list of specs.
+
+    Returns a callable that applies each augmentation in sequence.
+
+    Example::
+
+        chain = compose_augmentations([
+            AugmentationSpec("flip", apply_random_flip, {"enable_random": True}),
+            AugmentationSpec("brightness", apply_random_brightness,
+                             {"enable_random": True, "max_strength": 0.1}),
+        ])
+        result = chain(tensor)
+    """
+    def _apply(tensor: torch.Tensor) -> torch.Tensor:
+        for spec in specs:
+            result = spec.fn(tensor, **spec.kwargs)
+            # Some fns return tuples (e.g., flip returns (tensor, bool))
+            if isinstance(result, tuple):
+                tensor = result[0]
+            else:
+                tensor = result
+        return tensor
+
+    return _apply
+
+
+def compose_from_config(config: ConceptImageConfig) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Build a composed augmentation chain from a ConceptImageConfig.
+
+    This creates the same pipeline as ``apply_augmentations`` but as a
+    reusable callable, with only enabled augmentations included.
+    """
+    specs: list[AugmentationSpec] = []
+
+    if config.enable_random_flip or config.enable_fixed_flip:
+        specs.append(AugmentationSpec(
+            "flip", apply_random_flip,
+            {"enable_random": config.enable_random_flip,
+             "enable_fixed": config.enable_fixed_flip},
+        ))
+
+    if config.enable_random_rotate or config.enable_fixed_rotate:
+        specs.append(AugmentationSpec(
+            "rotate", apply_random_rotate,
+            {"enable_random": config.enable_random_rotate,
+             "enable_fixed": config.enable_fixed_rotate,
+             "max_angle": config.random_rotate_max_angle},
+        ))
+
+    if config.enable_random_brightness or config.enable_fixed_brightness:
+        specs.append(AugmentationSpec(
+            "brightness", apply_random_brightness,
+            {"enable_random": config.enable_random_brightness,
+             "enable_fixed": config.enable_fixed_brightness,
+             "max_strength": config.random_brightness_max_strength},
+        ))
+
+    if config.enable_random_contrast or config.enable_fixed_contrast:
+        specs.append(AugmentationSpec(
+            "contrast", apply_random_contrast,
+            {"enable_random": config.enable_random_contrast,
+             "enable_fixed": config.enable_fixed_contrast,
+             "max_strength": config.random_contrast_max_strength},
+        ))
+
+    if config.enable_random_saturation or config.enable_fixed_saturation:
+        specs.append(AugmentationSpec(
+            "saturation", apply_random_saturation,
+            {"enable_random": config.enable_random_saturation,
+             "enable_fixed": config.enable_fixed_saturation,
+             "max_strength": config.random_saturation_max_strength},
+        ))
+
+    if config.enable_random_hue or config.enable_fixed_hue:
+        specs.append(AugmentationSpec(
+            "hue", apply_random_hue,
+            {"enable_random": config.enable_random_hue,
+             "enable_fixed": config.enable_fixed_hue,
+             "max_strength": config.random_hue_max_strength},
+        ))
+
+    return compose_augmentations(specs)
+
+
 __all__ = [
     "AugmentationResult",
+    "AugmentationSpec",
     "apply_augmentations",
-    "apply_random_flip",
-    "apply_random_rotate",
+    "apply_circular_shift",
+    "apply_crop_jitter",
+    "apply_gaussian_blur",
+    "apply_noise_injection",
     "apply_random_brightness",
     "apply_random_contrast",
-    "apply_random_saturation",
+    "apply_random_flip",
     "apply_random_hue",
-    "apply_crop_jitter",
+    "apply_random_rotate",
+    "apply_random_saturation",
+    "compose_augmentations",
+    "compose_from_config",
 ]
