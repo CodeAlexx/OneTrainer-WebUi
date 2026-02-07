@@ -1,5 +1,5 @@
-# Note: AMD requirements might be outdated. If you can provide information about running OneTrainer on AMD,
-# please open an issue or pull request on github
+# Note: AMD requirements might be outdated. If you can provide information about running Serenity on AMD,
+# please open an issue or pull request on GitHub.
 
 # pytorch
 --extra-index-url https://download.pytorch.org/whl/rocm6.3
