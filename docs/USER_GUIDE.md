@@ -249,19 +249,6 @@ model_type: sd15_inpainting  # Inpainting variant
 
 The original Stable Diffusion architecture. Small model size (~860 MB), fast training, low VRAM requirements. Good for learning and experimentation. Supports LoRA, full fine-tune, embedding training, and inpainting.
 
-### Stable Diffusion 2.0 / 2.1
-
-```yaml
-model_type: sd20          # SD 2.0 (768px)
-model_type: sd20_base     # SD 2.0 base (512px)
-model_type: sd21          # SD 2.1 (768px)
-model_type: sd21_base     # SD 2.1 base (512px)
-model_type: sd20_inpainting  # Inpainting
-model_type: sd20_depth    # Depth-conditioned
-```
-
-Improved architecture with OpenCLIP text encoder. The depth variant accepts depth map inputs for structure-guided generation.
-
 ### SDXL 1.0
 
 ```yaml
@@ -341,40 +328,6 @@ model_type: qwen_image_edit   # Image editing mode
 ```
 
 Qwen-based diffusion model with an image editing variant that accepts source images for modification.
-
-### PixArt Alpha / Sigma
-
-```yaml
-model_type: pixart_alpha
-model_type: pixart_sigma
-```
-
-Efficient text-to-image models with transformer-based architecture.
-
-### Sana
-
-```yaml
-model_type: sana
-```
-
-Lightweight image generation model.
-
-### HiDream
-
-```yaml
-model_type: hi_dream_full
-```
-
-Full HiDream model.
-
-### Wuerstchen 2 / Stable Cascade
-
-```yaml
-model_type: wuerstchen_2
-model_type: stable_cascade_1
-```
-
-Multi-stage generation pipeline with separate prior and decoder stages.
 
 ---
 

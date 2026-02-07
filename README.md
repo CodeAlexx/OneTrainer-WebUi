@@ -11,7 +11,7 @@
 
 ## Overview
 
-Serenity is a Python framework for fine-tuning and training diffusion models across a wide range of architectures. It provides a unified training pipeline that supports over 15 model families -- from classic Stable Diffusion 1.5 and SDXL through modern architectures like Flux 2, Chroma, Z-Image, and video models such as LTX2 and HunyuanVideo. Whether you are training a small LoRA adapter on an 8 GB GPU or running a full fine-tune across multiple GPUs, Serenity offers the configuration surface and memory management tools to get it done.
+Serenity is a Python framework for fine-tuning and training diffusion models across a wide range of architectures. It provides a unified training pipeline supporting Stable Diffusion 1.5, SDXL, SD3/3.5, Flux 1 and 2 (including Klein compact models), Chroma, Z-Image, Qwen, and video models like LTX2 and HunyuanVideo. Whether you are training a small LoRA adapter on an 8 GB GPU or running a full fine-tune across multiple GPUs, Serenity offers the configuration surface and memory management tools to get it done.
 
 The framework is built around a clean separation of concerns: model adapters, data pipeline, training utilities, and memory management each live in their own layer with well-defined interfaces. Configuration is handled through YAML or JSON files with over 150 tunable fields, automatic enum coercion, and a migration system that keeps older configs compatible as the schema evolves. A rich set of optimizers (45+), learning rate schedulers, loss functions, and noise strategies gives you fine-grained control over every aspect of the training loop.
 
@@ -21,7 +21,6 @@ Serenity also supports LyCORIS adapters (LoHa, LoKR, full-matrix decomposition),
 
 ### Model Support
 - **Stable Diffusion 1.5** -- including inpainting variants
-- **Stable Diffusion 2.0 / 2.1** -- base, inpainting, and depth variants
 - **SDXL 1.0** -- base and inpainting
 - **Stable Diffusion 3 / 3.5** -- flow-matching based architectures
 - **Flux 1** -- Dev, Schnell, and Fill (inpainting) variants
@@ -31,10 +30,6 @@ Serenity also supports LyCORIS adapters (LoHa, LoKR, full-matrix decomposition),
 - **LTX2** -- video generation model
 - **HunyuanVideo** -- video generation
 - **Qwen** -- image generation and image editing modes
-- **PixArt Alpha / Sigma** -- efficient text-to-image
-- **Sana** -- lightweight image generation
-- **HiDream** -- HiDream Full
-- **Wuerstchen 2 / Stable Cascade** -- multi-stage generation
 
 ### Training Methods
 - **LoRA** -- low-rank adaptation with configurable rank, alpha, and layer filtering
@@ -204,7 +199,7 @@ python -m serenity.cli.commands train config.yaml
 serenity/
 ├── core/           # Config, interfaces, enums, trainer loop
 ├── models/         # Model adapters (SD15, SDXL, SD3, Flux 1/2, Chroma,
-│                   #   Z-Image, LTX2, HunyuanVideo, Qwen, PixArt, Sana, etc.)
+│                   #   Z-Image, LTX2, HunyuanVideo, Qwen)
 ├── training/       # Optimizers, schedulers, losses, EMA, precision,
 │                   #   gradient management, distributed, embedding training
 ├── pipeline/       # Dataset loading, bucketing, caching, augmentations,
@@ -216,8 +211,6 @@ serenity/
 ├── presets/        # VRAM-tier preset configurations (8GB, 16GB, 24GB)
 ├── cli/            # Command-line interface
 ├── adapters/       # Adapter layer (LoRA, LyCORIS)
-├── components/     # Shared model components
-├── monitoring/     # TensorBoard and logging utilities
 ├── utils/          # General utilities
 └── tests/          # Test suite
 ```
@@ -253,7 +246,6 @@ Configs can be written in YAML or JSON. Older config files are automatically mig
 | Model Family | LoRA | Full Fine-Tune | Embedding/TI | Inpainting | Notes |
 |-------------|------|---------------|-------------|------------|-------|
 | SD 1.5 | Yes | Yes | Yes | Yes | Classic architecture |
-| SD 2.0 / 2.1 | Yes | Yes | Yes | Yes | Includes depth variant |
 | SDXL 1.0 | Yes | Yes | Yes | Yes | Dual text encoder |
 | SD 3 / 3.5 | Yes | Yes | -- | -- | Flow matching |
 | Flux 1 (Dev/Schnell) | Yes | Yes | -- | Yes (Fill) | Flow matching |
@@ -264,10 +256,6 @@ Configs can be written in YAML or JSON. Older config files are automatically mig
 | LTX2 | Yes | Yes | -- | -- | Video model |
 | HunyuanVideo | Yes | Yes | -- | -- | Video model |
 | Qwen | Yes | Yes | -- | -- | Image editing mode |
-| PixArt Alpha/Sigma | Yes | Yes | -- | -- | Efficient T2I |
-| Sana | Yes | Yes | -- | -- | Lightweight |
-| HiDream | Yes | Yes | -- | -- | Full model |
-| Wuerstchen 2 / Cascade | Yes | Yes | -- | -- | Multi-stage |
 
 ---
 
