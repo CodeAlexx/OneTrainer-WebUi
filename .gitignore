@@ -37,3 +37,18 @@ pixi.toml
 train.bat
 debug_report.log
 config_diff.txt
+
+# serenity local artifacts (keep repo to code/docs only)
+/serenity/.eri-rpg/
+/serenity/**/*.safetensors
+/serenity/**/*.ckpt
+/serenity/**/*.pt
+/serenity/**/*.pth
+/serenity/**/*.bin
+/serenity/**/*.onnx
+/serenity/**/*.gguf
+/serenity/**/checkpoints/
+/serenity/**/runs/
+/serenity/output/
+/serenity/workspace/
+/serenity/.cache/
