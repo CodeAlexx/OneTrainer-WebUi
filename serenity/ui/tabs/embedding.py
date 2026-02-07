@@ -27,17 +27,17 @@ def build_embedding_tab(ui_state: UIState) -> None:
 
     labeled_float(
         "Embedding Learning Rate",
-        tag="embedding_learning_rate",
+        tag="emb_tab_learning_rate",
         default_value=cfg.embedding_learning_rate or 0.0,
-        callback=cb("embedding_learning_rate"),
+        callback=cb("emb_tab_learning_rate"),
         tip="Learning rate for embedding / textual-inversion training",
         format_str="%.2e",
     )
     labeled_checkbox(
         "Preserve Embedding Norm",
-        tag="preserve_embedding_norm",
+        tag="emb_tab_preserve_norm",
         default_value=cfg.preserve_embedding_norm,
-        callback=cb("preserve_embedding_norm"),
+        callback=cb("emb_tab_preserve_norm"),
         tip="Normalize embeddings to preserve their original magnitude",
     )
     labeled_combo(
@@ -52,9 +52,6 @@ def build_embedding_tab(ui_state: UIState) -> None:
     )
 
     # -- Register all bindings with UIState ---------------------------------
-    for tag in [
-        "embedding_learning_rate",
-        "preserve_embedding_norm",
-        "embedding_weight_dtype",
-    ]:
-        ui_state.register(tag)
+    ui_state.register("emb_tab_learning_rate", field_path="embedding_learning_rate")
+    ui_state.register("emb_tab_preserve_norm", field_path="preserve_embedding_norm")
+    ui_state.register("embedding_weight_dtype")

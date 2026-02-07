@@ -65,9 +65,9 @@ def build_lora_tab(ui_state: UIState) -> None:
     )
     labeled_float(
         "Dropout",
-        tag="dropout_probability",
+        tag="lora_tab_dropout",
         default_value=cfg.dropout_probability,
-        callback=cb("dropout_probability"),
+        callback=cb("lora_tab_dropout"),
         tip="Dropout probability applied to LoRA layers",
         format_str="%.3f",
         min_value=0.0,
@@ -206,7 +206,6 @@ def build_lora_tab(ui_state: UIState) -> None:
         "lora_model_name",
         "lora_rank",
         "lora_alpha",
-        "dropout_probability",
         "lora_weight_dtype",
         "bundle_additional_embeddings",
         "lora_decompose",
@@ -223,6 +222,7 @@ def build_lora_tab(ui_state: UIState) -> None:
         "lokr_dora_on_output",
     ]:
         ui_state.register(tag)
+    ui_state.register("lora_tab_dropout", field_path="dropout_probability")
 
 
 # ---------------------------------------------------------------------------

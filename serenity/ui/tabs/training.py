@@ -36,8 +36,8 @@ from serenity.core.enums import (
 
 __all__ = ["build_training_tab"]
 
-# Column widths for the 3-column layout
-_COL_W = 420
+# Column widths for the 3-column layout (sized for 4K readability)
+_COL_W = 620
 
 
 # ---------------------------------------------------------------------------

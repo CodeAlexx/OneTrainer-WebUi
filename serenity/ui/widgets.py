@@ -27,14 +27,17 @@ __all__ = [
     "time_entry",
 ]
 
-# Default label column width
-LABEL_WIDTH = 200
+# Default label column width (sized for 4K readability with 22px font)
+LABEL_WIDTH = 280
+
+# Max width for input fields to prevent full-screen stretch on 4K
+INPUT_WIDTH = 420
 
 
 def tooltip(parent: int | str, text: str) -> None:
     """Attach a hover tooltip to *parent*."""
     with dpg.tooltip(parent):
-        dpg.add_text(text, wrap=400)
+        dpg.add_text(text, wrap=500)
 
 
 def section_header(label: str, parent: int | str = 0) -> int:
@@ -43,11 +46,12 @@ def section_header(label: str, parent: int | str = 0) -> int:
 
 
 def labeled_separator(label: str, parent: int | str = 0) -> None:
-    """Visual separator with a label."""
-    dpg.add_spacer(height=4, parent=parent)
+    """Visual separator with a colored label and breathing room."""
+    dpg.add_spacer(height=10, parent=parent)
     dpg.add_separator(parent=parent)
-    dpg.add_text(label, parent=parent, color=(150, 180, 220))
-    dpg.add_spacer(height=2, parent=parent)
+    dpg.add_spacer(height=4, parent=parent)
+    dpg.add_text(label, parent=parent, color=(86, 156, 240))
+    dpg.add_spacer(height=6, parent=parent)
 
 
 def labeled_input(
@@ -57,7 +61,7 @@ def labeled_input(
     default_value: str = "",
     callback: Callable | None = None,
     parent: int | str = 0,
-    width: int = -1,
+    width: int = 0,
     tip: str = "",
     hint: str = "",
 ) -> int:
@@ -68,7 +72,7 @@ def labeled_input(
             tooltip(t, tip)
         kwargs: dict[str, Any] = {
             "default_value": default_value,
-            "width": width,
+            "width": width if width != 0 else INPUT_WIDTH,
         }
         if tag:
             kwargs["tag"] = tag
@@ -87,7 +91,7 @@ def labeled_float(
     default_value: float = 0.0,
     callback: Callable | None = None,
     parent: int | str = 0,
-    width: int = -1,
+    width: int = 0,
     tip: str = "",
     min_value: float = 0.0,
     max_value: float = 0.0,
@@ -101,7 +105,7 @@ def labeled_float(
             tooltip(t, tip)
         kwargs: dict[str, Any] = {
             "default_value": default_value,
-            "width": width,
+            "width": width if width != 0 else INPUT_WIDTH,
             "format": format_str,
         }
         if tag:
@@ -126,7 +130,7 @@ def labeled_int(
     default_value: int = 0,
     callback: Callable | None = None,
     parent: int | str = 0,
-    width: int = -1,
+    width: int = 0,
     tip: str = "",
     min_value: int = 0,
     max_value: int = 0,
@@ -138,7 +142,7 @@ def labeled_int(
             tooltip(t, tip)
         kwargs: dict[str, Any] = {
             "default_value": default_value,
-            "width": width,
+            "width": width if width != 0 else INPUT_WIDTH,
         }
         if tag:
             kwargs["tag"] = tag
@@ -184,7 +188,7 @@ def labeled_combo(
     default_value: str = "",
     callback: Callable | None = None,
     parent: int | str = 0,
-    width: int = -1,
+    width: int = 0,
     tip: str = "",
 ) -> int:
     """Label + dropdown combo."""
@@ -195,7 +199,7 @@ def labeled_combo(
         kwargs: dict[str, Any] = {
             "items": items,
             "default_value": default_value,
-            "width": width,
+            "width": width if width != 0 else INPUT_WIDTH,
         }
         if tag:
             kwargs["tag"] = tag
@@ -241,7 +245,7 @@ def labeled_file(
     default_value: str = "",
     callback: Callable | None = None,
     parent: int | str = 0,
-    width: int = -1,
+    width: int = 0,
     tip: str = "",
 ) -> int:
     """Label + text input + browse button for files."""
@@ -251,7 +255,7 @@ def labeled_file(
             tooltip(t, tip)
         kwargs: dict[str, Any] = {
             "default_value": default_value,
-            "width": width if width > 0 else -80,
+            "width": width if width > 0 else INPUT_WIDTH - 60,
         }
         if tag:
             kwargs["tag"] = tag
@@ -270,7 +274,7 @@ def labeled_file(
                 dpg.add_file_extension(".ckpt", color=(0, 255, 0))
                 dpg.add_file_extension(".gguf", color=(0, 200, 200))
 
-        dpg.add_button(label="...", callback=_browse, width=40)
+        dpg.add_button(label="...", callback=_browse, width=50)
     return item
 
 
@@ -281,7 +285,7 @@ def labeled_dir(
     default_value: str = "",
     callback: Callable | None = None,
     parent: int | str = 0,
-    width: int = -1,
+    width: int = 0,
     tip: str = "",
 ) -> int:
     """Label + text input + browse button for directories."""
@@ -291,7 +295,7 @@ def labeled_dir(
             tooltip(t, tip)
         kwargs: dict[str, Any] = {
             "default_value": default_value,
-            "width": width if width > 0 else -80,
+            "width": width if width > 0 else INPUT_WIDTH - 60,
         }
         if tag:
             kwargs["tag"] = tag
@@ -308,7 +312,7 @@ def labeled_dir(
             ):
                 pass
 
-        dpg.add_button(label="...", callback=_browse, width=40)
+        dpg.add_button(label="...", callback=_browse, width=50)
     return item
 
 
@@ -331,7 +335,7 @@ def time_entry(
         t = dpg.add_text(label, wrap=LABEL_WIDTH)
         if tip:
             tooltip(t, tip)
-        v_kw: dict[str, Any] = {"default_value": default_value, "width": 100, "format": "%.1f"}
+        v_kw: dict[str, Any] = {"default_value": default_value, "width": 160, "format": "%.1f"}
         if value_tag:
             v_kw["tag"] = value_tag
         if callback:
@@ -341,7 +345,7 @@ def time_entry(
         u_kw: dict[str, Any] = {
             "items": unit_items,
             "default_value": default_unit,
-            "width": 120,
+            "width": 160,
         }
         if unit_tag:
             u_kw["tag"] = unit_tag

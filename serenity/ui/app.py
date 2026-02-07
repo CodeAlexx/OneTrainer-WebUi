@@ -27,7 +27,7 @@ from serenity.core.enums import (
     TimestepDistribution,
 )
 from serenity.ui.state import UIState
-from serenity.ui.theme import apply_dark_theme, create_start_button_theme, create_stop_button_theme
+from serenity.ui.theme import apply_dark_theme, create_start_button_theme, create_stop_button_theme, setup_fonts
 from serenity.ui.widgets import enum_values
 
 __all__ = ["SerenityApp"]
@@ -64,12 +64,13 @@ class SerenityApp:
         dpg.create_context()
         dpg.create_viewport(
             title="Serenity - Training UI",
-            width=1200,
-            height=800,
-            min_width=900,
-            min_height=600,
+            width=1600,
+            height=1000,
+            min_width=1000,
+            min_height=700,
         )
 
+        setup_fonts(size=22)
         apply_dark_theme()
         self._build_ui()
 
@@ -92,7 +93,7 @@ class SerenityApp:
     def _build_top_bar(self) -> None:
         """Config preset selector + model type + training method."""
         with dpg.group(horizontal=True):
-            dpg.add_text("Serenity", color=(100, 170, 240))
+            dpg.add_text("Serenity", color=(86, 156, 240))
             dpg.add_spacer(width=20)
 
             # Config preset combo
@@ -204,7 +205,7 @@ class SerenityApp:
                     dpg.add_progress_bar(
                         tag=TAG_STEP_PROGRESS,
                         default_value=0.0,
-                        width=250,
+                        width=350,
                         overlay="0 / 0",
                     )
                 with dpg.group(horizontal=True):
@@ -212,7 +213,7 @@ class SerenityApp:
                     dpg.add_progress_bar(
                         tag=TAG_EPOCH_PROGRESS,
                         default_value=0.0,
-                        width=250,
+                        width=350,
                         overlay="0 / 0",
                     )
 
