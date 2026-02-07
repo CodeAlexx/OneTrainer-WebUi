@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import random
 from pathlib import Path
 from typing import Any
@@ -129,6 +130,7 @@ def resolve_prompt(
     - "concept": Use the concept name as the caption
     - "directory": Use the directory-level captions.txt
     - "file": Use the text_config.prompt_path file contents
+    - "filename": Use the image filename (without extension) as the caption
     """
     source = text_config.prompt_source.lower().strip()
 
@@ -141,10 +143,13 @@ def resolve_prompt(
             return prompt_file.read_text().strip()
         return concept_name
 
+    if source == "filename":
+        return image_path.stem
+
     if source == "directory":
         caption_file = image_path.parent / "captions.txt"
         if caption_file.exists():
-            lines = [l.strip() for l in caption_file.read_text().splitlines() if l.strip()]
+            lines = [ln.strip() for ln in caption_file.read_text().splitlines() if ln.strip()]
             if lines:
                 return lines[0]
         return concept_name
@@ -156,8 +161,148 @@ def resolve_prompt(
     return concept_name
 
 
+def _is_special_tag(
+    tag: str,
+    special_tags: str,
+    special_mode: str,
+    use_regex: bool = False,
+) -> bool:
+    """Check if a tag matches the special tag criteria.
+
+    Modes:
+    - "NONE": No special handling, always returns False
+    - "WHITELIST": Only special tags can be dropped
+    - "BLACKLIST": Special tags are protected from dropout
+    """
+    if special_mode.upper() == "NONE" or not special_tags:
+        return False
+
+    if use_regex:
+        try:
+            return bool(re.search(special_tags, tag))
+        except re.error:
+            return False
+
+    # Comma-separated list matching
+    special_list = [s.strip().lower() for s in special_tags.split(",") if s.strip()]
+    return tag.strip().lower() in special_list
+
+
+def _apply_tag_dropout(
+    tags: list[str],
+    text_config: ConceptTextConfig,
+) -> list[str]:
+    """Apply tag dropout with special tag handling.
+
+    Dropout modes:
+    - "FULL": Drop each eligible tag independently with given probability.
+
+    Special tag modes:
+    - "NONE": All tags beyond keep_count are eligible for dropout.
+    - "WHITELIST": Only special tags are eligible for dropout.
+    - "BLACKLIST": Special tags are protected, all others eligible.
+    """
+    if not text_config.tag_dropout_enable or text_config.tag_dropout_probability <= 0:
+        return tags
+
+    keep_count = text_config.keep_tags_count
+    protected = tags[:keep_count]
+    droppable = tags[keep_count:]
+
+    if not droppable:
+        return tags
+
+    special_mode = text_config.tag_dropout_special_tags_mode.upper()
+    special_tags_str = text_config.tag_dropout_special_tags
+    use_regex = text_config.tag_dropout_special_tags_regex
+    prob = text_config.tag_dropout_probability
+
+    if text_config.tag_dropout_mode.upper() == "FULL":
+        surviving: list[str] = []
+        for tag in droppable:
+            is_special = _is_special_tag(tag, special_tags_str, special_mode, use_regex)
+
+            if special_mode == "WHITELIST":
+                # Only drop special (whitelisted) tags
+                if is_special and random.random() < prob:
+                    continue
+                surviving.append(tag)
+            elif special_mode == "BLACKLIST":
+                # Never drop special (blacklisted) tags
+                if is_special:
+                    surviving.append(tag)
+                elif random.random() < prob:
+                    continue
+                else:
+                    surviving.append(tag)
+            else:
+                # NONE: drop any tag with probability
+                if random.random() < prob:
+                    continue
+                surviving.append(tag)
+
+        return protected + surviving
+
+    return tags
+
+
+def _apply_caps_randomization(
+    tags: list[str],
+    text_config: ConceptTextConfig,
+) -> list[str]:
+    """Apply capitalization randomization to tags.
+
+    Modes (comma-separated, one is picked at random per tag):
+    - "capslock": ALL CAPS
+    - "title": Title Case
+    - "first": First letter only
+    - "random": rAnDom cAsE
+
+    If caps_randomize_lowercase is True, the tag is lowercased before
+    applying the selected mode.
+    """
+    if not text_config.caps_randomize_enable or text_config.caps_randomize_probability <= 0:
+        return tags
+
+    modes_str = text_config.caps_randomize_mode
+    available_modes = [m.strip().lower() for m in modes_str.split(",") if m.strip()]
+    if not available_modes:
+        return tags
+
+    result: list[str] = []
+    for tag in tags:
+        if random.random() >= text_config.caps_randomize_probability:
+            result.append(tag)
+            continue
+
+        text = tag.lower() if text_config.caps_randomize_lowercase else tag
+        mode = random.choice(available_modes)
+
+        if mode == "capslock":
+            result.append(text.upper())
+        elif mode == "title":
+            result.append(text.title())
+        elif mode == "first":
+            result.append(text[0].upper() + text[1:] if text else text)
+        elif mode == "random":
+            result.append("".join(
+                c.upper() if random.random() < 0.5 else c.lower()
+                for c in text
+            ))
+        else:
+            result.append(tag)
+
+    return result
+
+
 def _apply_tag_processing(caption: str, text_config: ConceptTextConfig) -> str:
-    """Apply tag shuffling and dropout to a caption."""
+    """Apply tag dropout, caps randomization, and shuffling to a caption.
+
+    Processing order matches OneTrainer:
+    1. Tag dropout (with special tag handling)
+    2. Caps randomization
+    3. Tag shuffling
+    """
     if not caption:
         return caption
 
@@ -167,21 +312,13 @@ def _apply_tag_processing(caption: str, text_config: ConceptTextConfig) -> str:
     if not tags:
         return caption
 
-    # Tag dropout
-    if text_config.tag_dropout_enable and text_config.tag_dropout_probability > 0:
-        keep_count = text_config.keep_tags_count
-        protected = tags[:keep_count]
-        droppable = tags[keep_count:]
+    # 1. Tag dropout
+    tags = _apply_tag_dropout(tags, text_config)
 
-        if text_config.tag_dropout_mode.upper() == "FULL":
-            droppable = [
-                t for t in droppable
-                if random.random() > text_config.tag_dropout_probability
-            ]
+    # 2. Caps randomization
+    tags = _apply_caps_randomization(tags, text_config)
 
-        tags = protected + droppable
-
-    # Tag shuffling
+    # 3. Tag shuffling
     if text_config.enable_tag_shuffling:
         keep_count = text_config.keep_tags_count
         protected = tags[:keep_count]
