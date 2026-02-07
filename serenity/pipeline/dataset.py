@@ -10,6 +10,11 @@ import torch
 from torch.utils.data import Dataset
 
 from serenity.core.concept_config import ConceptConfig
+from serenity.pipeline.augmentations import (
+    AugmentationResult,
+    apply_augmentations,
+    apply_crop_jitter,
+)
 from serenity.pipeline.concepts import (
     ImageCaptionPair,
     discover_images,
@@ -56,16 +61,13 @@ def _apply_augmentations(
     tensor: torch.Tensor,
     concept: ConceptConfig,
 ) -> torch.Tensor:
-    """Apply random augmentations based on concept image config."""
-    img_cfg = concept.image
+    """Apply the full augmentation pipeline based on concept image config.
 
-    # Random horizontal flip
-    if img_cfg.enable_random_flip and random.random() < 0.5:
-        tensor = torch.flip(tensor, dims=[-1])
-    elif img_cfg.enable_fixed_flip:
-        tensor = torch.flip(tensor, dims=[-1])
-
-    return tensor
+    Delegates to the augmentations module which handles flip, rotate,
+    brightness, contrast, saturation, and hue.
+    """
+    result = apply_augmentations(tensor, concept.image)
+    return result.tensor
 
 
 class SerenityDataset(Dataset):
