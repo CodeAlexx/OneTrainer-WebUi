@@ -1,6 +1,0 @@
-{
-    "modelspec.sai_model_spec": "1.0.0",
-    "modelspec.architecture": "sana/embedding",
-    "modelspec.implementation": "https://github.com/NVlabs/Sana",
-    "modelspec.title": "Sana Embedding"
-}
