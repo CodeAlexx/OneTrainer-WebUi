@@ -103,12 +103,12 @@ class TestWanAdapter:
 
 
 # ---------------------------------------------------------------------------
-# LuminaAdapter
+# LuminaAdapter (stub — create_model is not yet implemented)
 # ---------------------------------------------------------------------------
 
 
 class TestLuminaAdapter:
-    """Tests for the Lumina 2 adapter."""
+    """Tests for the Lumina 2 adapter metadata and stub behavior."""
 
     def test_architecture(self) -> None:
         adapter = LuminaAdapter()
@@ -150,18 +150,24 @@ class TestLuminaAdapter:
         result = adapter.prepare_conditioning(inputs)
         assert result is inputs
 
-    def test_adapters_registry(self) -> None:
-        assert ModelArchitecture.LUMINA in LUMINA_ADAPTERS
-        assert LUMINA_ADAPTERS[ModelArchitecture.LUMINA] is LuminaAdapter
+    def test_adapters_registry_empty(self) -> None:
+        """Lumina ADAPTERS dict should be empty (not yet loadable)."""
+        assert LUMINA_ADAPTERS == {}
+
+    def test_create_model_raises(self) -> None:
+        """create_model() must raise NotImplementedError with clear message."""
+        adapter = LuminaAdapter()
+        with pytest.raises(NotImplementedError, match="Lumina adapter is not yet implemented"):
+            adapter.create_model({})
 
 
 # ---------------------------------------------------------------------------
-# ZImageAdapter
+# ZImageAdapter (stub — create_model is not yet implemented)
 # ---------------------------------------------------------------------------
 
 
 class TestZImageAdapter:
-    """Tests for the Z-Image adapter."""
+    """Tests for the Z-Image adapter metadata and stub behavior."""
 
     def test_architecture(self) -> None:
         adapter = ZImageAdapter()
@@ -211,18 +217,24 @@ class TestZImageAdapter:
         assert lumina.architecture == ModelArchitecture.LUMINA
         assert zimage.architecture == ModelArchitecture.ZIMAGE
 
-    def test_adapters_registry(self) -> None:
-        assert ModelArchitecture.ZIMAGE in ZIMAGE_ADAPTERS
-        assert ZIMAGE_ADAPTERS[ModelArchitecture.ZIMAGE] is ZImageAdapter
+    def test_adapters_registry_empty(self) -> None:
+        """ZImage ADAPTERS dict should be empty (not yet loadable)."""
+        assert ZIMAGE_ADAPTERS == {}
+
+    def test_create_model_raises(self) -> None:
+        """create_model() must raise NotImplementedError with clear message."""
+        adapter = ZImageAdapter()
+        with pytest.raises(NotImplementedError, match="Z-Image adapter is not yet implemented"):
+            adapter.create_model({})
 
 
 # ---------------------------------------------------------------------------
-# QwenAdapter
+# QwenAdapter (stub — create_model is not yet implemented)
 # ---------------------------------------------------------------------------
 
 
 class TestQwenAdapter:
-    """Tests for the Qwen Image adapter."""
+    """Tests for the Qwen Image adapter metadata and stub behavior."""
 
     def test_architecture(self) -> None:
         adapter = QwenAdapter()
@@ -273,6 +285,45 @@ class TestQwenAdapter:
         result = adapter.prepare_conditioning(inputs)
         assert result is inputs
 
-    def test_adapters_registry(self) -> None:
-        assert ModelArchitecture.QWEN in QWEN_ADAPTERS
-        assert QWEN_ADAPTERS[ModelArchitecture.QWEN] is QwenAdapter
+    def test_adapters_registry_empty(self) -> None:
+        """Qwen ADAPTERS dict should be empty (not yet loadable)."""
+        assert QWEN_ADAPTERS == {}
+
+    def test_create_model_raises(self) -> None:
+        """create_model() must raise NotImplementedError with clear message."""
+        adapter = QwenAdapter()
+        with pytest.raises(NotImplementedError, match="Qwen adapter is not yet implemented"):
+            adapter.create_model({})
+
+
+# ---------------------------------------------------------------------------
+# Loader integration: unsupported architectures give clear errors
+# ---------------------------------------------------------------------------
+
+
+class TestLoaderUnsupportedArchitectures:
+    """Verify that loader._get_adapter raises clear errors for stub adapters."""
+
+    def test_lumina_raises_valueerror(self) -> None:
+        from serenity.inference.models.detection import ModelConfig
+        from serenity.inference.models.loader import _get_adapter
+
+        config = ModelConfig(architecture=ModelArchitecture.LUMINA)
+        with pytest.raises(ValueError, match="not yet supported"):
+            _get_adapter(config)
+
+    def test_zimage_raises_valueerror(self) -> None:
+        from serenity.inference.models.detection import ModelConfig
+        from serenity.inference.models.loader import _get_adapter
+
+        config = ModelConfig(architecture=ModelArchitecture.ZIMAGE)
+        with pytest.raises(ValueError, match="not yet supported"):
+            _get_adapter(config)
+
+    def test_qwen_raises_valueerror(self) -> None:
+        from serenity.inference.models.detection import ModelConfig
+        from serenity.inference.models.loader import _get_adapter
+
+        config = ModelConfig(architecture=ModelArchitecture.QWEN)
+        with pytest.raises(ValueError, match="not yet supported"):
+            _get_adapter(config)

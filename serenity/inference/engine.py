@@ -15,8 +15,11 @@ from torch import Tensor
 
 from serenity.inference.attention.backends import select_best_backend
 from serenity.inference.cache.store import StageCache
-from serenity.inference.config import InferenceConfig
+from serenity.inference.config import InferenceConfig, VRAMMode
 from serenity.inference.memory.manager import ModelManager
+from serenity.inference.memory.offload import OffloadConv2d, OffloadLinear
+from serenity.inference.memory.pinned import PinnedMemoryManager, pin_model_weights
+from serenity.inference.memory.streams import StreamPool
 from serenity.inference.memory.vram import get_free_memory, is_cuda_available
 from serenity.inference.models.detection import ModelArchitecture, ModelConfig, detect_from_file
 from serenity.inference.models.loader import (
@@ -24,6 +27,7 @@ from serenity.inference.models.loader import (
     extract_vae_state_dict,
     load_state_dict,
 )
+from serenity.inference.quantization.ops import OperationContext
 from serenity.inference.sampling.cfg import apply_cfg
 from serenity.inference.utils.interrupt import check_interrupt
 from serenity.inference.sampling.conditioning import Conditioning, create_noise
@@ -111,10 +115,29 @@ class InferenceEngine:
         else:
             self._device = torch.device("cpu")
 
+        # Resolve effective VRAM mode
+        self._vram_mode = config.vram_mode
+
         # Subsystems
         self._model_manager = ModelManager(device=self._device)
         self._attention_backend = select_best_backend(config.attention_backend.value)
         self._cache = StageCache(max_memory_bytes=256 * 1024 * 1024)
+
+        # Stream pool for async weight transfers (CUDA/XPU only)
+        self._stream_pool: StreamPool | None = None
+        if self._device.type in ("cuda", "xpu"):
+            self._stream_pool = StreamPool(
+                num_streams=config.offload_streams,
+                device=self._device,
+            )
+
+        # Pinned memory manager for fast CPU-to-GPU DMA
+        self._pinned_manager: PinnedMemoryManager | None = None
+        if config.pin_memory and self._device.type in ("cuda", "xpu"):
+            self._pinned_manager = PinnedMemoryManager()
+
+        # Config hash for model caching via ModelManager
+        self._config_hash: str = ""
 
         # State — populated lazily on first generate()
         self._model_config: ModelConfig | None = None
@@ -130,9 +153,10 @@ class InferenceEngine:
         self._sigma_max: float = 14.6146
 
         logger.info(
-            "InferenceEngine initialized (device=%s, attention=%s)",
+            "InferenceEngine initialized (device=%s, attention=%s, vram_mode=%s)",
             self._device,
             self._attention_backend.value,
+            self._vram_mode.value,
         )
 
     # ------------------------------------------------------------------
@@ -267,7 +291,7 @@ class InferenceEngine:
             added_cond_kwargs_uncond=added_cond_kwargs_uncond,
         )
 
-        # Step 8: Sample (with OOM recovery — retry at batch_size=1)
+        # Step 8: Sample (with OOM recovery — evict then retry)
         logger.info("Sampling with %s sampler...", params["sampler"])
         try:
             latents = sample(
@@ -278,6 +302,13 @@ class InferenceEngine:
                 callback=callback,
             )
         except torch.cuda.OutOfMemoryError:
+            # Try freeing memory via ModelManager LRU eviction first
+            freed = self._model_manager.free_memory(
+                noise.nbytes * 4,  # estimate working memory needed
+            )
+            if freed > 0:
+                logger.info("Freed %d bytes via LRU eviction, retrying", freed)
+
             if noise.shape[0] > 1:
                 logger.warning(
                     "CUDA OOM during sampling — retrying with batch_size=1",
@@ -329,6 +360,13 @@ class InferenceEngine:
 
         Detects the architecture from the checkpoint header, then loads
         UNet/transformer, text encoders, and VAE through the adapter system.
+
+        The VRAM mode controls how models are placed:
+
+        * ``HIGH`` / ``AUTO`` with sufficient VRAM: Full GPU placement (fast path).
+        * ``NORMAL``: Budget-aware loading via ModelManager with partial offload.
+        * ``LOW``: Aggressive offloading with a smaller VRAM budget.
+        * ``NO_VRAM``: Maximum offloading, minimum VRAM footprint.
         """
         path = model_path or self._config.model_path
         if not path:
@@ -361,22 +399,76 @@ class InferenceEngine:
 
         self._adapter = adapter
 
+        # Compute config hash for model caching
+        self._config_hash = self._compute_config_hash(path, dtype)
+
+        # Check if ModelManager already has this model cached
+        existing = self._model_manager.get_loaded(self._config_hash)
+        if existing is not None and existing.is_alive and existing.model is not None:
+            logger.info("Reusing cached model for %s (hash=%s)", arch.value, self._config_hash[:12])
+            self._unet = existing.model
+            self._model_loaded = True
+            return
+
+        # Determine whether offloading is needed
+        needs_offload = self._vram_mode in (VRAMMode.NORMAL, VRAMMode.LOW, VRAMMode.NO_VRAM)
+
+        # Build OperationContext with offload classes when offloading is active
+        ops_ctx: OperationContext | None = None
+        if needs_offload:
+            ops_ctx = OperationContext(
+                linear_cls=OffloadLinear,
+                conv2d_cls=OffloadConv2d,
+                dtype=dtype,
+                device=self._device,
+            )
+
         # 1. Load state dict and create model via adapter
         sd = load_state_dict(path)
-        self._unet = adapter.create_model(
-            sd, device=str(self._device), dtype=dtype,
-        )
+        if ops_ctx is not None:
+            self._unet = adapter.create_model(
+                sd, device=str(self._device), dtype=dtype,
+                ops_context=ops_ctx,
+            )
+        else:
+            self._unet = adapter.create_model(
+                sd, device=str(self._device), dtype=dtype,
+            )
         logger.info("Created %s model via adapter", arch.value)
 
-        # 2. Load VAE from checkpoint
+        # 2. Register model with ModelManager for lifecycle management
+        if self._unet is not None and isinstance(self._unet, torch.nn.Module):
+            # Free memory before loading if needed
+            if needs_offload:
+                model_size = sum(
+                    p.data.nbytes for p in self._unet.parameters()
+                )
+                self._model_manager.free_memory(model_size)
+
+            budget = self._get_vram_budget()
+            self._model_manager.load(
+                self._unet,
+                budget=budget,
+                config_hash=self._config_hash,
+            )
+
+            # Wire stream pool into offload layers
+            if needs_offload and self._stream_pool is not None:
+                self._attach_stream_pool(self._unet)
+
+            # Pin CPU-resident weights for faster transfers
+            if self._pinned_manager is not None and needs_offload:
+                pin_model_weights(self._unet, manager=self._pinned_manager)
+
+        # 3. Load VAE from checkpoint
         self._load_vae_from_checkpoint(sd, dtype)
 
-        # 3. Load text encoders via TextEncoderManager
+        # 4. Load text encoders via TextEncoderManager
         self._text_enc_manager.load_for_model(
             arch, dtype=dtype, device=str(self._device),
         )
 
-        # 4. Build sigma schedule
+        # 5. Build sigma schedule
         if adapter.get_prediction_type() in ("flow", "flow_flux"):
             self._build_flow_sigma_schedule()
         else:
@@ -384,8 +476,8 @@ class InferenceEngine:
 
         self._model_loaded = True
         logger.info(
-            "%s loaded: model + text encoders + VAE on %s (%s)",
-            arch.value, self._device, dtype,
+            "%s loaded: model + text encoders + VAE on %s (%s, vram_mode=%s)",
+            arch.value, self._device, dtype, self._vram_mode.value,
         )
 
     def unload_all(self) -> None:
@@ -394,11 +486,15 @@ class InferenceEngine:
         self._cache.invalidate()
         self._model_config = None
         self._model_loaded = False
+        self._config_hash = ""
         self._adapter = None
         self._unet = None
         self._text_enc_manager.unload_all()
         self._vae_decoder = None
         self._log_sigmas = None
+        # Sync stream pool before cleanup
+        if self._stream_pool is not None:
+            self._stream_pool.sync_all()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         logger.info("All models unloaded and caches cleared")
@@ -418,6 +514,17 @@ class InferenceEngine:
             "loaded_models": len(self._model_manager.loaded_models),
             "cache_entries": self._cache.stats["entries"],
             "vram_free_bytes": free_mem,
+            "vram_mode": self._vram_mode.value,
+            "stream_pool_streams": (
+                self._stream_pool.num_streams
+                if self._stream_pool is not None
+                else 0
+            ),
+            "pinned_memory_bytes": (
+                self._pinned_manager.total_pinned
+                if self._pinned_manager is not None
+                else 0
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -432,6 +539,14 @@ class InferenceEngine:
         if not vae_sd:
             logger.info("No VAE keys in checkpoint, skipping VAE loading")
             return
+
+        # Convert LDM VAE keys to diffusers format
+        from serenity.inference.models.convert import (
+            convert_ldm_vae_to_diffusers,
+            safe_load_state_dict,
+        )
+
+        vae_sd = convert_ldm_vae_to_diffusers(vae_sd)
 
         scaling_factor = 0.18215  # default
         if self._adapter is not None:
@@ -452,7 +567,11 @@ class InferenceEngine:
                 latent_ch = vae_sd["decoder.conv_in.weight"].shape[1]
 
             vae = AutoencoderKL(latent_channels=latent_ch)
-            vae.load_state_dict(vae_sd, strict=False)
+            missing, unexpected, mismatched = safe_load_state_dict(vae, vae_sd)
+            if missing:
+                logger.warning("VAE: %d missing keys", len(missing))
+            if unexpected:
+                logger.debug("VAE: %d unexpected keys", len(unexpected))
             vae = vae.to(device=self._device, dtype=vae_dtype)
             vae.eval()
 
@@ -554,9 +673,19 @@ class InferenceEngine:
         }
 
     def _ensure_model_loaded(self) -> None:
-        """Load the model if not already loaded."""
+        """Load the model if not already loaded.
+
+        Checks ModelManager for a cached model matching the current config
+        hash before triggering a full reload.
+        """
         if self._model_loaded:
-            return
+            # Double-check via ModelManager if we have a config hash
+            if self._config_hash:
+                existing = self._model_manager.get_loaded(self._config_hash)
+                if existing is not None and existing.is_alive:
+                    return
+            else:
+                return
         path = self._config.model_path
         if path:
             self.load_model(path)
@@ -790,3 +919,55 @@ class InferenceEngine:
         # Without VAE: return latents directly (for testing / headless use)
         logger.debug("No VAE loaded, returning raw latents as images")
         return [latents[i] for i in range(latents.shape[0])]
+
+    # ------------------------------------------------------------------
+    # Memory subsystem helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_config_hash(model_path: str, dtype: torch.dtype) -> str:
+        """Compute a deterministic hash for model caching."""
+        key = f"{model_path}|{dtype}"
+        return hashlib.sha256(key.encode()).hexdigest()
+
+    def _get_vram_budget(self) -> int | None:
+        """Return the VRAM budget in bytes based on the current vram_mode.
+
+        Returns ``None`` for ``HIGH`` mode so that
+        :meth:`ModelManager.load` uses the full calculated budget.
+        For offload modes, returns a fraction of the available budget.
+        """
+        if self._vram_mode == VRAMMode.HIGH:
+            return None  # ModelManager.load calculates full budget
+
+        from serenity.inference.memory.vram import calculate_budget
+
+        budget = calculate_budget(self._device)
+
+        if self._vram_mode == VRAMMode.AUTO:
+            # AUTO uses the full available budget
+            return budget.available
+
+        if self._vram_mode == VRAMMode.NORMAL:
+            # 70% of available budget — moderate offloading
+            return int(budget.available * 0.7)
+
+        if self._vram_mode == VRAMMode.LOW:
+            # 30% of available budget — aggressive offloading
+            return int(budget.available * 0.3)
+
+        if self._vram_mode == VRAMMode.NO_VRAM:
+            # Minimal VRAM — only essentials
+            return 0
+
+        return None
+
+    def _attach_stream_pool(self, model: torch.nn.Module) -> None:
+        """Attach the stream pool to all OffloadMixin layers in *model*."""
+        if self._stream_pool is None:
+            return
+        from serenity.inference.memory.offload import OffloadMixin
+
+        for module in model.modules():
+            if isinstance(module, OffloadMixin):
+                module.set_stream_pool(self._stream_pool)

@@ -170,10 +170,14 @@ class CLIPEncoder:
         max_length: int = 77,
         clip_skip: int = 0,
     ) -> TextOutput:
-        """Tokenize and encode *text*, returning hidden states.
+        """Tokenize and encode *text*, applying prompt weights to embeddings.
+
+        Parses ``(word:1.5)`` syntax via :func:`parse_prompt_weights` and
+        scales per-token hidden states accordingly.  When all weights are
+        1.0, the fast path (identical to unweighted encoding) is used.
 
         Args:
-            text: Input prompt string.
+            text: Input prompt string (may contain weight syntax).
             max_length: Maximum token length (CLIP default is 77).
             clip_skip: Number of final encoder layers to skip.
                 0 means use the last hidden state, 1 skips the last layer, etc.
@@ -183,8 +187,53 @@ class CLIPEncoder:
         """
         import torch
 
+        from serenity.inference.text.tokenizer import (
+            build_token_weight_map,
+            has_non_default_weights,
+            parse_prompt_weights,
+            split_segments_at_break,
+        )
+
         if not self.is_loaded:
             raise RuntimeError("CLIPEncoder is not loaded. Call load() first.")
+
+        segments = parse_prompt_weights(text)
+
+        # Fast path — no weighting needed
+        if not has_non_default_weights(segments):
+            return self._encode_unweighted(text, max_length, clip_skip)
+
+        # Split at BREAK boundaries
+        groups = split_segments_at_break(segments)
+
+        # Encode each BREAK-delimited group and concatenate
+        all_hidden: list[Any] = []
+        pooled: Any | None = None
+
+        for group in groups:
+            hidden_chunk, pooled_chunk = self._encode_weighted_group(
+                group, max_length, clip_skip,
+            )
+            all_hidden.append(hidden_chunk)
+            if pooled is None:
+                pooled = pooled_chunk
+
+        # Concatenate along sequence dimension for multi-BREAK prompts
+        if len(all_hidden) == 1:
+            hidden = all_hidden[0]
+        else:
+            hidden = torch.cat(all_hidden, dim=1)
+
+        return TextOutput(hidden_states=hidden, pooled_output=pooled)
+
+    def _encode_unweighted(
+        self,
+        text: str,
+        max_length: int,
+        clip_skip: int,
+    ) -> TextOutput:
+        """Original fast-path encoding with no weight application."""
+        import torch
 
         tokens = self._tokenizer(
             text,
@@ -200,24 +249,84 @@ class CLIPEncoder:
                 output_hidden_states=True,
             )
 
-        # Apply clip_skip — index from the back of hidden_states
-        # hidden_states is a tuple with (embedding, layer0, layer1, ..., layerN)
-        # Default (clip_skip=0) uses the last hidden state
-        if clip_skip > 0 and len(outputs.hidden_states) > clip_skip:
-            hidden = outputs.hidden_states[-(clip_skip + 1)]
-            # Apply final layer norm if available
-            if hasattr(self._model.text_model, "final_layer_norm"):
-                hidden = self._model.text_model.final_layer_norm(hidden)
-        else:
-            hidden = outputs.last_hidden_state
+        hidden = self._select_hidden_state(outputs, clip_skip)
 
-        # CLIPTextModelWithProjection → text_embeds; CLIPTextModel → pooler_output
         if self._use_projection:
             pooled = getattr(outputs, "text_embeds", None)
         else:
             pooled = getattr(outputs, "pooler_output", None)
 
-        return TextOutput(
-            hidden_states=hidden,
-            pooled_output=pooled,
+        return TextOutput(hidden_states=hidden, pooled_output=pooled)
+
+    def _encode_weighted_group(
+        self,
+        group: list[tuple[str, float]],
+        max_length: int,
+        clip_skip: int,
+    ) -> tuple[Any, Any | None]:
+        """Encode a single BREAK-group with per-token weight scaling."""
+        import torch
+
+        from serenity.inference.text.tokenizer import build_token_weight_map
+
+        # Build per-token weight map using segment-by-segment tokenization
+        bos_id = self._tokenizer.bos_token_id
+        eos_id = self._tokenizer.eos_token_id
+        pad_id = self._tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = eos_id
+
+        def _tokenize_bare(text: str) -> list[int]:
+            """Tokenize text without special tokens."""
+            return self._tokenizer.encode(text, add_special_tokens=False)
+
+        token_ids, weights = build_token_weight_map(
+            group,
+            tokenize_fn=_tokenize_bare,
+            bos_token_id=bos_id,
+            eos_token_id=eos_id,
+            pad_token_id=pad_id,
+            max_length=max_length,
         )
+
+        # Build input tensors matching what the HF tokenizer would produce
+        input_ids = torch.tensor([token_ids], dtype=torch.long, device=self._device)
+        attention_mask = torch.tensor(
+            [[1 if t != pad_id else 0 for t in token_ids]],
+            dtype=torch.long,
+            device=self._device,
+        )
+
+        with torch.no_grad():
+            outputs = self._model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
+
+        hidden = self._select_hidden_state(outputs, clip_skip)
+
+        # Apply per-token weights to hidden states
+        weight_tensor = torch.tensor(
+            weights, dtype=hidden.dtype, device=hidden.device,
+        ).unsqueeze(0).unsqueeze(-1)  # (1, seq_len, 1) for broadcasting
+        hidden = hidden * weight_tensor
+
+        if self._use_projection:
+            pooled = getattr(outputs, "text_embeds", None)
+        else:
+            pooled = getattr(outputs, "pooler_output", None)
+
+        return hidden, pooled
+
+    def _select_hidden_state(self, outputs: Any, clip_skip: int) -> Any:
+        """Select the appropriate hidden state given *clip_skip*."""
+        if clip_skip > 0 and len(outputs.hidden_states) > clip_skip:
+            hidden = outputs.hidden_states[-(clip_skip + 1)]
+            if hasattr(self._model, "text_model") and hasattr(
+                self._model.text_model, "final_layer_norm",
+            ):
+                hidden = self._model.text_model.final_layer_norm(hidden)
+        else:
+            hidden = outputs.last_hidden_state
+        return hidden

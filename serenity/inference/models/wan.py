@@ -59,9 +59,17 @@ class WanAdapter(BaseModelAdapter):
                 "WanTransformer3DModel support."
             ) from exc
 
-        # Infer config from state dict key patterns
+        from serenity.inference.models.convert import (
+            _UNET_PREFIXES,
+            extract_submodel,
+            safe_load_state_dict,
+        )
+
+        model_sd = extract_submodel(state_dict, _UNET_PREFIXES)
+
+        # Infer config from state dict key patterns (after prefix stripping)
         num_blocks = 0
-        for key in state_dict:
+        for key in model_sd:
             if key.startswith("blocks."):
                 parts = key.split(".")
                 if len(parts) > 1 and parts[1].isdigit():
@@ -77,7 +85,11 @@ class WanAdapter(BaseModelAdapter):
         )
 
         model = WanTransformer3DModel()
-        model.load_state_dict(state_dict, strict=False)
+        missing, unexpected, mismatched = safe_load_state_dict(model, model_sd)
+        if missing:
+            logger.warning("Wan %s: %d missing keys", self.variant, len(missing))
+        if unexpected:
+            logger.debug("Wan %s: %d unexpected keys", self.variant, len(unexpected))
         model = model.to(device=torch.device(device), dtype=dtype)
         model.eval()
         return model

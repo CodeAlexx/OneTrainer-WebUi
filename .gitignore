@@ -70,6 +70,7 @@ eritrainer_*.yaml
 test_*.yaml
 test_*.py
 !serenity/tests/test_*.py
+!serenity/tests/**/test_*.py
 diagnose_*.py
 scripts/
 docs/serenity_ltx2_alignment.md

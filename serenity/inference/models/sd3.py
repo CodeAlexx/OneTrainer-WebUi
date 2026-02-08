@@ -81,14 +81,30 @@ class SD3Adapter(BaseModelAdapter):
         if depth == 0:
             depth = int(kwargs.get("num_layers", 24))  # type: ignore[arg-type]
 
+        from serenity.inference.models.convert import (
+            _UNET_PREFIXES,
+            convert_sd3_to_diffusers,
+            extract_submodel,
+            safe_load_state_dict,
+        )
+
         config = _SD3_LARGE_CONFIG if depth >= 38 else _SD3_MEDIUM_CONFIG
         config = {**config, "num_layers": depth}
 
         logger.info(
             "Creating SD3 MMDiT (%d layers) on %s (%s)", depth, device, dtype,
         )
+
+        model_sd = extract_submodel(state_dict, _UNET_PREFIXES)
+        model_sd = convert_sd3_to_diffusers(model_sd)
+
         model = SD3Transformer2DModel(**config)
-        model.load_state_dict(state_dict, strict=False)
+        missing, unexpected, mismatched = safe_load_state_dict(model, model_sd)
+        if missing:
+            logger.warning("SD3: %d missing keys", len(missing))
+        if unexpected:
+            logger.debug("SD3: %d unexpected keys", len(unexpected))
+
         model = model.to(device=torch.device(device), dtype=dtype)
         model.eval()
         return model

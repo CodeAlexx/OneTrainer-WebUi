@@ -87,10 +87,14 @@ class GemmaEncoder:
         text: str,
         max_length: int = 256,
     ) -> TextOutput:
-        """Tokenize and encode *text*, returning hidden states.
+        """Tokenize and encode *text*, applying prompt weights to embeddings.
+
+        Parses ``(word:1.5)`` syntax via :func:`parse_prompt_weights` and
+        scales per-token hidden states accordingly.  When all weights are
+        1.0, the fast path (identical to unweighted encoding) is used.
 
         Args:
-            text: Input prompt string.
+            text: Input prompt string (may contain weight syntax).
             max_length: Maximum token length (default 256).
 
         Returns:
@@ -99,8 +103,36 @@ class GemmaEncoder:
         """
         import torch
 
+        from serenity.inference.text.tokenizer import (
+            has_non_default_weights,
+            parse_prompt_weights,
+            split_segments_at_break,
+        )
+
         if not self.is_loaded:
             raise RuntimeError("GemmaEncoder is not loaded. Call load() first.")
+
+        segments = parse_prompt_weights(text)
+
+        if not has_non_default_weights(segments):
+            return self._encode_unweighted(text, max_length)
+
+        groups = split_segments_at_break(segments)
+
+        all_hidden: list[Any] = []
+        for group in groups:
+            all_hidden.append(self._encode_weighted_group(group, max_length))
+
+        if len(all_hidden) == 1:
+            hidden = all_hidden[0]
+        else:
+            hidden = torch.cat(all_hidden, dim=1)
+
+        return TextOutput(hidden_states=hidden, pooled_output=None)
+
+    def _encode_unweighted(self, text: str, max_length: int) -> TextOutput:
+        """Original fast-path encoding with no weight application."""
+        import torch
 
         tokens = self._tokenizer(
             text,
@@ -120,3 +152,54 @@ class GemmaEncoder:
             hidden_states=outputs.last_hidden_state,
             pooled_output=None,
         )
+
+    def _encode_weighted_group(
+        self,
+        group: list[tuple[str, float]],
+        max_length: int,
+    ) -> Any:
+        """Encode a single BREAK-group with per-token weight scaling."""
+        import torch
+
+        from serenity.inference.text.tokenizer import build_token_weight_map
+
+        bos_id = getattr(self._tokenizer, "bos_token_id", None)
+        eos_id = self._tokenizer.eos_token_id
+        pad_id = self._tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = eos_id if eos_id is not None else 0
+
+        def _tokenize_bare(text: str) -> list[int]:
+            return self._tokenizer.encode(text, add_special_tokens=False)
+
+        token_ids, weights = build_token_weight_map(
+            group,
+            tokenize_fn=_tokenize_bare,
+            bos_token_id=bos_id,
+            eos_token_id=eos_id,
+            pad_token_id=pad_id,
+            max_length=max_length,
+        )
+
+        input_ids = torch.tensor([token_ids], dtype=torch.long, device=self._device)
+        attention_mask = torch.tensor(
+            [[1 if t != pad_id else 0 for t in token_ids]],
+            dtype=torch.long,
+            device=self._device,
+        )
+
+        with torch.no_grad():
+            outputs = self._model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
+
+        hidden = outputs.last_hidden_state
+
+        weight_tensor = torch.tensor(
+            weights, dtype=hidden.dtype, device=hidden.device,
+        ).unsqueeze(0).unsqueeze(-1)
+        hidden = hidden * weight_tensor
+
+        return hidden

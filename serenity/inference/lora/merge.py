@@ -320,10 +320,13 @@ def merge_lora_into_model(
         )
 
         if is_quant:
-            # For quantized layers, store the merged (dequantized) result.
-            # The quantized layer will handle re-quantization on next forward.
+            # For quantized layers, store the merged (dequantized) float result.
+            # NOTE: the weight is now float, not quantized.  Re-quantization does
+            # NOT happen automatically.  This means the layer will use the
+            # dequantize-then-matmul fallback path, increasing memory usage.
+            # Use online LoRA (online.py) if preserving quantization is required.
             logger.debug(
-                "Merging LoRA into quantized layer %s (%s)",
+                "Merging LoRA into quantized layer %s (%s) — weight is now float",
                 prefix,
                 type(mod).__name__,
             )

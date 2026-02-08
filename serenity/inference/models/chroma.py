@@ -74,9 +74,24 @@ class ChromaAdapter(BaseModelAdapter):
                 "ChromaAdapter.create_model requires the 'diffusers' package."
             ) from exc
 
+        from serenity.inference.models.convert import (
+            _UNET_PREFIXES,
+            convert_flux_to_diffusers,
+            extract_submodel,
+            safe_load_state_dict,
+        )
+
         logger.info("Creating Chroma transformer on %s (%s)", device, dtype)
+
+        model_sd = extract_submodel(state_dict, _UNET_PREFIXES)
+        model_sd = convert_flux_to_diffusers(model_sd)
+
         model = FluxTransformer2DModel(**_CHROMA_CONFIG)
-        model.load_state_dict(state_dict, strict=False)
+        missing, unexpected, mismatched = safe_load_state_dict(model, model_sd)
+        if missing:
+            logger.warning("Chroma: %d missing keys", len(missing))
+        if unexpected:
+            logger.debug("Chroma: %d unexpected keys", len(unexpected))
         model = model.to(device=torch.device(device), dtype=dtype)
         model.eval()
         return model

@@ -6,8 +6,11 @@ import logging
 import re
 
 __all__ = [
+    "build_token_weight_map",
     "create_token_chunks",
+    "has_non_default_weights",
     "parse_prompt_weights",
+    "split_segments_at_break",
     "truncate_or_pad",
 ]
 
@@ -186,6 +189,118 @@ def _find_weight_colon(text: str) -> int | None:
         except ValueError:
             return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Weight utilities
+# ---------------------------------------------------------------------------
+
+
+def has_non_default_weights(segments: list[tuple[str, float]]) -> bool:
+    """Return ``True`` if any segment has a weight different from 1.0."""
+    return any(w != _DEFAULT_WEIGHT for _, w in segments)
+
+
+def split_segments_at_break(
+    segments: list[tuple[str, float]],
+) -> list[list[tuple[str, float]]]:
+    """Split parsed segments into groups separated by BREAK.
+
+    Each group is a list of (text, weight) tuples with no BREAK entries.
+    An empty group is skipped.
+    """
+    groups: list[list[tuple[str, float]]] = []
+    current: list[tuple[str, float]] = []
+    for text, weight in segments:
+        if text == "BREAK":
+            if current:
+                groups.append(current)
+            current = []
+        else:
+            current.append((text, weight))
+    if current:
+        groups.append(current)
+    if not groups:
+        groups.append([("", _DEFAULT_WEIGHT)])
+    return groups
+
+
+def build_token_weight_map(
+    segments: list[tuple[str, float]],
+    tokenize_fn: object,
+    bos_token_id: int | None = None,
+    eos_token_id: int | None = None,
+    pad_token_id: int | None = None,
+    max_length: int = 77,
+) -> tuple[list[int], list[float]]:
+    """Build per-token weight array from weighted text segments.
+
+    Tokenizes each segment individually to determine token boundaries,
+    then assembles a combined token list and matching weight list.
+
+    Special tokens (BOS, EOS, PAD) always get weight 1.0.
+
+    Args:
+        segments: Weighted segments from :func:`parse_prompt_weights`.
+            Must NOT contain BREAK entries — use :func:`split_segments_at_break`
+            first to split into groups.
+        tokenize_fn: A callable ``(text) -> list[int]`` that tokenizes a
+            text string into token IDs *without* special tokens.
+        bos_token_id: Beginning-of-sequence token ID (prepended if given).
+        eos_token_id: End-of-sequence token ID (appended if given).
+        pad_token_id: Padding token ID (used to pad to *max_length*).
+        max_length: Target total token count including special tokens.
+
+    Returns:
+        Tuple of (token_ids, weights) both of length *max_length*.
+    """
+    all_tokens: list[int] = []
+    all_weights: list[float] = []
+
+    # Reserve slots for BOS and EOS
+    content_capacity = max_length
+    if bos_token_id is not None:
+        content_capacity -= 1
+    if eos_token_id is not None:
+        content_capacity -= 1
+
+    for text, weight in segments:
+        if not text:
+            continue
+        seg_tokens = tokenize_fn(text)  # type: ignore[operator]
+        for tok in seg_tokens:
+            if len(all_tokens) >= content_capacity:
+                break
+            all_tokens.append(tok)
+            all_weights.append(weight)
+
+    # Assemble final token list with special tokens
+    final_tokens: list[int] = []
+    final_weights: list[float] = []
+
+    if bos_token_id is not None:
+        final_tokens.append(bos_token_id)
+        final_weights.append(_DEFAULT_WEIGHT)
+
+    final_tokens.extend(all_tokens)
+    final_weights.extend(all_weights)
+
+    if eos_token_id is not None:
+        if len(final_tokens) < max_length:
+            final_tokens.append(eos_token_id)
+            final_weights.append(_DEFAULT_WEIGHT)
+
+    # Pad to max_length
+    if pad_token_id is not None:
+        while len(final_tokens) < max_length:
+            final_tokens.append(pad_token_id)
+            final_weights.append(_DEFAULT_WEIGHT)
+
+    # Truncate if somehow over
+    final_tokens = final_tokens[:max_length]
+    final_weights = final_weights[:max_length]
+
+    return final_tokens, final_weights
 
 
 # ---------------------------------------------------------------------------

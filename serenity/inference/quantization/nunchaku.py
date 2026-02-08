@@ -80,13 +80,19 @@ class NunchakuLinear(nn.Module):
         return out
 
     def _dequantize(self) -> torch.Tensor:
-        """Dequantize weight for computation."""
+        """Dequantize weight for computation.
+
+        Raises ``ImportError`` because correct dequantization of GPTQ/AWQ-style
+        packed weights requires the nunchaku runtime.  A naive ``qweight * scales``
+        fallback ignores qzeros and g_idx, producing incorrect output.
+        """
         if self._qweight is None:
             raise RuntimeError("No quantized weights loaded")
-        # Simple dequantization: qweight * scales
-        # Full implementation depends on the specific quantization format
-        weight = self._qweight.float() * self._scales.float()
-        return weight.to(self._qweight.device)
+        raise ImportError(
+            "Nunchaku-quantized models require the nunchaku runtime package. "
+            "Install it with: pip install nunchaku. "
+            "Fallback dequantization is not supported for this format."
+        )
 
     def _load_from_state_dict(
         self,

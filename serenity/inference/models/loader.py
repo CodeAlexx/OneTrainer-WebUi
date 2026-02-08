@@ -158,16 +158,35 @@ def load_model(
 
 _ADAPTER_REGISTRY: dict | None = None
 
+# Architectures that can be *detected* but not yet *loaded*.
+_UNSUPPORTED_ARCHITECTURES: dict[str, str] = {
+    "lumina": "Lumina adapter is not yet implemented. Contributions welcome!",
+    "zimage": "Z-Image adapter is not yet implemented. Contributions welcome!",
+    "qwen": "Qwen adapter is not yet implemented. Contributions welcome!",
+}
+
 
 def _get_adapter(config: ModelConfig) -> Any:
     """Look up a model adapter for *config*."""
     global _ADAPTER_REGISTRY
     if _ADAPTER_REGISTRY is None:
         _ADAPTER_REGISTRY = {}
-        # Import all adapter modules and merge their ADAPTERS dicts
-        from serenity.inference.models import sd15, sdxl, sd3, flux, chroma, wan, lumina, zimage, qwen
-        for mod in (sd15, sdxl, sd3, flux, chroma, wan, lumina, zimage, qwen):
+        # Import all adapter modules and merge their ADAPTERS dicts.
+        # Lumina, ZImage, and Qwen are intentionally excluded — their
+        # ADAPTERS dicts are empty because create_model() is not yet
+        # implemented for those architectures.
+        from serenity.inference.models import sd15, sdxl, sd3, flux, chroma, wan
+        for mod in (sd15, sdxl, sd3, flux, chroma, wan):
             _ADAPTER_REGISTRY.update(mod.ADAPTERS)
+
+    # Check for detected-but-unsupported architectures first so we give
+    # a clear, helpful error instead of a generic "no adapter" message.
+    arch_value = config.architecture.value
+    if arch_value in _UNSUPPORTED_ARCHITECTURES:
+        raise ValueError(
+            f"Architecture '{arch_value}' is not yet supported for loading. "
+            f"{_UNSUPPORTED_ARCHITECTURES[arch_value]}"
+        )
 
     adapter_cls = _ADAPTER_REGISTRY.get(config.architecture)
     if adapter_cls is None:

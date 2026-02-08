@@ -136,6 +136,13 @@ class FluxAdapter(BaseModelAdapter):
                 "FluxAdapter.create_model requires the 'diffusers' package."
             ) from exc
 
+        from serenity.inference.models.convert import (
+            _UNET_PREFIXES,
+            convert_flux_to_diffusers,
+            extract_submodel,
+            safe_load_state_dict,
+        )
+
         config = _FLUX_SCHNELL_CONFIG if self._variant == "schnell" else _FLUX_CONFIG
         logger.info(
             "Creating Flux %s transformer on %s (%s)",
@@ -143,8 +150,17 @@ class FluxAdapter(BaseModelAdapter):
             device,
             dtype,
         )
+
+        model_sd = extract_submodel(state_dict, _UNET_PREFIXES)
+        model_sd = convert_flux_to_diffusers(model_sd)
+
         model = FluxTransformer2DModel(**config)
-        model.load_state_dict(state_dict, strict=False)
+        missing, unexpected, mismatched = safe_load_state_dict(model, model_sd)
+        if missing:
+            logger.warning("Flux %s: %d missing keys", self._variant, len(missing))
+        if unexpected:
+            logger.debug("Flux %s: %d unexpected keys", self._variant, len(unexpected))
+
         model = model.to(device=torch.device(device), dtype=dtype)
         model.eval()
         return model
@@ -312,13 +328,29 @@ class FluxKlein4BAdapter(FluxAdapter):
                 "FluxKlein4BAdapter.create_model requires the 'diffusers' package."
             ) from exc
 
+        from serenity.inference.models.convert import (
+            _UNET_PREFIXES,
+            convert_flux_to_diffusers,
+            extract_submodel,
+            safe_load_state_dict,
+        )
+
         logger.info(
             "Creating Flux 2 Klein 4B transformer on %s (%s)",
             device,
             dtype,
         )
+
+        model_sd = extract_submodel(state_dict, _UNET_PREFIXES)
+        model_sd = convert_flux_to_diffusers(model_sd)
+
         model = FluxTransformer2DModel(**_FLUX_KLEIN_4B_CONFIG)
-        model.load_state_dict(state_dict, strict=False)
+        missing, unexpected, mismatched = safe_load_state_dict(model, model_sd)
+        if missing:
+            logger.warning("Flux Klein 4B: %d missing keys", len(missing))
+        if unexpected:
+            logger.debug("Flux Klein 4B: %d unexpected keys", len(unexpected))
+
         model = model.to(device=torch.device(device), dtype=dtype)
         model.eval()
         return model
@@ -358,9 +390,24 @@ class FluxKlein9BAdapter(FluxAdapter):
             device,
             dtype,
         )
+        from serenity.inference.models.convert import (
+            _UNET_PREFIXES,
+            convert_flux_to_diffusers,
+            extract_submodel,
+            safe_load_state_dict,
+        )
+
+        model_sd = extract_submodel(state_dict, _UNET_PREFIXES)
+        model_sd = convert_flux_to_diffusers(model_sd)
+
         # Klein 9B uses the same config as standard Flux (19/38 blocks)
         model = FluxTransformer2DModel(**_FLUX_CONFIG)
-        model.load_state_dict(state_dict, strict=False)
+        missing, unexpected, mismatched = safe_load_state_dict(model, model_sd)
+        if missing:
+            logger.warning("Flux Klein 9B: %d missing keys", len(missing))
+        if unexpected:
+            logger.debug("Flux Klein 9B: %d unexpected keys", len(unexpected))
+
         model = model.to(device=torch.device(device), dtype=dtype)
         model.eval()
         return model

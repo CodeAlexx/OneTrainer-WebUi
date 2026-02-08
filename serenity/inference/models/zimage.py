@@ -1,4 +1,9 @@
-"""Z-Image model adapter for the Serenity inference engine."""
+"""Z-Image model adapter for the Serenity inference engine.
+
+Status: NOT YET IMPLEMENTED. Detection works, but model loading requires
+architecture-specific Transformer2DModel configuration that has not been
+implemented yet. Contributions welcome.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +36,11 @@ class ZImageAdapter(BaseModelAdapter):
     ``gemma`` in the Serenity text-encoder taxonomy) and distinct weight
     layout (``cap_pad_token`` key, higher layer count / hidden dim).
     Uses discrete flow-matching prediction.
+
+    .. warning::
+        This adapter is **not yet functional**. The ``create_model`` method
+        will raise ``NotImplementedError``.  Detection of Z-Image checkpoints
+        still works via :mod:`serenity.inference.models.detection`.
     """
 
     @property
@@ -44,54 +54,19 @@ class ZImageAdapter(BaseModelAdapter):
         dtype: torch.dtype = torch.float32,
         **kwargs: object,
     ) -> nn.Module:
-        """Instantiate a Z-Image transformer and load weights.
+        """Not yet implemented.
 
-        Requires ``diffusers`` to be installed.  Infers layer count from
-        the state dict for debugging.
+        Z-Image requires architecture-specific Transformer config (layer count,
+        hidden dim 3840, head count) inferred from the state dict.  A generic
+        ``Transformer2DModel()`` with no config args cannot load real
+        checkpoints.
         """
-        try:
-            from diffusers.models import Transformer2DModel  # type: ignore[import-untyped]
-        except ImportError as exc:
-            raise NotImplementedError(
-                "ZImageAdapter.create_model requires the 'diffusers' package."
-            ) from exc
-
-        # Infer config from state dict key patterns
-        num_layers = 0
-        hidden_dim: int | None = None
-        for key in state_dict:
-            if key.startswith("layers."):
-                parts = key.split(".")
-                if len(parts) > 1 and parts[1].isdigit():
-                    num_layers = max(num_layers, int(parts[1]) + 1)
-            if key == "cap_embedder.1.weight" and hidden_dim is None:
-                hidden_dim = state_dict[key].shape[0]
-
-        self._inferred_config = {
-            "num_layers": num_layers,
-            "hidden_dim": hidden_dim,
-        }
-        logger.info(
-            "Creating Z-Image transformer on %s (%s) — inferred %d layers, "
-            "hidden_dim=%s",
-            device,
-            dtype,
-            num_layers,
-            hidden_dim,
+        raise NotImplementedError(
+            "Z-Image adapter is not yet implemented — Transformer2DModel "
+            "requires architecture-specific config (layer count, hidden dim, "
+            "head count) inferred from the checkpoint. "
+            "Contributions welcome!"
         )
-
-        try:
-            model = Transformer2DModel()
-        except Exception:
-            raise NotImplementedError(
-                "ZImageAdapter.create_model requires a compatible diffusers "
-                "Transformer2DModel."
-            )
-
-        model.load_state_dict(state_dict, strict=False)
-        model = model.to(device=torch.device(device), dtype=dtype)
-        model.eval()
-        return model
 
     def get_text_encoder_types(self) -> list[str]:
         return ["gemma"]
@@ -110,11 +85,7 @@ class ZImageAdapter(BaseModelAdapter):
         text_outputs: dict[str, torch.Tensor],
         **kwargs: object,
     ) -> dict[str, torch.Tensor]:
-        """Prepare Z-Image conditioning from text encoder outputs.
-
-        Z-Image uses text hidden states as cross-attention context,
-        similar to Lumina but with a distinct cap_embedder path.
-        """
+        """Prepare Z-Image conditioning from text encoder outputs."""
         text_out = text_outputs.get("cond")
         if text_out is None:
             text_out = text_outputs.get("encoder_hidden_states")
@@ -125,7 +96,7 @@ class ZImageAdapter(BaseModelAdapter):
 
 
 # ---------------------------------------------------------------------------
-# Registry
+# Registry — empty: Z-Image is not yet loadable.
 # ---------------------------------------------------------------------------
 
-ADAPTERS = {ModelArchitecture.ZIMAGE: ZImageAdapter}
+ADAPTERS: dict = {}

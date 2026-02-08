@@ -126,6 +126,13 @@ class SDXLAdapter(BaseModelAdapter):
 
         Requires ``diffusers`` to be installed.
         """
+        from serenity.inference.models.convert import (
+            _UNET_PREFIXES,
+            convert_ldm_unet_to_diffusers,
+            extract_submodel,
+            safe_load_state_dict,
+        )
+
         try:
             from diffusers.models import UNet2DConditionModel  # type: ignore[import-untyped]
         except ImportError as exc:
@@ -134,8 +141,18 @@ class SDXLAdapter(BaseModelAdapter):
             ) from exc
 
         logger.info("Creating SDXL UNet on %s (%s)", device, dtype)
+
+        # Extract UNet keys and convert from LDM to diffusers format
+        unet_sd = extract_submodel(state_dict, _UNET_PREFIXES)
+        unet_sd = convert_ldm_unet_to_diffusers(unet_sd)
+
         model = UNet2DConditionModel(**_SDXL_UNET_CONFIG)
-        model.load_state_dict(state_dict, strict=False)
+        missing, unexpected, mismatched = safe_load_state_dict(model, unet_sd)
+        if missing:
+            logger.warning("SDXL UNet: %d missing keys", len(missing))
+        if unexpected:
+            logger.debug("SDXL UNet: %d unexpected keys", len(unexpected))
+
         model = model.to(device=torch.device(device), dtype=dtype)
         model.eval()
         return model
@@ -229,6 +246,13 @@ class SDXLRefinerAdapter(BaseModelAdapter):
         **kwargs: object,
     ) -> nn.Module:
         """Instantiate an SDXL Refiner UNet and load weights."""
+        from serenity.inference.models.convert import (
+            _UNET_PREFIXES,
+            convert_ldm_unet_to_diffusers,
+            extract_submodel,
+            safe_load_state_dict,
+        )
+
         try:
             from diffusers.models import UNet2DConditionModel  # type: ignore[import-untyped]
         except ImportError as exc:
@@ -237,8 +261,17 @@ class SDXLRefinerAdapter(BaseModelAdapter):
             ) from exc
 
         logger.info("Creating SDXL Refiner UNet on %s (%s)", device, dtype)
+
+        unet_sd = extract_submodel(state_dict, _UNET_PREFIXES)
+        unet_sd = convert_ldm_unet_to_diffusers(unet_sd)
+
         model = UNet2DConditionModel(**_SDXL_REFINER_UNET_CONFIG)
-        model.load_state_dict(state_dict, strict=False)
+        missing, unexpected, mismatched = safe_load_state_dict(model, unet_sd)
+        if missing:
+            logger.warning("SDXL Refiner UNet: %d missing keys", len(missing))
+        if unexpected:
+            logger.debug("SDXL Refiner UNet: %d unexpected keys", len(unexpected))
+
         model = model.to(device=torch.device(device), dtype=dtype)
         model.eval()
         return model

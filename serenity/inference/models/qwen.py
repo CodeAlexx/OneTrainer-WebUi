@@ -1,4 +1,9 @@
-"""Qwen Image model adapter for the Serenity inference engine."""
+"""Qwen Image model adapter for the Serenity inference engine.
+
+Status: NOT YET IMPLEMENTED. Detection works, but model loading requires
+architecture-specific Transformer2DModel configuration that has not been
+implemented yet. Contributions welcome.
+"""
 
 from __future__ import annotations
 
@@ -29,6 +34,11 @@ class QwenAdapter(BaseModelAdapter):
     Qwen Image is a DiT-based image generation model using a Qwen 2.5
     text encoder with discrete flow-matching prediction.  It supports
     optional vision-language conditioning through reference images.
+
+    .. warning::
+        This adapter is **not yet functional**. The ``create_model`` method
+        will raise ``NotImplementedError``.  Detection of Qwen checkpoints
+        still works via :mod:`serenity.inference.models.detection`.
     """
 
     @property
@@ -42,46 +52,19 @@ class QwenAdapter(BaseModelAdapter):
         dtype: torch.dtype = torch.float32,
         **kwargs: object,
     ) -> nn.Module:
-        """Instantiate a Qwen Image transformer and load weights.
+        """Not yet implemented.
 
-        Requires ``diffusers`` to be installed.  Infers transformer block
-        count from the state dict for debugging.
+        Qwen requires architecture-specific Transformer config (block count,
+        hidden dim, head count) inferred from the state dict.  A generic
+        ``Transformer2DModel()`` with no config args cannot load real
+        checkpoints.
         """
-        try:
-            from diffusers.models import Transformer2DModel  # type: ignore[import-untyped]
-        except ImportError as exc:
-            raise NotImplementedError(
-                "QwenAdapter.create_model requires the 'diffusers' package."
-            ) from exc
-
-        # Infer config from state dict key patterns
-        num_blocks = 0
-        for key in state_dict:
-            if key.startswith("transformer_blocks."):
-                parts = key.split(".")
-                if len(parts) > 1 and parts[1].isdigit():
-                    num_blocks = max(num_blocks, int(parts[1]) + 1)
-
-        self._inferred_config = {"num_transformer_blocks": num_blocks}
-        logger.info(
-            "Creating Qwen Image transformer on %s (%s) — inferred %d blocks",
-            device,
-            dtype,
-            num_blocks,
+        raise NotImplementedError(
+            "Qwen adapter is not yet implemented — Transformer2DModel "
+            "requires architecture-specific config (block count, hidden dim, "
+            "head count) inferred from the checkpoint. "
+            "Contributions welcome!"
         )
-
-        try:
-            model = Transformer2DModel()
-        except Exception:
-            raise NotImplementedError(
-                "QwenAdapter.create_model requires a compatible diffusers "
-                "Transformer2DModel."
-            )
-
-        model.load_state_dict(state_dict, strict=False)
-        model = model.to(device=torch.device(device), dtype=dtype)
-        model.eval()
-        return model
 
     def get_text_encoder_types(self) -> list[str]:
         return ["qwen"]
@@ -100,12 +83,7 @@ class QwenAdapter(BaseModelAdapter):
         text_outputs: dict[str, torch.Tensor],
         **kwargs: object,
     ) -> dict[str, torch.Tensor]:
-        """Prepare Qwen Image conditioning from Qwen text encoder outputs.
-
-        Qwen uses its own text hidden-state format as cross-attention
-        context.  Reference image latents can be injected via *kwargs*
-        for vision-language conditioning.
-        """
+        """Prepare Qwen Image conditioning from Qwen text encoder outputs."""
         qwen_out = text_outputs.get("cond")
         if qwen_out is None:
             qwen_out = text_outputs.get("encoder_hidden_states")
@@ -123,7 +101,7 @@ class QwenAdapter(BaseModelAdapter):
 
 
 # ---------------------------------------------------------------------------
-# Registry
+# Registry — empty: Qwen is not yet loadable.
 # ---------------------------------------------------------------------------
 
-ADAPTERS = {ModelArchitecture.QWEN: QwenAdapter}
+ADAPTERS: dict = {}
