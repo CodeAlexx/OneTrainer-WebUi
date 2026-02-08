@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Serenity — Diffusion Model Image Generation UI">
+    <title>Serenity</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- ───────────────────────── Top Bar ───────────────────────── -->
+    <header id="topbar">
+        <div class="topbar-left">
+            <span class="logo" title="Serenity">&#x2728; Serenity</span>
+            <nav class="topbar-tabs">
+                <button class="topbar-tab active" data-tab="simple">Simple</button>
+                <button class="topbar-tab" data-tab="generate">Generate</button>
+            </nav>
+        </div>
+        <div class="topbar-right">
+            <div id="vram-indicator" class="vram-indicator" title="VRAM usage">
+                <span class="vram-label">VRAM</span>
+                <div class="vram-bar"><div class="vram-fill" id="vram-fill" style="width:0%"></div></div>
+                <span class="vram-text" id="vram-text">--</span>
+            </div>
+            <div id="ws-status" class="ws-status disconnected" title="WebSocket disconnected">
+                <span class="ws-dot"></span>
+                <span class="ws-label">Disconnected</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- ───────────────────────── Main Layout ───────────────────── -->
+    <main id="app">
+        <!-- ────── Left Panel: Parameters ────── -->
+        <aside id="left-panel" class="panel panel-left">
+            <div class="panel-scroll">
+
+                <!-- Core Parameters -->
+                <section class="param-section" id="section-core">
+                    <button class="section-toggle" onclick="toggleSection('core')" aria-expanded="true">
+                        <span class="toggle-icon">&#9660;</span> Core Parameters
+                    </button>
+                    <div class="section-body open" id="body-core">
+                        <!-- Model -->
+                        <label class="param-label" for="model-select">Model</label>
+                        <select id="model-select" class="param-input">
+                            <option value="">-- loading models --</option>
+                        </select>
+
+                        <!-- Seed -->
+                        <label class="param-label" for="seed-input">Seed</label>
+                        <div class="seed-row">
+                            <input type="number" id="seed-input" class="param-input" value="-1" min="-1" step="1">
+                            <button class="icon-btn" id="seed-random" title="Random seed">&#x1F3B2;</button>
+                            <button class="icon-btn" id="seed-reuse" title="Reuse last seed">&#x1F4CB;</button>
+                        </div>
+
+                        <!-- Steps -->
+                        <label class="param-label" for="steps-slider">
+                            Steps <span class="param-value" id="steps-value">20</span>
+                        </label>
+                        <input type="range" id="steps-slider" class="param-slider" min="1" max="150" value="20">
+
+                        <!-- CFG Scale -->
+                        <label class="param-label" for="cfg-slider">
+                            CFG Scale <span class="param-value" id="cfg-value">7.0</span>
+                        </label>
+                        <input type="range" id="cfg-slider" class="param-slider" min="0" max="30" step="0.5" value="7">
+                    </div>
+                </section>
+
+                <!-- Resolution -->
+                <section class="param-section" id="section-resolution">
+                    <button class="section-toggle" onclick="toggleSection('resolution')" aria-expanded="true">
+                        <span class="toggle-icon">&#9660;</span> Resolution
+                    </button>
+                    <div class="section-body open" id="body-resolution">
+                        <div class="resolution-row">
+                            <div class="res-input-group">
+                                <label class="param-label-sm" for="width-input">W</label>
+                                <input type="number" id="width-input" class="param-input param-input-sm" value="1024" min="64" max="4096" step="64">
+                            </div>
+                            <button class="icon-btn swap-btn" id="swap-dims" title="Swap W and H">&#x21C4;</button>
+                            <div class="res-input-group">
+                                <label class="param-label-sm" for="height-input">H</label>
+                                <input type="number" id="height-input" class="param-input param-input-sm" value="1024" min="64" max="4096" step="64">
+                            </div>
+                        </div>
+                        <div class="aspect-presets">
+                            <button class="preset-btn active" data-w="1024" data-h="1024">1:1</button>
+                            <button class="preset-btn" data-w="1152" data-h="768">3:2</button>
+                            <button class="preset-btn" data-w="768" data-h="1152">2:3</button>
+                            <button class="preset-btn" data-w="1344" data-h="768">16:9</button>
+                            <button class="preset-btn" data-w="768" data-h="1344">9:16</button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Sampling -->
+                <section class="param-section" id="section-sampling">
+                    <button class="section-toggle" onclick="toggleSection('sampling')" aria-expanded="true">
+                        <span class="toggle-icon">&#9660;</span> Sampling
+                    </button>
+                    <div class="section-body open" id="body-sampling">
+                        <label class="param-label" for="sampler-select">Sampler</label>
+                        <select id="sampler-select" class="param-input">
+                            <option value="euler">Euler</option>
+                            <option value="euler_a">Euler Ancestral</option>
+                            <option value="dpm_2m">DPM++ 2M</option>
+                            <option value="dpm_2m_sde">DPM++ 2M SDE</option>
+                            <option value="dpm_2s_a">DPM++ 2S Ancestral</option>
+                            <option value="heun">Heun</option>
+                            <option value="lms">LMS</option>
+                            <option value="ddim">DDIM</option>
+                            <option value="ddpm">DDPM</option>
+                            <option value="uni_pc">UniPC</option>
+                        </select>
+
+                        <label class="param-label" for="scheduler-select">Scheduler</label>
+                        <select id="scheduler-select" class="param-input">
+                            <option value="normal">Normal</option>
+                            <option value="karras">Karras</option>
+                            <option value="exponential">Exponential</option>
+                            <option value="sgm_uniform">SGM Uniform</option>
+                            <option value="simple">Simple</option>
+                            <option value="beta">Beta</option>
+                        </select>
+                    </div>
+                </section>
+
+                <!-- LoRAs -->
+                <section class="param-section" id="section-loras">
+                    <button class="section-toggle" onclick="toggleSection('loras')" aria-expanded="false">
+                        <span class="toggle-icon">&#9654;</span> LoRAs
+                        <span class="lora-count" id="lora-count"></span>
+                    </button>
+                    <div class="section-body" id="body-loras">
+                        <div id="active-loras" class="active-loras"></div>
+                        <button class="add-lora-btn" id="add-lora-btn" title="Browse LoRAs in bottom panel">+ Add LoRA</button>
+                    </div>
+                </section>
+
+                <!-- Advanced -->
+                <section class="param-section" id="section-advanced">
+                    <button class="section-toggle" onclick="toggleSection('advanced')" aria-expanded="false">
+                        <span class="toggle-icon">&#9654;</span> Advanced
+                    </button>
+                    <div class="section-body" id="body-advanced">
+                        <!-- Batch Size -->
+                        <label class="param-label" for="batch-slider">
+                            Batch Size <span class="param-value" id="batch-value">1</span>
+                        </label>
+                        <input type="range" id="batch-slider" class="param-slider" min="1" max="8" value="1">
+
+                        <!-- Rescale CFG -->
+                        <label class="param-label" for="rescale-slider">
+                            Rescale CFG <span class="param-value" id="rescale-value">0.00</span>
+                        </label>
+                        <input type="range" id="rescale-slider" class="param-slider" min="0" max="1" step="0.01" value="0">
+
+                        <!-- CLIP Skip -->
+                        <label class="param-label" for="clip-skip-slider">
+                            CLIP Skip <span class="param-value" id="clip-skip-value">0</span>
+                        </label>
+                        <input type="range" id="clip-skip-slider" class="param-slider" min="0" max="12" value="0">
+
+                        <!-- MaHiRo -->
+                        <div class="toggle-row">
+                            <label class="param-label" for="mahiro-toggle">MaHiRo</label>
+                            <label class="switch">
+                                <input type="checkbox" id="mahiro-toggle">
+                                <span class="switch-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </section>
+
+            </div><!-- /panel-scroll -->
+        </aside>
+
+        <!-- ────── Center Panel ────── -->
+        <div id="center-panel" class="panel panel-center">
+            <!-- Image Display Area -->
+            <div id="image-area" class="image-area">
+                <div id="image-placeholder" class="image-placeholder">
+                    <div class="placeholder-icon">&#x1F3A8;</div>
+                    <p>Generate an image to see it here</p>
+                    <p class="placeholder-hint">Ctrl+Enter to generate</p>
+                </div>
+                <img id="main-image" class="main-image hidden" alt="Generated image">
+                <!-- Progress overlay -->
+                <div id="progress-overlay" class="progress-overlay hidden">
+                    <div class="progress-spinner"></div>
+                    <div class="progress-text" id="progress-text">Generating...</div>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="progress-bar"></div>
+                    </div>
+                    <div class="progress-steps" id="progress-steps">0 / 0</div>
+                </div>
+                <!-- Metadata overlay (shown on hover) -->
+                <div id="meta-overlay" class="meta-overlay hidden">
+                    <div class="meta-content" id="meta-overlay-content"></div>
+                </div>
+            </div>
+
+            <!-- Batch thumbnails -->
+            <div id="batch-thumbs" class="batch-thumbs hidden"></div>
+
+            <!-- Prompt Area -->
+            <div class="prompt-area">
+                <div class="prompt-wrapper">
+                    <textarea id="prompt" class="prompt-input" placeholder="Enter your prompt here..." rows="3"></textarea>
+                    <span class="char-count" id="prompt-chars">0</span>
+                </div>
+                <div class="prompt-wrapper prompt-neg-wrapper">
+                    <textarea id="negative-prompt" class="prompt-input prompt-neg" placeholder="Negative prompt (optional)" rows="1"></textarea>
+                    <span class="char-count" id="neg-chars">0</span>
+                </div>
+                <div class="prompt-actions">
+                    <button id="generate-btn" class="generate-btn" title="Generate (Ctrl+Enter)">
+                        <span class="gen-icon">&#9654;</span> Generate
+                    </button>
+                    <button id="interrupt-btn" class="interrupt-btn hidden" title="Interrupt (Escape)">
+                        &#9632; Interrupt
+                    </button>
+                </div>
+            </div>
+
+            <!-- Bottom Tabs -->
+            <div class="bottom-panel">
+                <div class="bottom-tabs">
+                    <button class="bottom-tab active" data-btab="history">History</button>
+                    <button class="bottom-tab" data-btab="models">Models</button>
+                    <button class="bottom-tab" data-btab="loras-browse">LoRAs</button>
+                    <button class="bottom-tab" data-btab="vaes">VAEs</button>
+                </div>
+                <div class="bottom-search">
+                    <input type="text" id="bottom-search" class="param-input" placeholder="Filter...">
+                </div>
+                <div class="bottom-content">
+                    <!-- History -->
+                    <div class="bottom-pane active" id="pane-history">
+                        <div class="thumb-grid" id="history-grid">
+                            <div class="thumb-placeholder">No images yet. Generate one!</div>
+                        </div>
+                    </div>
+                    <!-- Models -->
+                    <div class="bottom-pane" id="pane-models">
+                        <div class="thumb-grid" id="models-grid">
+                            <div class="thumb-placeholder">Loading models...</div>
+                        </div>
+                    </div>
+                    <!-- LoRAs Browse -->
+                    <div class="bottom-pane" id="pane-loras-browse">
+                        <div class="thumb-grid" id="loras-grid">
+                            <div class="thumb-placeholder">Loading LoRAs...</div>
+                        </div>
+                    </div>
+                    <!-- VAEs -->
+                    <div class="bottom-pane" id="pane-vaes">
+                        <div class="thumb-grid" id="vaes-grid">
+                            <div class="thumb-placeholder">Loading VAEs...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ────── Right Panel: Metadata ────── -->
+        <aside id="right-panel" class="panel panel-right">
+            <div class="panel-header">
+                <span>Generation Info</span>
+                <button class="icon-btn panel-collapse-btn" id="collapse-right" title="Collapse panel">&#x2715;</button>
+            </div>
+            <div class="panel-scroll">
+                <div id="gen-info" class="gen-info">
+                    <p class="gen-info-empty">No generation data yet.</p>
+                </div>
+                <div class="gen-actions" id="gen-actions" style="display:none">
+                    <button class="action-btn" id="reuse-params-btn" title="Load these parameters into the form">
+                        &#x1F504; Reuse Parameters
+                    </button>
+                    <button class="action-btn" id="copy-params-btn" title="Copy parameters to clipboard">
+                        &#x1F4CB; Copy Parameters
+                    </button>
+                </div>
+                <!-- Raw params -->
+                <div id="raw-params" class="raw-params"></div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- ───────────── Lightbox ───────────── -->
+    <div id="lightbox" class="lightbox hidden" tabindex="-1">
+        <button class="lightbox-close" id="lightbox-close">&times;</button>
+        <img id="lightbox-img" class="lightbox-img" alt="Full size image">
+    </div>
+
+    <!-- ───────────── Toast container ───────────── -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
