@@ -13,6 +13,8 @@ from serenity.inference.models.detection import ModelArchitecture
 
 __all__ = [
     "FluxAdapter",
+    "FluxKlein4BAdapter",
+    "FluxKlein9BAdapter",
     "FluxSchnellAdapter",
     "ADAPTERS",
 ]
@@ -37,6 +39,17 @@ _FLUX_CONFIG = {
 _FLUX_SCHNELL_CONFIG = {
     **_FLUX_CONFIG,
     "guidance_embeds": False,
+}
+
+_FLUX_KLEIN_4B_CONFIG = {
+    "in_channels": 64,
+    "num_layers": 12,
+    "num_single_layers": 24,
+    "attention_head_dim": 128,
+    "num_attention_heads": 24,
+    "joint_attention_dim": 4096,
+    "pooled_projection_dim": 768,
+    "guidance_embeds": True,
 }
 
 # ---------------------------------------------------------------------------
@@ -219,10 +232,100 @@ class FluxSchnellAdapter(FluxAdapter):
 
 
 # ---------------------------------------------------------------------------
+# Flux 2 Klein adapters
+# ---------------------------------------------------------------------------
+
+
+class FluxKlein4BAdapter(FluxAdapter):
+    """Model adapter for Flux 2 Klein 4B — compact Flux 2 variant.
+
+    Klein 4B uses 12 double blocks and 24 single blocks, roughly half the
+    parameters of the full Flux architecture.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(variant="klein_4b")
+
+    @property
+    def architecture(self) -> ModelArchitecture:
+        return ModelArchitecture.FLUX_2_KLEIN_4B
+
+    def create_model(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype = torch.float32,
+        **kwargs: Any,
+    ) -> nn.Module:
+        """Instantiate a Flux 2 Klein 4B transformer and load weights."""
+        try:
+            from diffusers.models import FluxTransformer2DModel  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise NotImplementedError(
+                "FluxKlein4BAdapter.create_model requires the 'diffusers' package."
+            ) from exc
+
+        logger.info(
+            "Creating Flux 2 Klein 4B transformer on %s (%s)",
+            device,
+            dtype,
+        )
+        model = FluxTransformer2DModel(**_FLUX_KLEIN_4B_CONFIG)
+        model.load_state_dict(state_dict, strict=False)
+        model = model.to(device=torch.device(device), dtype=dtype)
+        model.eval()
+        return model
+
+
+class FluxKlein9BAdapter(FluxAdapter):
+    """Model adapter for Flux 2 Klein 9B — same depth as full Flux but Flux 2 arch.
+
+    Klein 9B uses 19 double blocks and 38 single blocks, same as the standard
+    Flux architecture but with Flux 2 double-stream modulation.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(variant="klein_9b")
+
+    @property
+    def architecture(self) -> ModelArchitecture:
+        return ModelArchitecture.FLUX_2_KLEIN_9B
+
+    def create_model(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype = torch.float32,
+        **kwargs: Any,
+    ) -> nn.Module:
+        """Instantiate a Flux 2 Klein 9B transformer and load weights."""
+        try:
+            from diffusers.models import FluxTransformer2DModel  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise NotImplementedError(
+                "FluxKlein9BAdapter.create_model requires the 'diffusers' package."
+            ) from exc
+
+        logger.info(
+            "Creating Flux 2 Klein 9B transformer on %s (%s)",
+            device,
+            dtype,
+        )
+        # Klein 9B uses the same config as standard Flux (19/38 blocks)
+        model = FluxTransformer2DModel(**_FLUX_CONFIG)
+        model.load_state_dict(state_dict, strict=False)
+        model = model.to(device=torch.device(device), dtype=dtype)
+        model.eval()
+        return model
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
 ADAPTERS = {
     ModelArchitecture.FLUX_DEV: FluxAdapter,
     ModelArchitecture.FLUX_SCHNELL: FluxSchnellAdapter,
+    ModelArchitecture.FLUX_2_KLEIN_4B: FluxKlein4BAdapter,
+    ModelArchitecture.FLUX_2_KLEIN_9B: FluxKlein9BAdapter,
 }

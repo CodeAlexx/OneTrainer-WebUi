@@ -43,7 +43,8 @@ class LuminaAdapter(BaseModelAdapter):
     ) -> nn.Module:
         """Instantiate a Lumina 2 transformer and load weights.
 
-        Requires ``diffusers`` to be installed.
+        Requires ``diffusers`` to be installed.  Infers layer count and
+        hidden dim from the state dict for debugging.
         """
         try:
             from diffusers.models import Transformer2DModel  # type: ignore[import-untyped]
@@ -52,7 +53,31 @@ class LuminaAdapter(BaseModelAdapter):
                 "LuminaAdapter.create_model requires the 'diffusers' package."
             ) from exc
 
-        logger.info("Creating Lumina 2 transformer on %s (%s)", device, dtype)
+        # Infer config from state dict key patterns
+        num_layers = 0
+        hidden_dim: int | None = None
+        for key in state_dict:
+            if key.startswith("layers."):
+                parts = key.split(".")
+                if len(parts) > 1 and parts[1].isdigit():
+                    num_layers = max(num_layers, int(parts[1]) + 1)
+            # Infer hidden dim from cap_embedder output weight shape
+            if key == "cap_embedder.1.weight" and hidden_dim is None:
+                hidden_dim = state_dict[key].shape[0]
+
+        self._inferred_config = {
+            "num_layers": num_layers,
+            "hidden_dim": hidden_dim,
+        }
+        logger.info(
+            "Creating Lumina 2 transformer on %s (%s) — inferred %d layers, "
+            "hidden_dim=%s",
+            device,
+            dtype,
+            num_layers,
+            hidden_dim,
+        )
+
         # Lumina uses a custom transformer architecture.  A future diffusers
         # release may ship a dedicated class; for now we use the generic model.
         try:
@@ -75,7 +100,7 @@ class LuminaAdapter(BaseModelAdapter):
         return "flow"
 
     def get_vae_scaling_factor(self) -> float:
-        return 0.18215
+        return 0.3611
 
     def get_default_resolution(self) -> tuple[int, int]:
         return (1024, 1024)

@@ -46,7 +46,8 @@ class ZImageAdapter(BaseModelAdapter):
     ) -> nn.Module:
         """Instantiate a Z-Image transformer and load weights.
 
-        Requires ``diffusers`` to be installed.
+        Requires ``diffusers`` to be installed.  Infers layer count from
+        the state dict for debugging.
         """
         try:
             from diffusers.models import Transformer2DModel  # type: ignore[import-untyped]
@@ -55,7 +56,30 @@ class ZImageAdapter(BaseModelAdapter):
                 "ZImageAdapter.create_model requires the 'diffusers' package."
             ) from exc
 
-        logger.info("Creating Z-Image transformer on %s (%s)", device, dtype)
+        # Infer config from state dict key patterns
+        num_layers = 0
+        hidden_dim: int | None = None
+        for key in state_dict:
+            if key.startswith("layers."):
+                parts = key.split(".")
+                if len(parts) > 1 and parts[1].isdigit():
+                    num_layers = max(num_layers, int(parts[1]) + 1)
+            if key == "cap_embedder.1.weight" and hidden_dim is None:
+                hidden_dim = state_dict[key].shape[0]
+
+        self._inferred_config = {
+            "num_layers": num_layers,
+            "hidden_dim": hidden_dim,
+        }
+        logger.info(
+            "Creating Z-Image transformer on %s (%s) — inferred %d layers, "
+            "hidden_dim=%s",
+            device,
+            dtype,
+            num_layers,
+            hidden_dim,
+        )
+
         try:
             model = Transformer2DModel()
         except Exception:
@@ -76,7 +100,7 @@ class ZImageAdapter(BaseModelAdapter):
         return "flow"
 
     def get_vae_scaling_factor(self) -> float:
-        return 0.18215
+        return 0.3611
 
     def get_default_resolution(self) -> tuple[int, int]:
         return (1024, 1024)

@@ -48,34 +48,35 @@ class WanAdapter(BaseModelAdapter):
     ) -> nn.Module:
         """Instantiate a Wan 2.2 transformer and load weights.
 
-        Requires ``diffusers`` to be installed.
+        Requires ``diffusers`` to be installed.  Infers block count from
+        the state dict to determine model size.
         """
         try:
-            from diffusers.models import Transformer2DModel  # type: ignore[import-untyped]
-        except ImportError as exc:
-            raise NotImplementedError(
-                "WanAdapter.create_model requires the 'diffusers' package."
-            ) from exc
-
-        logger.info(
-            "Creating Wan 2.2 (%s) transformer on %s (%s)",
-            self.variant,
-            device,
-            dtype,
-        )
-        # Wan uses a custom 3D DiT; diffusers may provide WanTransformer3DModel
-        # or a compatible class.  Fall back to a generic Transformer2DModel
-        # for the initial adapter skeleton.
-        try:
             from diffusers.models import WanTransformer3DModel  # type: ignore[import-untyped]
-
-            model = WanTransformer3DModel()
-        except (ImportError, AttributeError):
+        except ImportError as exc:
             raise NotImplementedError(
                 "WanAdapter.create_model requires a diffusers version with "
                 "WanTransformer3DModel support."
-            )
+            ) from exc
 
+        # Infer config from state dict key patterns
+        num_blocks = 0
+        for key in state_dict:
+            if key.startswith("blocks."):
+                parts = key.split(".")
+                if len(parts) > 1 and parts[1].isdigit():
+                    num_blocks = max(num_blocks, int(parts[1]) + 1)
+
+        self._inferred_config = {"num_layers": num_blocks, "variant": self.variant}
+        logger.info(
+            "Creating Wan 2.2 (%s) transformer on %s (%s) — inferred %d blocks",
+            self.variant,
+            device,
+            dtype,
+            num_blocks,
+        )
+
+        model = WanTransformer3DModel()
         model.load_state_dict(state_dict, strict=False)
         model = model.to(device=torch.device(device), dtype=dtype)
         model.eval()
@@ -88,7 +89,7 @@ class WanAdapter(BaseModelAdapter):
         return "flow"
 
     def get_vae_scaling_factor(self) -> float:
-        return 0.18215
+        return 0.13025
 
     def get_default_resolution(self) -> tuple[int, int]:
         if self.variant == "i2v":

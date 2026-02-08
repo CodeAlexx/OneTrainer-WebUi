@@ -38,7 +38,7 @@ class TestWanAdapter:
 
     def test_vae_scaling_factor(self) -> None:
         adapter = WanAdapter()
-        assert adapter.get_vae_scaling_factor() == pytest.approx(0.18215)
+        assert adapter.get_vae_scaling_factor() == pytest.approx(0.13025)
 
     def test_default_resolution_t2v(self) -> None:
         adapter = WanAdapter(variant="t2v")
@@ -124,7 +124,7 @@ class TestLuminaAdapter:
 
     def test_vae_scaling_factor(self) -> None:
         adapter = LuminaAdapter()
-        assert adapter.get_vae_scaling_factor() == pytest.approx(0.18215)
+        assert adapter.get_vae_scaling_factor() == pytest.approx(0.3611)
 
     def test_default_resolution(self) -> None:
         adapter = LuminaAdapter()
@@ -177,7 +177,7 @@ class TestZImageAdapter:
 
     def test_vae_scaling_factor(self) -> None:
         adapter = ZImageAdapter()
-        assert adapter.get_vae_scaling_factor() == pytest.approx(0.18215)
+        assert adapter.get_vae_scaling_factor() == pytest.approx(0.3611)
 
     def test_default_resolution(self) -> None:
         adapter = ZImageAdapter()
@@ -238,7 +238,7 @@ class TestQwenAdapter:
 
     def test_vae_scaling_factor(self) -> None:
         adapter = QwenAdapter()
-        assert adapter.get_vae_scaling_factor() == pytest.approx(0.18215)
+        assert adapter.get_vae_scaling_factor() == pytest.approx(0.3611)
 
     def test_default_resolution(self) -> None:
         adapter = QwenAdapter()

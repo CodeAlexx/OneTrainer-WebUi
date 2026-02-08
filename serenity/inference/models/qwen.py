@@ -44,7 +44,8 @@ class QwenAdapter(BaseModelAdapter):
     ) -> nn.Module:
         """Instantiate a Qwen Image transformer and load weights.
 
-        Requires ``diffusers`` to be installed.
+        Requires ``diffusers`` to be installed.  Infers transformer block
+        count from the state dict for debugging.
         """
         try:
             from diffusers.models import Transformer2DModel  # type: ignore[import-untyped]
@@ -53,7 +54,22 @@ class QwenAdapter(BaseModelAdapter):
                 "QwenAdapter.create_model requires the 'diffusers' package."
             ) from exc
 
-        logger.info("Creating Qwen Image transformer on %s (%s)", device, dtype)
+        # Infer config from state dict key patterns
+        num_blocks = 0
+        for key in state_dict:
+            if key.startswith("transformer_blocks."):
+                parts = key.split(".")
+                if len(parts) > 1 and parts[1].isdigit():
+                    num_blocks = max(num_blocks, int(parts[1]) + 1)
+
+        self._inferred_config = {"num_transformer_blocks": num_blocks}
+        logger.info(
+            "Creating Qwen Image transformer on %s (%s) — inferred %d blocks",
+            device,
+            dtype,
+            num_blocks,
+        )
+
         try:
             model = Transformer2DModel()
         except Exception:
@@ -74,7 +90,7 @@ class QwenAdapter(BaseModelAdapter):
         return "flow"
 
     def get_vae_scaling_factor(self) -> float:
-        return 0.18215
+        return 0.3611
 
     def get_default_resolution(self) -> tuple[int, int]:
         return (1024, 1024)

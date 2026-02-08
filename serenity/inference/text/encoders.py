@@ -9,6 +9,8 @@ from typing import Any
 
 from serenity.inference.models.detection import ModelArchitecture
 from serenity.inference.text.clip import CLIPEncoder, TextOutput
+from serenity.inference.text.gemma import GemmaEncoder
+from serenity.inference.text.qwen_enc import QwenEncoder
 from serenity.inference.text.t5 import T5Encoder
 
 __all__ = [
@@ -47,6 +49,8 @@ _MODEL_ENCODERS: dict[ModelArchitecture, list[TextEncoderType]] = {
     ModelArchitecture.SD3: [TextEncoderType.CLIP_L, TextEncoderType.CLIP_G, TextEncoderType.T5_XXL],
     ModelArchitecture.FLUX_DEV: [TextEncoderType.CLIP_L, TextEncoderType.T5_XXL],
     ModelArchitecture.FLUX_SCHNELL: [TextEncoderType.CLIP_L, TextEncoderType.T5_XXL],
+    ModelArchitecture.FLUX_2_KLEIN_4B: [TextEncoderType.CLIP_L, TextEncoderType.T5_XXL],
+    ModelArchitecture.FLUX_2_KLEIN_9B: [TextEncoderType.CLIP_L, TextEncoderType.T5_XXL],
     ModelArchitecture.CHROMA: [TextEncoderType.T5_XXL],
     ModelArchitecture.WAN: [TextEncoderType.T5_XXL],
     ModelArchitecture.QWEN: [TextEncoderType.QWEN],
@@ -126,6 +130,12 @@ _DEFAULT_ENCODER_PATHS: dict[tuple[ModelArchitecture, TextEncoderType], _Encoder
     (ModelArchitecture.CHROMA, TextEncoderType.T5_XXL): _EncoderPath(repo=_T5_XXL_REPO),
     # Wan
     (ModelArchitecture.WAN, TextEncoderType.T5_XXL): _EncoderPath(repo=_T5_XXL_REPO),
+    # Qwen
+    (ModelArchitecture.QWEN, TextEncoderType.QWEN): _EncoderPath(repo="Qwen/Qwen2.5-7B"),
+    # Lumina
+    (ModelArchitecture.LUMINA, TextEncoderType.GEMMA): _EncoderPath(repo="google/gemma-2-2b"),
+    # ZImage
+    (ModelArchitecture.ZIMAGE, TextEncoderType.GEMMA): _EncoderPath(repo="google/gemma-2-2b"),
 }
 
 
@@ -151,14 +161,14 @@ class TextEncoderManager:
     """
 
     def __init__(self) -> None:
-        self._encoders: dict[TextEncoderType, CLIPEncoder | T5Encoder] = {}
+        self._encoders: dict[TextEncoderType, CLIPEncoder | T5Encoder | QwenEncoder | GemmaEncoder] = {}
 
     # -- encoder access ------------------------------------------------------
 
     def get_encoder(
         self,
         encoder_type: TextEncoderType,
-    ) -> CLIPEncoder | T5Encoder:
+    ) -> CLIPEncoder | T5Encoder | QwenEncoder | GemmaEncoder:
         """Return a cached encoder, creating an unloaded stub if absent."""
         if encoder_type not in self._encoders:
             if encoder_type == TextEncoderType.CLIP_L:
@@ -167,6 +177,10 @@ class TextEncoderManager:
                 self._encoders[encoder_type] = CLIPEncoder(use_projection=True)
             elif encoder_type == TextEncoderType.T5_XXL:
                 self._encoders[encoder_type] = T5Encoder()
+            elif encoder_type == TextEncoderType.QWEN:
+                self._encoders[encoder_type] = QwenEncoder()
+            elif encoder_type == TextEncoderType.GEMMA:
+                self._encoders[encoder_type] = GemmaEncoder()
             else:
                 raise ValueError(f"Unsupported encoder type: {encoder_type}")
         return self._encoders[encoder_type]
@@ -286,12 +300,17 @@ class TextEncoderManager:
             ModelArchitecture.SD3: self._encode_sd3,
             ModelArchitecture.FLUX_DEV: self._encode_flux,
             ModelArchitecture.FLUX_SCHNELL: self._encode_flux,
+            ModelArchitecture.FLUX_2_KLEIN_4B: self._encode_flux,
+            ModelArchitecture.FLUX_2_KLEIN_9B: self._encode_flux,
             ModelArchitecture.CHROMA: self._encode_chroma,
             ModelArchitecture.WAN: self._encode_wan,
+            ModelArchitecture.QWEN: self._encode_qwen,
+            ModelArchitecture.LUMINA: self._encode_lumina,
+            ModelArchitecture.ZIMAGE: self._encode_lumina,
         }
         fn = dispatch.get(model_architecture)
         if fn is None:
-            raise ValueError(f"Encoding not implemented for {model_architecture.value}")
+            raise ValueError(f"Encoding not implemented for {model_architecture}")
         return fn(prompt, negative, clip_skip)
 
     # -- per-model encoders --------------------------------------------------
@@ -404,6 +423,34 @@ class TextEncoderManager:
         t5_out = t5.encode(prompt)
         return {
             "cond": t5_out.hidden_states,
+            "uncond": None,
+        }
+
+    def _encode_qwen(
+        self,
+        prompt: str,
+        negative: str,
+        clip_skip: int,
+    ) -> dict[str, Any]:
+        """Qwen: Qwen 2.5 causal LM hidden states only."""
+        qwen = self.get_encoder(TextEncoderType.QWEN)
+        qwen_out = qwen.encode(prompt)
+        return {
+            "cond": qwen_out.hidden_states,
+            "uncond": None,
+        }
+
+    def _encode_lumina(
+        self,
+        prompt: str,
+        negative: str,
+        clip_skip: int,
+    ) -> dict[str, Any]:
+        """Lumina / ZImage: Gemma 2 hidden states only."""
+        gemma = self.get_encoder(TextEncoderType.GEMMA)
+        gemma_out = gemma.encode(prompt)
+        return {
+            "cond": gemma_out.hidden_states,
             "uncond": None,
         }
 

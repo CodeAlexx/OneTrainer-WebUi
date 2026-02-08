@@ -34,6 +34,8 @@ class ModelArchitecture(str, Enum):
     SD3 = "sd3"
     FLUX_DEV = "flux_dev"
     FLUX_SCHNELL = "flux_schnell"
+    FLUX_2_KLEIN_4B = "flux_2_klein_4b"
+    FLUX_2_KLEIN_9B = "flux_2_klein_9b"
     CHROMA = "chroma"
     WAN = "wan"
     QWEN = "qwen"
@@ -159,13 +161,24 @@ def _detect_flux(keys: set[str], prefix: str) -> ModelConfig | None:
     depth_single = _count_blocks(keys, f"{prefix}single_blocks." + "{}.")
 
     if is_flux2:
+        # Differentiate Klein variants by block counts
+        if depth <= 14:
+            arch = ModelArchitecture.FLUX_2_KLEIN_4B
+            image_model = "flux2_klein_4b"
+        elif depth <= 20:
+            arch = ModelArchitecture.FLUX_2_KLEIN_9B
+            image_model = "flux2_klein_9b"
+        else:
+            arch = ModelArchitecture.FLUX_DEV
+            image_model = "flux2"
+
         config = {
-            "image_model": "flux2",
+            "image_model": image_model,
             "depth": depth,
             "depth_single_blocks": depth_single,
         }
         return ModelConfig(
-            architecture=ModelArchitecture.FLUX_DEV,
+            architecture=arch,
             unet_config=config,
             unet_key_prefix=[prefix],
             vae_key_prefix=["vae."],

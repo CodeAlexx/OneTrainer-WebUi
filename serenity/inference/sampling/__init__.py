@@ -5,6 +5,9 @@ from __future__ import annotations
 from serenity.inference.sampling.cfg import apply_cfg, compute_cfg, mahiro_correction, rescale_cfg
 from serenity.inference.sampling.conditioning import Conditioning, create_noise, prepare_conditioning
 from serenity.inference.sampling.prediction import (
+    ContinuousEDMPrediction,
+    ContinuousVPrediction,
+    DiscreteFlowPrediction,
     EpsPrediction,
     FlowPrediction,
     FluxPrediction,
@@ -31,6 +34,9 @@ __all__ = [
     "VPrediction",
     "FlowPrediction",
     "FluxPrediction",
+    "ContinuousEDMPrediction",
+    "ContinuousVPrediction",
+    "DiscreteFlowPrediction",
     "get_prediction",
     # cfg
     "compute_cfg",

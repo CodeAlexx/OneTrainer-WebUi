@@ -25,6 +25,7 @@ __all__ = [
     "beta_scheduler",
     "linear_quadratic_scheduler",
     "ays_scheduler",
+    "turbo_scheduler",
 ]
 
 
@@ -40,6 +41,7 @@ class SchedulerType(str, Enum):
     BETA = "beta"
     LINEAR_QUADRATIC = "linear_quadratic"
     AYS = "ays"
+    TURBO = "turbo"
 
 
 # --------------------------------------------------------------------------- #
@@ -220,6 +222,12 @@ def ays_scheduler(
     return torch.from_numpy(sigmas_np).float()
 
 
+def turbo_scheduler(n: int, sigma_min: float, sigma_max: float) -> Tensor:
+    """Turbo schedule for distilled models — uniform step spacing."""
+    sigmas = torch.linspace(sigma_max, 0.0, n + 1)
+    return sigmas
+
+
 # --------------------------------------------------------------------------- #
 # Dispatcher
 # --------------------------------------------------------------------------- #
@@ -234,6 +242,7 @@ _SCHEDULER_MAP: dict[SchedulerType, Callable[..., Tensor]] = {
     SchedulerType.BETA: beta_scheduler,
     SchedulerType.LINEAR_QUADRATIC: linear_quadratic_scheduler,
     SchedulerType.AYS: ays_scheduler,
+    SchedulerType.TURBO: turbo_scheduler,
 }
 
 

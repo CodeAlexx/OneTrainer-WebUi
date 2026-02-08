@@ -19,6 +19,9 @@ __all__ = [
     "FlowPrediction",
     "FluxPrediction",
     "EDMPrediction",
+    "ContinuousEDMPrediction",
+    "ContinuousVPrediction",
+    "DiscreteFlowPrediction",
     "get_prediction",
 ]
 
@@ -31,6 +34,9 @@ class PredictionType(str, Enum):
     FLOW = "flow"
     FLOW_FLUX = "flow_flux"
     EDM = "edm"
+    CONTINUOUS_EDM = "continuous_edm"
+    CONTINUOUS_V = "continuous_v"
+    DISCRETE_FLOW = "discrete_flow"
 
 
 # --------------------------------------------------------------------------- #
@@ -60,7 +66,9 @@ class Prediction:
         """Convert raw model output to denoised prediction (c_out)."""
         raise NotImplementedError
 
-    def noise_scaling(self, sigma: Tensor, noise: Tensor, latent: Tensor) -> Tensor:
+    def noise_scaling(
+        self, sigma: Tensor, noise: Tensor, latent: Tensor, max_denoise: bool = False,
+    ) -> Tensor:
         """Add noise to a latent at the given sigma level."""
         sigma = self._broadcast_sigma(sigma, noise)
         return latent + noise * sigma
@@ -144,12 +152,27 @@ class FlowPrediction(Prediction):
         sigma = self._broadcast_sigma(sigma, model_output)
         return model_input - model_output * sigma
 
-    def noise_scaling(self, sigma: Tensor, noise: Tensor, latent: Tensor) -> Tensor:
+    def noise_scaling(
+        self, sigma: Tensor, noise: Tensor, latent: Tensor, max_denoise: bool = False,
+    ) -> Tensor:
         sigma = self._broadcast_sigma(sigma, noise)
+        if max_denoise:
+            return noise
         return sigma * noise + (1.0 - sigma) * latent
 
     def sigma_to_timestep(self, sigma: Tensor) -> Tensor:
         return sigma * self.multiplier
+
+    def apply_wan_shift(
+        self, sigmas: Tensor, high_shift: float = 17.0, low_shift: float = 1.0,
+    ) -> Tensor:
+        """Apply Wan-style dynamic shift — high shift for noisy, low shift for clean."""
+        shifted = torch.where(
+            sigmas > 0.5,
+            high_shift * sigmas / (1.0 + (high_shift - 1.0) * sigmas),
+            low_shift * sigmas / (1.0 + (low_shift - 1.0) * sigmas),
+        )
+        return shifted
 
 
 # --------------------------------------------------------------------------- #
@@ -242,6 +265,52 @@ class EDMPrediction(Prediction):
 
 
 # --------------------------------------------------------------------------- #
+# Continuous EDM prediction
+# --------------------------------------------------------------------------- #
+
+
+class ContinuousEDMPrediction(EDMPrediction):
+    """EDM prediction with raw sigma as timestep (no log transform)."""
+
+    def sigma_to_timestep(self, sigma: Tensor) -> Tensor:
+        return sigma
+
+
+# --------------------------------------------------------------------------- #
+# Continuous V prediction
+# --------------------------------------------------------------------------- #
+
+
+class ContinuousVPrediction(VPrediction):
+    """V-prediction with raw sigma as timestep."""
+
+    def sigma_to_timestep(self, sigma: Tensor) -> Tensor:
+        return sigma
+
+
+# --------------------------------------------------------------------------- #
+# Discrete flow prediction
+# --------------------------------------------------------------------------- #
+
+
+class DiscreteFlowPrediction(FlowPrediction):
+    """Flow prediction with discretized timesteps."""
+
+    def __init__(
+        self,
+        sigma_data: float = 1.0,
+        shift: float = 1.0,
+        multiplier: float = 1000.0,
+        num_timesteps: int = 1000,
+    ) -> None:
+        super().__init__(sigma_data, shift, multiplier)
+        self.num_timesteps = num_timesteps
+
+    def sigma_to_timestep(self, sigma: Tensor) -> Tensor:
+        return (sigma * self.num_timesteps).round().clamp(0, self.num_timesteps)
+
+
+# --------------------------------------------------------------------------- #
 # Factory
 # --------------------------------------------------------------------------- #
 
@@ -256,6 +325,9 @@ def get_prediction(prediction_type: PredictionType | str, **kwargs) -> Predictio
         PredictionType.FLOW: FlowPrediction,
         PredictionType.FLOW_FLUX: FluxPrediction,
         PredictionType.EDM: EDMPrediction,
+        PredictionType.CONTINUOUS_EDM: ContinuousEDMPrediction,
+        PredictionType.CONTINUOUS_V: ContinuousVPrediction,
+        PredictionType.DISCRETE_FLOW: DiscreteFlowPrediction,
     }
 
     cls = factories[prediction_type]
