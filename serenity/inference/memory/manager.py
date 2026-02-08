@@ -128,23 +128,42 @@ class LoadedModel:
     # ------------------------------------------------------------------
 
     def load_to_gpu(self, budget: int) -> int:
-        """Move up to *budget* bytes of parameters onto :attr:`device`.
-
-        Returns the number of bytes actually transferred.
-        """
+        """Move modules onto :attr:`device`, largest-first, up to *budget* bytes."""
         model = self.model
         if model is None:
             return 0
 
+        # Build list of leaf modules with their sizes
+        module_list: list[tuple[int, str, nn.Module]] = []
+        for name, mod in model.named_modules():
+            # Only consider leaf modules (no children)
+            if len(list(mod.children())) > 0:
+                continue
+            size = sum(p.data.nbytes for p in mod.parameters())
+            if size > 0:
+                module_list.append((size, name, mod))
+
+        # Sort largest first for optimal packing
+        module_list.sort(key=lambda x: x[0], reverse=True)
+
         moved = 0
-        for p in model.parameters():
-            if _same_device(p.device, self.device):
+        for size, name, mod in module_list:
+            # Skip if already on device
+            params = list(mod.parameters())
+            if params and _same_device(params[0].device, self.device):
                 continue
-            p_size = p.data.nbytes
-            if moved + p_size > budget:
+
+            if moved + size > budget:
+                # Module doesn't fit — mark as offloaded if it supports it
+                if hasattr(mod, "offload_enabled"):
+                    mod.offload_enabled = True
                 continue
-            p.data = p.data.to(self.device, non_blocking=True)
-            moved += p_size
+
+            # Move entire module to GPU
+            for p in mod.parameters():
+                if not _same_device(p.device, self.device):
+                    p.data = p.data.to(self.device, non_blocking=True)
+            moved += size
 
         self.loaded_size += moved
         return moved
@@ -250,12 +269,19 @@ class ModelManager:
         return (-lm.offloaded_size, refcount, lm.total_size)
 
     def free_memory(self, bytes_needed: int) -> int:
-        """Evict models until at least *bytes_needed* VRAM is freed.
+        """Evict models until at least *bytes_needed* VRAM is available.
 
-        Returns the total bytes actually freed.
+        Uses smart memory mode: checks actual free VRAM first and only
+        evicts when truly necessary.
         """
         # Purge dead entries first.
         self.loaded_models = [lm for lm in self.loaded_models if lm.is_alive]
+
+        # Smart memory mode: check if we actually need to evict
+        if is_cuda_available():
+            free = get_free_memory(self.device)
+            if free >= bytes_needed:
+                return 0  # Already have enough free VRAM
 
         freed = 0
         candidates = sorted(self.loaded_models, key=self._eviction_key)

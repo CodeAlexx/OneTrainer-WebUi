@@ -76,9 +76,9 @@ class StreamPool:
         if not self._streams:
             return None
 
-        # Sync the oldest stream with the current default stream.
+        # Ensure the default stream waits for the oldest transfer to complete.
         oldest = self._streams[self._index]
-        oldest.wait_stream(torch.cuda.current_stream(self._device))
+        torch.cuda.current_stream(self._device).wait_stream(oldest)
 
         # Advance round-robin.
         self._index = (self._index + 1) % len(self._streams)
@@ -248,14 +248,14 @@ class GatheredTransfer:
         """
         offset = 0
         w_numel = math.prod(weight_shape)
-        w_bytes = w_numel * torch.tensor([], dtype=weight_dtype).element_size()
+        w_bytes = w_numel * TensorGeometry(shape=(), dtype=weight_dtype).element_size()
         weight = buffer[offset:offset + w_bytes].view(dtype=weight_dtype).view(weight_shape)
         offset += _aligned_size(w_bytes)
 
         bias: torch.Tensor | None = None
         if bias_shape is not None and bias_dtype is not None:
             b_numel = math.prod(bias_shape)
-            b_bytes = b_numel * torch.tensor([], dtype=bias_dtype).element_size()
+            b_bytes = b_numel * TensorGeometry(shape=(), dtype=bias_dtype).element_size()
             bias = buffer[offset:offset + b_bytes].view(dtype=bias_dtype).view(bias_shape)
 
         return weight, bias

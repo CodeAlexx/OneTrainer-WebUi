@@ -73,6 +73,7 @@ class InferenceConfig:
     # Quality features
     rescale_cfg: float = 0.0
     mahiro: bool = False
+    clip_skip: int = 0
 
     # VAE
     vae_tiling: bool = False

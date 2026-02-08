@@ -156,16 +156,23 @@ def load_model(
     return model
 
 
-def _get_adapter(config: ModelConfig) -> Any:
-    """Look up a model adapter for *config*.
+_ADAPTER_REGISTRY: dict | None = None
 
-    Returns ``None`` when no adapter has been registered yet.  This is
-    the expected state during early development -- callers should raise
-    a clear error.
-    """
-    # Adapter registry will be populated by architecture-specific modules.
-    # For now we return None -- load_model raises NotImplementedError.
-    return None
+
+def _get_adapter(config: ModelConfig) -> Any:
+    """Look up a model adapter for *config*."""
+    global _ADAPTER_REGISTRY
+    if _ADAPTER_REGISTRY is None:
+        _ADAPTER_REGISTRY = {}
+        # Import all adapter modules and merge their ADAPTERS dicts
+        from serenity.inference.models import sd15, sdxl, sd3, flux, chroma, wan, lumina, zimage, qwen
+        for mod in (sd15, sdxl, sd3, flux, chroma, wan, lumina, zimage, qwen):
+            _ADAPTER_REGISTRY.update(mod.ADAPTERS)
+
+    adapter_cls = _ADAPTER_REGISTRY.get(config.architecture)
+    if adapter_cls is None:
+        return None
+    return adapter_cls()
 
 
 # ---------------------------------------------------------------------------
@@ -204,11 +211,16 @@ def load_vae(
     try:
         from diffusers.models import AutoencoderKL  # type: ignore[import-untyped]
 
-        vae = AutoencoderKL()
+        # Infer latent channels from decoder input shape
+        latent_ch = 4  # default
+        if "decoder.conv_in.weight" in sd:
+            latent_ch = sd["decoder.conv_in.weight"].shape[1]
+
+        vae = AutoencoderKL(latent_channels=latent_ch)
         vae.load_state_dict(sd, strict=False)
         vae = vae.to(device=device, dtype=dtype)
         vae.eval()
-        logger.info("Loaded VAE via diffusers AutoencoderKL from %s", path)
+        logger.info("Loaded VAE via diffusers AutoencoderKL from %s (latent_ch=%d)", path, latent_ch)
         return vae
     except Exception:
         logger.debug(

@@ -11,6 +11,7 @@ from serenity.inference.quantization.ops import QuantizedLinear
 
 __all__ = [
     "Int8Linear",
+    "INT8_EXCLUDED_BY_ARCH",
     "is_available",
     "quantize_int8_tensorwise",
     "dequantize_int8",
@@ -29,6 +30,41 @@ DEFAULT_DISABLE_FP: list[str] = [
     "patch_embedding",
     "time_embedding",
 ]
+
+# Per-model exclusion lists for INT8 quantization
+# These layers produce quality degradation when quantized
+FLUX_INT8_EXCLUDED = [
+    "proj_out",
+    "x_embedder",
+    "t_embedder",
+    "y_embedder",
+    "context_embedder",
+    "final_layer",
+]
+
+SDXL_INT8_EXCLUDED = [
+    "proj_out",
+    "proj_in",
+    "time_embed",
+    "label_emb",
+]
+
+SD3_INT8_EXCLUDED = [
+    "proj_out",
+    "x_embedder",
+    "t_embedder",
+    "y_embedder",
+    "context_embedder",
+]
+
+# Combined map for easy lookup
+INT8_EXCLUDED_BY_ARCH: dict[str, list[str]] = {
+    "flux_dev": FLUX_INT8_EXCLUDED,
+    "flux_schnell": FLUX_INT8_EXCLUDED,
+    "sdxl": SDXL_INT8_EXCLUDED,
+    "sdxl_refiner": SDXL_INT8_EXCLUDED,
+    "sd3": SD3_INT8_EXCLUDED,
+}
 
 
 def is_available() -> bool:

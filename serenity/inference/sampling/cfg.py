@@ -75,19 +75,16 @@ def rescale_cfg(
 # --------------------------------------------------------------------------- #
 
 
-def mahiro_correction(denoised: Tensor, cond_pred: Tensor, cfg_scale: float = 1.0) -> Tensor:
+def mahiro_correction(denoised: Tensor, uncond_pred: Tensor, cfg_scale: float = 1.0) -> Tensor:
     """MaHiRo post-CFG normalization — prevents color shift via cosine similarity.
 
     Based on Forge ``mahiro.py``:
-    1. Compute ``leap = cond_pred * scale`` and ``u_leap = uncond_pred * scale``
-       (we approximate uncond from the CFG result since we may not have it).
+    1. Compute ``leap = uncond_pred * scale``
     2. Merge ``(leap + cfg) / 2``
     3. Soft-normalize both, compute cosine similarity
     4. Blend ``cfg`` and ``leap`` based on similarity score
-
-    Simplified version: uses cond_pred and denoised directly.
     """
-    leap = cond_pred * cfg_scale
+    leap = uncond_pred * cfg_scale
     merge = (leap + denoised) / 2.0
 
     # Soft sqrt normalization (sign-preserving)
@@ -126,6 +123,6 @@ def apply_cfg(
         denoised = rescale_cfg(denoised, cond_pred, cfg_scale, rescale_phi)
 
     if mahiro:
-        denoised = mahiro_correction(denoised, cond_pred, cfg_scale)
+        denoised = mahiro_correction(denoised, uncond_pred, cfg_scale)
 
     return denoised

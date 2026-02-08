@@ -65,6 +65,13 @@ class CLIPEncoder:
 
     All ``transformers`` imports are lazy so the module can be imported
     without the library installed.
+
+    Args:
+        model_path: HuggingFace repo or local path.  Loaded eagerly if given.
+        dtype: Torch dtype for model weights.
+        device: Target device string.
+        use_projection: When ``True``, load ``CLIPTextModelWithProjection``
+            instead of ``CLIPTextModel``.  Required for CLIP-G (SDXL).
     """
 
     def __init__(
@@ -72,20 +79,35 @@ class CLIPEncoder:
         model_path: str | None = None,
         dtype: Any = None,
         device: str = "cpu",
+        use_projection: bool = False,
     ) -> None:
         self._model: Any | None = None
         self._tokenizer: Any | None = None
         self._dtype = dtype
         self._device = device
+        self._use_projection = use_projection
         if model_path is not None:
             self.load(model_path)
 
     # -- lifecycle -----------------------------------------------------------
 
-    def load(self, model_path: str) -> None:
-        """Load a CLIP model and tokenizer from *model_path*."""
+    def load(
+        self,
+        model_path: str,
+        subfolder: str | None = None,
+        tokenizer_subfolder: str | None = None,
+    ) -> None:
+        """Load a CLIP model and tokenizer from *model_path*.
+
+        Args:
+            model_path: HuggingFace repo ID or local directory.
+            subfolder: Optional subfolder for the model weights
+                (e.g. ``"text_encoder_2"`` for SDXL CLIP-G).
+            tokenizer_subfolder: Optional subfolder for the tokenizer.
+                Defaults to *subfolder* when not specified.
+        """
         try:
-            from transformers import CLIPTextModel, CLIPTokenizer  # type: ignore[import-untyped]
+            from transformers import CLIPTokenizer  # type: ignore[import-untyped]
         except ImportError as exc:
             raise ImportError(
                 "transformers is required to load CLIP models. "
@@ -97,12 +119,33 @@ class CLIPEncoder:
         if self._dtype is None:
             self._dtype = torch.float16
 
-        logger.info("Loading CLIP model from %s", model_path)
-        self._tokenizer = CLIPTokenizer.from_pretrained(model_path)
-        self._model = CLIPTextModel.from_pretrained(
-            model_path,
-            torch_dtype=self._dtype,
-        ).to(self._device)
+        tok_sf = tokenizer_subfolder or subfolder
+        tok_kwargs: dict[str, str] = {}
+        model_kwargs: dict[str, str] = {}
+        if tok_sf:
+            tok_kwargs["subfolder"] = tok_sf
+        if subfolder:
+            model_kwargs["subfolder"] = subfolder
+
+        logger.info("Loading CLIP model from %s (subfolder=%s)", model_path, subfolder)
+        self._tokenizer = CLIPTokenizer.from_pretrained(model_path, **tok_kwargs)
+
+        if self._use_projection:
+            from transformers import CLIPTextModelWithProjection  # type: ignore[import-untyped]
+
+            self._model = CLIPTextModelWithProjection.from_pretrained(
+                model_path,
+                torch_dtype=self._dtype,
+                **model_kwargs,
+            ).to(self._device)
+        else:
+            from transformers import CLIPTextModel  # type: ignore[import-untyped]
+
+            self._model = CLIPTextModel.from_pretrained(
+                model_path,
+                torch_dtype=self._dtype,
+                **model_kwargs,
+            ).to(self._device)
         self._model.eval()
 
     def unload(self) -> None:
@@ -168,7 +211,11 @@ class CLIPEncoder:
         else:
             hidden = outputs.last_hidden_state
 
-        pooled = outputs.pooler_output if hasattr(outputs, "pooler_output") else None
+        # CLIPTextModelWithProjection → text_embeds; CLIPTextModel → pooler_output
+        if self._use_projection:
+            pooled = getattr(outputs, "text_embeds", None)
+        else:
+            pooled = getattr(outputs, "pooler_output", None)
 
         return TextOutput(
             hidden_states=hidden,

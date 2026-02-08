@@ -1,4 +1,4 @@
-"""Wan 2.1 model adapter for the Serenity inference engine."""
+"""Wan 2.2 model adapter for the Serenity inference engine."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class WanAdapter(BaseModelAdapter):
-    """Model adapter for Wan 2.1 (T2V and I2V variants).
+    """Model adapter for Wan 2.2 (T2V and I2V variants).
 
     Wan is a video/image generation model using a custom DiT architecture
     with a T5-XXL text encoder and discrete flow-matching prediction.
@@ -46,7 +46,7 @@ class WanAdapter(BaseModelAdapter):
         dtype: torch.dtype = torch.float32,
         **kwargs: object,
     ) -> nn.Module:
-        """Instantiate a Wan 2.1 transformer and load weights.
+        """Instantiate a Wan 2.2 transformer and load weights.
 
         Requires ``diffusers`` to be installed.
         """
@@ -58,7 +58,7 @@ class WanAdapter(BaseModelAdapter):
             ) from exc
 
         logger.info(
-            "Creating Wan 2.1 (%s) transformer on %s (%s)",
+            "Creating Wan 2.2 (%s) transformer on %s (%s)",
             self.variant,
             device,
             dtype,

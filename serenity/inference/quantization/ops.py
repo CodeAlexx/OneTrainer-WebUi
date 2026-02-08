@@ -63,11 +63,11 @@ def get_weight_and_bias(
     """Get weight and bias from a layer, applying online LoRA if present.
 
     Mirrors Forge's get_weight_and_bias (operations.py:46-65). When a layer
-    has ``forge_online_loras`` attached, the stored patches are applied to the
+    has ``_online_lora_patches`` attached, the stored patches are applied to the
     weight/bias before returning.
     """
     scale_weight: torch.Tensor | None = getattr(layer, "scale_weight", None)
-    loras: dict[str, list[Any]] = getattr(layer, "forge_online_loras", {})
+    loras: dict[str, list[Any]] = getattr(layer, "_online_lora_patches", {})
 
     weight_patches = loras.get("weight", None)
     bias_patches = loras.get("bias", None)

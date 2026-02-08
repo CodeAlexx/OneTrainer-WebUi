@@ -20,7 +20,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # Attribute name used to store online LoRA patches on modules
-_ONLINE_ATTR = "forge_online_loras"
+_ONLINE_ATTR = "_online_lora_patches"
 
 
 def _compute_lora_delta(
@@ -51,7 +51,7 @@ def apply_online_lora(
 ) -> None:
     """Attach online LoRA patches to model modules for forward-time application.
 
-    Patches are stored in ``module.forge_online_loras["weight"]`` as a list
+    Patches are stored in ``module._online_lora_patches["weight"]`` as a list
     of additive delta tensors.  The ``get_weight_and_bias()`` function in
     ``quantization.ops`` applies them during the forward pass.
     """

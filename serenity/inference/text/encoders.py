@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -13,6 +14,7 @@ from serenity.inference.text.t5 import T5Encoder
 __all__ = [
     "TextEncoderManager",
     "TextEncoderType",
+    "get_default_encoder_path",
     "get_required_encoders",
 ]
 
@@ -68,6 +70,74 @@ def get_required_encoders(
 
 
 # ---------------------------------------------------------------------------
+# Default HuggingFace encoder paths
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _EncoderPath:
+    """Descriptor for locating a text encoder on HuggingFace."""
+
+    repo: str
+    subfolder: str | None = None
+    tokenizer_subfolder: str | None = None
+    use_projection: bool = False
+
+
+# Canonical repos shared across architectures.
+_CLIP_L_REPO = "openai/clip-vit-large-patch14"
+_SDXL_REPO = "stabilityai/stable-diffusion-xl-base-1.0"
+_T5_XXL_REPO = "google/t5-v1_1-xxl"
+
+_DEFAULT_ENCODER_PATHS: dict[tuple[ModelArchitecture, TextEncoderType], _EncoderPath] = {
+    # SD 1.5
+    (ModelArchitecture.SD15, TextEncoderType.CLIP_L): _EncoderPath(repo=_CLIP_L_REPO),
+    # SDXL
+    (ModelArchitecture.SDXL, TextEncoderType.CLIP_L): _EncoderPath(repo=_CLIP_L_REPO),
+    (ModelArchitecture.SDXL, TextEncoderType.CLIP_G): _EncoderPath(
+        repo=_SDXL_REPO,
+        subfolder="text_encoder_2",
+        tokenizer_subfolder="tokenizer_2",
+        use_projection=True,
+    ),
+    # SDXL Refiner
+    (ModelArchitecture.SDXL_REFINER, TextEncoderType.CLIP_G): _EncoderPath(
+        repo=_SDXL_REPO,
+        subfolder="text_encoder_2",
+        tokenizer_subfolder="tokenizer_2",
+        use_projection=True,
+    ),
+    # SD3
+    (ModelArchitecture.SD3, TextEncoderType.CLIP_L): _EncoderPath(repo=_CLIP_L_REPO),
+    (ModelArchitecture.SD3, TextEncoderType.CLIP_G): _EncoderPath(
+        repo=_SDXL_REPO,
+        subfolder="text_encoder_2",
+        tokenizer_subfolder="tokenizer_2",
+        use_projection=True,
+    ),
+    (ModelArchitecture.SD3, TextEncoderType.T5_XXL): _EncoderPath(repo=_T5_XXL_REPO),
+    # Flux Dev
+    (ModelArchitecture.FLUX_DEV, TextEncoderType.CLIP_L): _EncoderPath(repo=_CLIP_L_REPO),
+    (ModelArchitecture.FLUX_DEV, TextEncoderType.T5_XXL): _EncoderPath(repo=_T5_XXL_REPO),
+    # Flux Schnell
+    (ModelArchitecture.FLUX_SCHNELL, TextEncoderType.CLIP_L): _EncoderPath(repo=_CLIP_L_REPO),
+    (ModelArchitecture.FLUX_SCHNELL, TextEncoderType.T5_XXL): _EncoderPath(repo=_T5_XXL_REPO),
+    # Chroma
+    (ModelArchitecture.CHROMA, TextEncoderType.T5_XXL): _EncoderPath(repo=_T5_XXL_REPO),
+    # Wan
+    (ModelArchitecture.WAN, TextEncoderType.T5_XXL): _EncoderPath(repo=_T5_XXL_REPO),
+}
+
+
+def get_default_encoder_path(
+    architecture: ModelArchitecture,
+    encoder_type: TextEncoderType,
+) -> _EncoderPath | None:
+    """Return the default HuggingFace path for an encoder, or ``None``."""
+    return _DEFAULT_ENCODER_PATHS.get((architecture, encoder_type))
+
+
+# ---------------------------------------------------------------------------
 # Manager
 # ---------------------------------------------------------------------------
 
@@ -91,29 +161,69 @@ class TextEncoderManager:
     ) -> CLIPEncoder | T5Encoder:
         """Return a cached encoder, creating an unloaded stub if absent."""
         if encoder_type not in self._encoders:
-            if encoder_type in (TextEncoderType.CLIP_L, TextEncoderType.CLIP_G):
+            if encoder_type == TextEncoderType.CLIP_L:
                 self._encoders[encoder_type] = CLIPEncoder()
+            elif encoder_type == TextEncoderType.CLIP_G:
+                self._encoders[encoder_type] = CLIPEncoder(use_projection=True)
             elif encoder_type == TextEncoderType.T5_XXL:
                 self._encoders[encoder_type] = T5Encoder()
             else:
                 raise ValueError(f"Unsupported encoder type: {encoder_type}")
         return self._encoders[encoder_type]
 
+    def load_encoder(
+        self,
+        encoder_type: TextEncoderType,
+        model_path: str,
+        dtype: Any = None,
+        device: str = "cpu",
+        subfolder: str | None = None,
+        tokenizer_subfolder: str | None = None,
+    ) -> None:
+        """Load a specific encoder by type with an explicit path.
+
+        Args:
+            encoder_type: Which encoder to load.
+            model_path: HuggingFace repo ID or local directory.
+            dtype: Torch dtype for model weights.
+            device: Target device string.
+            subfolder: Optional subfolder for model weights.
+            tokenizer_subfolder: Optional subfolder for tokenizer.
+        """
+        import torch
+
+        if dtype is None:
+            dtype = torch.float16
+
+        encoder = self.get_encoder(encoder_type)
+        if not encoder.is_loaded:
+            encoder._dtype = dtype
+            encoder._device = device
+            if isinstance(encoder, CLIPEncoder):
+                encoder.load(
+                    model_path,
+                    subfolder=subfolder,
+                    tokenizer_subfolder=tokenizer_subfolder,
+                )
+            else:
+                encoder.load(model_path)
+            logger.info("Loaded %s from %s", encoder_type.value, model_path)
+
     # -- lifecycle -----------------------------------------------------------
 
     def load_for_model(
         self,
         model_architecture: ModelArchitecture,
-        model_path: str,
         dtype: Any = None,
         device: str = "cpu",
     ) -> None:
         """Load all text encoders required by *model_architecture*.
 
+        Uses :func:`get_default_encoder_path` to resolve HuggingFace
+        repos for each encoder type.
+
         Args:
             model_architecture: Target model architecture.
-            model_path: Base path for encoder weights (may need
-                sub-directory conventions per encoder type).
             dtype: Torch dtype for model weights.
             device: Target device string (e.g. ``"cuda"``).
         """
@@ -124,12 +234,27 @@ class TextEncoderManager:
 
         required = get_required_encoders(model_architecture)
         for enc_type in required:
-            encoder = self.get_encoder(enc_type)
-            if not encoder.is_loaded:
-                encoder._dtype = dtype
-                encoder._device = device
-                encoder.load(model_path)
-                logger.info("Loaded %s encoder for %s", enc_type.value, model_architecture.value)
+            enc_path = get_default_encoder_path(model_architecture, enc_type)
+            if enc_path is None:
+                logger.warning(
+                    "No default path for %s / %s — skipping",
+                    model_architecture.value,
+                    enc_type.value,
+                )
+                continue
+            self.load_encoder(
+                enc_type,
+                model_path=enc_path.repo,
+                dtype=dtype,
+                device=device,
+                subfolder=enc_path.subfolder,
+                tokenizer_subfolder=enc_path.tokenizer_subfolder,
+            )
+            logger.info(
+                "Loaded %s encoder for %s",
+                enc_type.value,
+                model_architecture.value,
+            )
 
     def unload_all(self) -> None:
         """Unload and discard all cached encoders."""

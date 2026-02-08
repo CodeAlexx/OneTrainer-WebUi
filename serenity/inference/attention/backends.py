@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Callable
 from enum import Enum
@@ -163,9 +164,12 @@ def get_attention_fn(backend: AttentionType) -> Callable[..., Tensor]:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-# Cache the selected function after first call.
-_cached_fn: Callable[..., Tensor] | None = None
-_cached_backend: AttentionType | None = None
+
+@functools.lru_cache(maxsize=1)
+def _resolve_auto_backend() -> tuple[AttentionType, Callable[..., Tensor]]:
+    """Select and cache the best auto-detected backend (lazy, once)."""
+    selected = select_best_backend("auto")
+    return selected, get_attention_fn(selected)
 
 
 def attention(
@@ -190,16 +194,10 @@ def attention(
     Returns:
         Output tensor ``(batch, seq_len, heads * dim_head)``.
     """
-    global _cached_fn, _cached_backend
-
-    if _cached_fn is not None and backend == "auto" and _cached_backend is not None:
-        return _cached_fn(q, k, v, heads, mask=mask)
+    if backend == "auto":
+        _selected, fn = _resolve_auto_backend()
+        return fn(q, k, v, heads, mask=mask)
 
     selected = select_best_backend(backend)
     fn = get_attention_fn(selected)
-
-    if backend == "auto":
-        _cached_fn = fn
-        _cached_backend = selected
-
     return fn(q, k, v, heads, mask=mask)

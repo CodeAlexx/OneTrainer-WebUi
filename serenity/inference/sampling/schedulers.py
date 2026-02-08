@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from enum import Enum
 
 import numpy as np
@@ -111,7 +112,12 @@ def beta_scheduler(
 
     Uses the beta CDF to concentrate steps where they matter most.
     """
-    from scipy import stats as sp_stats
+    try:
+        from scipy import stats as sp_stats
+    except ImportError as exc:
+        raise ImportError(
+            "beta_scheduler requires scipy. Install with: pip install scipy"
+        ) from exc
 
     # Quantile positions from the beta distribution
     ts = 1.0 - np.linspace(0, 1, n, endpoint=False)
@@ -218,7 +224,7 @@ def ays_scheduler(
 # Dispatcher
 # --------------------------------------------------------------------------- #
 
-_SCHEDULER_MAP: dict[SchedulerType, callable] = {
+_SCHEDULER_MAP: dict[SchedulerType, Callable[..., Tensor]] = {
     SchedulerType.NORMAL: normal_scheduler,
     SchedulerType.KARRAS: karras_scheduler,
     SchedulerType.EXPONENTIAL: exponential_scheduler,

@@ -2,52 +2,54 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import platform
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-
-if TYPE_CHECKING:
-    pass
 
 __all__ = ["attention_sdp", "attention_einsum", "is_available"]
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constants
+# Lazy constants (avoid side effects at import time)
 # ---------------------------------------------------------------------------
 
-# NVIDIA GPUs have a batch limit for SDP; non-NVIDIA can go higher.
-_SDP_BATCH_LIMIT: int = 2**15 if torch.cuda.is_available() else 2**31
 
-# ---------------------------------------------------------------------------
-# Windows SDP backend priority
-# ---------------------------------------------------------------------------
+@functools.lru_cache(maxsize=1)
+def _get_sdp_batch_limit() -> int:
+    """Get the SDP batch size limit (lazy, computed on first call)."""
+    return 2**15 if torch.cuda.is_available() else 2**31
 
-_sdp_context = None
 
-try:
-    if torch.cuda.is_available() and platform.system() == "Windows":
-        import inspect
+@functools.lru_cache(maxsize=1)
+def _get_sdp_context():
+    """Get the Windows SDP context manager factory (lazy, computed on first call).
 
-        from torch.nn.attention import SDPBackend, sdpa_kernel
+    Returns a callable that creates a context manager, or ``None``.
+    """
+    try:
+        if torch.cuda.is_available() and platform.system() == "Windows":
+            import inspect
 
-        if "set_priority" in inspect.signature(sdpa_kernel).parameters:
-            _priority = [
-                SDPBackend.FLASH_ATTENTION,
-                SDPBackend.EFFICIENT_ATTENTION,
-                SDPBackend.MATH,
-            ]
-            if hasattr(SDPBackend, "CUDNN_ATTENTION"):
-                _priority.insert(0, SDPBackend.CUDNN_ATTENTION)
-            _sdp_context = lambda: sdpa_kernel(_priority, set_priority=True)  # noqa: E731
-except Exception:
-    pass
+            from torch.nn.attention import SDPBackend, sdpa_kernel
+
+            if "set_priority" in inspect.signature(sdpa_kernel).parameters:
+                priority = [
+                    SDPBackend.FLASH_ATTENTION,
+                    SDPBackend.EFFICIENT_ATTENTION,
+                    SDPBackend.MATH,
+                ]
+                if hasattr(SDPBackend, "CUDNN_ATTENTION"):
+                    priority.insert(0, SDPBackend.CUDNN_ATTENTION)
+                return lambda: sdpa_kernel(priority, set_priority=True)
+    except Exception:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +69,9 @@ def is_available() -> bool:
 
 def _sdpa(q: Tensor, k: Tensor, v: Tensor, attn_mask: Tensor | None = None) -> Tensor:
     """Thin wrapper around F.scaled_dot_product_attention with optional context."""
-    if _sdp_context is not None:
-        with _sdp_context():
+    ctx = _get_sdp_context()
+    if ctx is not None:
+        with ctx():
             return F.scaled_dot_product_attention(
                 q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False,
             )
@@ -115,7 +118,8 @@ def attention_sdp(
         if attn_mask.ndim == 3:
             attn_mask = attn_mask.unsqueeze(1)
 
-    if _SDP_BATCH_LIMIT >= b:
+    batch_limit = _get_sdp_batch_limit()
+    if batch_limit >= b:
         out = _sdpa(q, k, v, attn_mask=attn_mask)
         out = out.transpose(1, 2).reshape(b, seq_len, inner_dim)
     else:
@@ -123,8 +127,8 @@ def attention_sdp(
         out = torch.empty(
             (b, seq_len, inner_dim), dtype=q.dtype, layout=q.layout, device=q.device,
         )
-        for i in range(0, b, _SDP_BATCH_LIMIT):
-            end = min(i + _SDP_BATCH_LIMIT, b)
+        for i in range(0, b, batch_limit):
+            end = min(i + batch_limit, b)
             m = attn_mask
             if m is not None and m.shape[0] > 1:
                 m = m[i:end]

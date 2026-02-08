@@ -93,6 +93,20 @@ class GGUFLinear(QuantizedLinear):
             compute_dtype=compute_dtype,
         )
 
+    def _apply(self, fn, recurse=True):
+        """Override to prevent PyTorch from casting GGUF quantized weights."""
+        # Only apply the function to non-GGUF tensors
+        # GGUF weights should stay in their quantized format
+        for key, param in self._parameters.items():
+            if param is not None and not hasattr(param, "gguf_cls"):
+                self._parameters[key] = fn(param)
+        for key, buf in self._buffers.items():
+            if buf is not None:
+                self._buffers[key] = fn(buf)
+        for module in self.children():
+            module._apply(fn, recurse)
+        return self
+
     def dequantize_weight(self) -> torch.Tensor:
         """Dequantize GGUF weight to compute_dtype."""
         return dequantize_tensor(self.weight, self.compute_dtype)
