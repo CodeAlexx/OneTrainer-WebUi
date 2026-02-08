@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -88,3 +89,19 @@ class BnbLinear4bit(QuantizedLinear):
         weight = self.dequantize_weight().to(x.dtype)
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, weight, bias)
+
+    def _load_from_state_dict(
+        self, state_dict: dict, prefix: str, *args: Any, **kwargs: Any,
+    ) -> None:
+        """Detect and handle pre-quantized BnB weights."""
+        quant_state_key = f"{prefix}weight.quant_state"
+        absmax_key = f"{prefix}weight.absmax"
+
+        # Check for pre-quantized BnB format
+        if quant_state_key in state_dict or absmax_key in state_dict:
+            # Pre-quantized: load directly into inner module
+            if self._inner is not None:
+                self._inner._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+            return
+
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)

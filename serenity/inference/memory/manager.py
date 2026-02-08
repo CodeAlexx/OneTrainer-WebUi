@@ -190,6 +190,47 @@ class LoadedModel:
         self.loaded_size = max(0, self.loaded_size - freed)
         return freed
 
+    def partially_load(self, budget_bytes: int) -> int:
+        """Incrementally load CPU-resident parameters into GPU up to *budget*.
+
+        After another model is evicted, call this to opportunistically use
+        freed VRAM for parameters that are currently offloaded to CPU.
+
+        Args:
+            budget_bytes: Maximum bytes to load.
+
+        Returns:
+            Number of bytes actually loaded.
+        """
+        model = self.model
+        if model is None or self.device.type != "cuda":
+            return 0
+
+        # Collect CPU-resident parameters, sorted largest-first for bin-packing.
+        cpu_params: list[tuple[int, str, str, nn.Parameter]] = []
+        for mod_name, module in model.named_modules():
+            for pname, param in module.named_parameters(recurse=False):
+                if param.device.type == "cpu":
+                    size = param.numel() * param.element_size()
+                    cpu_params.append((size, mod_name, pname, param))
+
+        cpu_params.sort(key=lambda x: x[0], reverse=True)
+
+        loaded = 0
+        for size, _mod_name, _pname, param in cpu_params:
+            if loaded + size > budget_bytes:
+                continue  # Try smaller params (bin-packing).
+            param.data = param.data.to(self.device, non_blocking=True)
+            loaded += size
+            if loaded >= budget_bytes:
+                break
+
+        if loaded > 0:
+            self.loaded_size += loaded
+            logger.debug("Partially loaded %d bytes onto %s", loaded, self.device)
+
+        return loaded
+
 
 # ---------------------------------------------------------------------------
 # ModelManager
@@ -272,7 +313,10 @@ class ModelManager:
         """Evict models until at least *bytes_needed* VRAM is available.
 
         Uses smart memory mode: checks actual free VRAM first and only
-        evicts when truly necessary.
+        evicts when truly necessary.  After eviction, any leftover freed
+        space is offered to remaining loaded models via
+        :meth:`LoadedModel.partially_load` so that partially-offloaded
+        models can opportunistically use the reclaimed VRAM.
         """
         # Purge dead entries first.
         self.loaded_models = [lm for lm in self.loaded_models if lm.is_alive]
@@ -294,7 +338,37 @@ class ModelManager:
             torch.cuda.empty_cache()
             gc.collect()
 
+        # Check RAM pressure and unload from CPU if needed.
+        from serenity.inference.memory.ram import is_ram_pressure_high
+
+        if is_ram_pressure_high():
+            logger.warning("System RAM pressure high, releasing pinned memory")
+            self._release_ram_pressure()
+
+        # Opportunistically load more of remaining models into freed VRAM.
+        remaining_budget = freed - bytes_needed
+        if remaining_budget > 0:
+            for lm in self.loaded_models:
+                if lm.offloaded_size > 0 and lm.is_alive:
+                    used = lm.partially_load(remaining_budget)
+                    remaining_budget -= used
+                    if remaining_budget <= 0:
+                        break
+
         return freed
+
+    def _release_ram_pressure(self) -> None:
+        """Release CPU-resident model data when system RAM is under pressure."""
+        # Find models that have pinned CPU tensors and unpin them.
+        for lm in self.loaded_models:
+            model = lm.model
+            if model is None:
+                continue
+            for param in model.parameters():
+                if param.device.type == "cpu" and param.is_pinned():
+                    param.data = param.data.clone()  # Unpin
+
+        gc.collect()
 
     # ------------------------------------------------------------------
     # Teardown

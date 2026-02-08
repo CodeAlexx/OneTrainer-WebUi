@@ -142,10 +142,18 @@ class VAEDecoder:
             else:
                 pixels = self._decode_tiled(scaled, tile_size, overlap)
         else:
-            if is_3d:
-                pixels = self._decode_single_3d(scaled)
-            else:
-                pixels = self._decode_single(scaled)
+            try:
+                if is_3d:
+                    pixels = self._decode_single_3d(scaled)
+                else:
+                    pixels = self._decode_single(scaled)
+            except torch.cuda.OutOfMemoryError:
+                logger.warning("VAE decode OOM -- falling back to tiled decoding")
+                torch.cuda.empty_cache()
+                if is_3d:
+                    pixels = self._decode_tiled_3d(scaled, tile_size, overlap)
+                else:
+                    pixels = self._decode_tiled(scaled, tile_size, overlap)
 
         # Clamp to [0, 1]
         return pixels.clamp(0.0, 1.0)

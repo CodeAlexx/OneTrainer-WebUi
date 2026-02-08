@@ -26,6 +26,9 @@ __all__ = [
     "linear_quadratic_scheduler",
     "ays_scheduler",
     "turbo_scheduler",
+    "polyexponential_scheduler",
+    "kl_optimal_scheduler",
+    "bong_tangent_scheduler",
 ]
 
 
@@ -42,6 +45,9 @@ class SchedulerType(str, Enum):
     LINEAR_QUADRATIC = "linear_quadratic"
     AYS = "ays"
     TURBO = "turbo"
+    POLYEXPONENTIAL = "polyexponential"
+    KL_OPTIMAL = "kl_optimal"
+    BONG_TANGENT = "bong_tangent"
 
 
 # --------------------------------------------------------------------------- #
@@ -228,6 +234,38 @@ def turbo_scheduler(n: int, sigma_min: float, sigma_max: float) -> Tensor:
     return sigmas
 
 
+def polyexponential_scheduler(
+    n: int, sigma_min: float, sigma_max: float, **kwargs: object,
+) -> Tensor:
+    """Polynomial-blended exponential scheduler."""
+    rho = float(kwargs.get("rho", 1.0))  # type: ignore[arg-type]
+    sigmas = torch.linspace(sigma_max ** (1 / rho), sigma_min ** (1 / rho), n) ** rho
+    return torch.cat([sigmas, sigmas.new_zeros(1)])
+
+
+def kl_optimal_scheduler(
+    n: int, sigma_min: float, sigma_max: float, **kwargs: object,
+) -> Tensor:
+    """KL-divergence optimal sigma spacing."""
+    alpha_min = torch.arctan(torch.tensor(sigma_min))
+    alpha_max = torch.arctan(torch.tensor(sigma_max))
+    alphas = torch.linspace(float(alpha_max), float(alpha_min), n)
+    sigmas = torch.tan(alphas)
+    return torch.cat([sigmas, sigmas.new_zeros(1)])
+
+
+def bong_tangent_scheduler(
+    n: int, sigma_min: float, sigma_max: float, **kwargs: object,
+) -> Tensor:
+    """Tangent-based sigma schedule for smooth acceleration."""
+    t = torch.linspace(0, 1, n)
+    tan_quarter_pi = torch.tan(torch.tensor(torch.pi / 4))
+    sigmas = sigma_min + (sigma_max - sigma_min) * (
+        1.0 - torch.tan(t * (torch.pi / 4)) / tan_quarter_pi
+    )
+    return torch.cat([sigmas, sigmas.new_zeros(1)])
+
+
 # --------------------------------------------------------------------------- #
 # Dispatcher
 # --------------------------------------------------------------------------- #
@@ -243,6 +281,9 @@ _SCHEDULER_MAP: dict[SchedulerType, Callable[..., Tensor]] = {
     SchedulerType.LINEAR_QUADRATIC: linear_quadratic_scheduler,
     SchedulerType.AYS: ays_scheduler,
     SchedulerType.TURBO: turbo_scheduler,
+    SchedulerType.POLYEXPONENTIAL: polyexponential_scheduler,
+    SchedulerType.KL_OPTIMAL: kl_optimal_scheduler,
+    SchedulerType.BONG_TANGENT: bong_tangent_scheduler,
 }
 
 

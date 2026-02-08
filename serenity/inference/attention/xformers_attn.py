@@ -53,6 +53,9 @@ def attention_xformers(
     v: Tensor,
     heads: int,
     mask: Tensor | None = None,
+    *,
+    skip_reshape: bool = False,
+    skip_output_reshape: bool = False,
 ) -> Tensor:
     """Compute attention via xformers memory-efficient attention.
 
@@ -64,6 +67,8 @@ def attention_xformers(
         v: Value tensor, same shape.
         heads: Number of attention heads.
         mask: Optional attention mask.
+        skip_reshape: Skip initial Q/K/V reshape to multi-head format.
+        skip_output_reshape: Skip reshaping output back.
 
     Returns:
         Output tensor ``(batch, seq_len, heads * dim_head)``.
@@ -73,10 +78,13 @@ def attention_xformers(
     b, seq_len, inner_dim = q.shape
     dim_head = inner_dim // heads
 
-    # Reshape to (batch, seq, heads, dim_head) — xformers BMHK format
-    q_x = q.reshape(b, seq_len, heads, dim_head)
-    k_x = k.reshape(b, seq_len, heads, dim_head)
-    v_x = v.reshape(b, seq_len, heads, dim_head)
+    # Reshape to (batch, seq, heads, dim_head) -- xformers BMHK format
+    if not skip_reshape:
+        q_x = q.reshape(b, seq_len, heads, dim_head)
+        k_x = k.reshape(b, seq_len, heads, dim_head)
+        v_x = v.reshape(b, seq_len, heads, dim_head)
+    else:
+        q_x, k_x, v_x = q, k, v
 
     # Prepare mask if provided
     attn_bias: Tensor | None = None
@@ -106,12 +114,16 @@ def attention_xformers(
         if "(too new)" in str(exc):
             logger.warning("xformers does not support this GPU (RTX 50 series?)")
         else:
-            logger.warning("xformers error: %s — falling back to SDP", exc)
+            logger.warning("xformers error: %s -- falling back to SDP", exc)
         fallback = True
 
     if fallback:
-        return attention_sdp(q, k, v, heads, mask=mask)
+        return attention_sdp(
+            q, k, v, heads, mask=mask,
+            skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape,
+        )
 
     # Reshape back to (batch, seq, heads * dim_head)
-    out = out.reshape(b, seq_len, inner_dim)
+    if not skip_output_reshape:
+        out = out.reshape(b, seq_len, inner_dim)
     return out

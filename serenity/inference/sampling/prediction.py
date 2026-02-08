@@ -73,6 +73,12 @@ class Prediction:
         sigma = self._broadcast_sigma(sigma, noise)
         return latent + noise * sigma
 
+    def inverse_noise_scaling(
+        self, sigma: Tensor, scaled: Tensor, latent: Tensor,
+    ) -> Tensor:
+        """Reverse noise_scaling to recover original noise."""
+        raise NotImplementedError
+
     def sigma_to_timestep(self, sigma: Tensor) -> Tensor:
         """Convert continuous sigma to the discrete timestep the model expects."""
         raise NotImplementedError
@@ -91,6 +97,13 @@ class EpsPrediction(Prediction):
     ) -> Tensor:
         sigma = self._broadcast_sigma(sigma, model_output)
         return model_input - model_output * sigma
+
+    def inverse_noise_scaling(
+        self, sigma: Tensor, scaled: Tensor, latent: Tensor,
+    ) -> Tensor:
+        """Recover noise from scaled = latent + noise * sigma."""
+        sigma = self._broadcast_sigma(sigma, scaled)
+        return scaled / sigma
 
     def sigma_to_timestep(self, sigma: Tensor) -> Tensor:
         """Log-space lookup — requires a registered sigma schedule.
@@ -118,6 +131,13 @@ class VPrediction(Prediction):
             model_input * sd2 / (sigma**2 + sd2)
             - model_output * sigma * self.sigma_data / (sigma**2 + sd2) ** 0.5
         )
+
+    def inverse_noise_scaling(
+        self, sigma: Tensor, scaled: Tensor, latent: Tensor,
+    ) -> Tensor:
+        """Recover noise from scaled = latent + noise * sigma (v-prediction)."""
+        sigma = self._broadcast_sigma(sigma, scaled)
+        return (scaled - latent) / sigma
 
     def sigma_to_timestep(self, sigma: Tensor) -> Tensor:
         return sigma
@@ -159,6 +179,13 @@ class FlowPrediction(Prediction):
         if max_denoise:
             return noise
         return sigma * noise + (1.0 - sigma) * latent
+
+    def inverse_noise_scaling(
+        self, sigma: Tensor, scaled: Tensor, latent: Tensor,
+    ) -> Tensor:
+        """Recover noise from scaled = sigma * noise + (1 - sigma) * latent."""
+        sigma = self._broadcast_sigma(sigma, scaled)
+        return (scaled - (1.0 - sigma) * latent) / sigma.clamp(min=1e-8)
 
     def sigma_to_timestep(self, sigma: Tensor) -> Tensor:
         return sigma * self.multiplier
@@ -237,6 +264,13 @@ class FluxPrediction(FlowPrediction):
         """Flux treats sigma as the timestep directly."""
         return sigma
 
+    def inverse_noise_scaling(
+        self, sigma: Tensor, scaled: Tensor, latent: Tensor,
+    ) -> Tensor:
+        """Recover noise from scaled = sigma * noise + (1 - sigma) * latent."""
+        sigma = self._broadcast_sigma(sigma, scaled)
+        return (scaled - (1.0 - sigma) * latent) / sigma.clamp(min=1e-8)
+
     def apply_sigma_shift(self, sigmas: Tensor) -> Tensor:
         """Apply exponential time shift to a sigma schedule."""
         return _flux_time_shift_exponential(self.mu, 1.0, sigmas)
@@ -259,6 +293,13 @@ class EDMPrediction(Prediction):
             model_input * sd2 / (sigma**2 + sd2)
             + model_output * sigma * self.sigma_data / (sigma**2 + sd2) ** 0.5
         )
+
+    def inverse_noise_scaling(
+        self, sigma: Tensor, scaled: Tensor, latent: Tensor,
+    ) -> Tensor:
+        """Recover noise from EDM noise_scaling: scaled = latent + noise * sigma."""
+        sigma = self._broadcast_sigma(sigma, scaled)
+        return scaled / sigma.clamp(min=1e-8)
 
     def sigma_to_timestep(self, sigma: Tensor) -> Tensor:
         return 0.25 * sigma.log()

@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 
 from serenity.inference.models.base import BaseModelAdapter
 from serenity.inference.models.detection import ModelArchitecture
@@ -175,6 +176,52 @@ class FluxAdapter(BaseModelAdapter):
             "base_shift": 0.5,
             "max_shift": 1.15,
         }
+
+    @property
+    def supports_kontext(self) -> bool:
+        """Whether this adapter supports Kontext image conditioning."""
+        return True
+
+    @property
+    def distilled_cfg_scale(self) -> float:
+        """CFG scale modifier for distilled models. 0.0 = disabled."""
+        return 0.0
+
+    def prepare_kontext_conditioning(
+        self,
+        image_embeds: Tensor,
+        text_embeds: Tensor,
+    ) -> Tensor:
+        """Prepare Kontext-style conditioning by concatenating image and text embeddings.
+
+        Args:
+            image_embeds: Image encoder output (B, N_img, D).
+            text_embeds: Text encoder output (B, N_txt, D).
+
+        Returns:
+            Combined conditioning (B, N_img + N_txt, D).
+        """
+        # Ensure matching dimensions
+        if image_embeds.shape[-1] != text_embeds.shape[-1]:
+            # Project image embeds to match text dimension
+            logger.warning(
+                "Kontext dim mismatch: image=%d, text=%d — truncating/padding",
+                image_embeds.shape[-1],
+                text_embeds.shape[-1],
+            )
+            d = text_embeds.shape[-1]
+            if image_embeds.shape[-1] > d:
+                image_embeds = image_embeds[..., :d]
+            else:
+                pad = torch.zeros(
+                    *image_embeds.shape[:-1],
+                    d - image_embeds.shape[-1],
+                    device=image_embeds.device,
+                    dtype=image_embeds.dtype,
+                )
+                image_embeds = torch.cat([image_embeds, pad], dim=-1)
+
+        return torch.cat([image_embeds, text_embeds], dim=1)
 
     def prepare_conditioning(
         self,

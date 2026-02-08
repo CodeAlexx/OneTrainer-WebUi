@@ -13,9 +13,48 @@ __all__ = [
     "weight_decompose",
     "merge_lora_into_model",
     "unmerge_lora_from_model",
+    "dequantize_if_needed",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Quantized weight helpers (P4.13)
+# ---------------------------------------------------------------------------
+
+
+def dequantize_if_needed(weight: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    """Dequantize a weight tensor if it is a quantized type.
+
+    Returns ``(dequantized_weight, was_quantized)``.
+    """
+    # Check for GGUF quantized tensor (has gguf_cls attribute)
+    if hasattr(weight, "gguf_cls") and weight.gguf_cls is not None:
+        from serenity.inference.quantization.gguf import dequantize_tensor
+
+        return dequantize_tensor(weight, torch.float32), True
+
+    # Check for PyTorch native quantized tensors (qint8, quint8, etc.)
+    if weight.is_quantized:
+        return weight.dequantize().float(), True
+
+    # Check for __tensor_flatten__ protocol (generic quantized tensor, e.g. AffineQuantizedTensor)
+    if hasattr(weight, "__tensor_flatten__"):
+        try:
+            inner, _meta = weight.__tensor_flatten__()
+            main_key = next(iter(inner.keys()))
+            return inner[main_key].float(), True
+        except Exception:
+            pass
+
+    return weight, False
+
+
+def _is_quantized_layer(mod: nn.Module) -> bool:
+    """Check if a module is a quantized linear layer."""
+    cls_name = type(mod).__name__
+    return cls_name in ("BnbLinear4bit", "GGUFLinear", "Int8Linear", "NunchakuLinear")
 
 # Attribute used to store backup weights for unmerge
 _BACKUP_ATTR = "_serenity_lora_backup"
@@ -99,6 +138,9 @@ def merge_lora_to_weight(
 
         weight += strength * (alpha / rank) * (up @ down)
     """
+    # Dequantize if the weight is a quantized type (BnB, GGUF, etc.)
+    weight, was_quantized = dequantize_if_needed(weight)
+
     weight_backup_dtype = weight.dtype
     if computation_dtype != weight.dtype:
         weight = weight.to(computation_dtype)
@@ -260,6 +302,13 @@ def merge_lora_into_model(
         alpha_tensor = tensors.get("alpha")
         alpha_val = alpha_tensor.item() if alpha_tensor is not None else None
 
+        # For quantized layers, use the layer's dequantize method for best accuracy
+        is_quant = _is_quantized_layer(mod)
+        if is_quant and hasattr(mod, "dequantize_weight"):
+            source_weight = mod.dequantize_weight()
+        else:
+            source_weight = weight_param.data
+
         patch = {
             "type": "diff",
             "up": up,
@@ -267,8 +316,17 @@ def merge_lora_into_model(
             "alpha": alpha_val,
         }
         new_weight = merge_lora_to_weight(
-            weight_param.data, [patch], strength=strength
+            source_weight, [patch], strength=strength
         )
+
+        if is_quant:
+            # For quantized layers, store the merged (dequantized) result.
+            # The quantized layer will handle re-quantization on next forward.
+            logger.debug(
+                "Merging LoRA into quantized layer %s (%s)",
+                prefix,
+                type(mod).__name__,
+            )
         weight_param.data.copy_(new_weight)
         merged_count += 1
 

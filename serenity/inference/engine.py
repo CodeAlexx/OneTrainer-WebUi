@@ -25,6 +25,7 @@ from serenity.inference.models.loader import (
     load_state_dict,
 )
 from serenity.inference.sampling.cfg import apply_cfg
+from serenity.inference.utils.interrupt import check_interrupt
 from serenity.inference.sampling.conditioning import Conditioning, create_noise
 from serenity.inference.sampling.prediction import PredictionType, get_prediction
 from serenity.inference.sampling.sampler import SamplerType, create_model_fn, sample
@@ -196,6 +197,7 @@ class InferenceEngine:
             params["prompt"],
             params["negative_prompt"],
         )
+        check_interrupt()
 
         # Step 4: Get prediction type from adapter or model config
         prediction_type_str = "eps"
@@ -296,6 +298,7 @@ class InferenceEngine:
 
         # Step 9: Decode with VAE
         images = self._decode_latents(latents)
+        check_interrupt()
         logger.debug("Decoded %d images", len(images))
 
         elapsed = time.perf_counter() - t0
@@ -646,6 +649,7 @@ class InferenceEngine:
         uncond: Tensor | None,
         added_cond_kwargs_cond: dict | None = None,
         added_cond_kwargs_uncond: dict | None = None,
+        batch_cfg: bool = True,
     ) -> Callable:
         """Create the denoising function for the sampler.
 
@@ -653,6 +657,13 @@ class InferenceEngine:
         that handles sigma-to-discrete timestep conversion and the
         diffusers ``encoder_hidden_states`` call signature. For SDXL,
         also passes ``added_cond_kwargs`` with pooled embeds and time_ids.
+
+        Parameters
+        ----------
+        batch_cfg : bool
+            When True and CFG is active, batch the conditional and
+            unconditional forward passes into a single model call by
+            concatenating along the batch dimension.
         """
         if model is not None and self._log_sigmas is not None:
             log_sigmas = self._log_sigmas
@@ -661,39 +672,83 @@ class InferenceEngine:
             model_dtype = next(model.parameters()).dtype
 
             def denoise_fn(x: Tensor, sigma: Tensor) -> Tensor:
+                # Interrupt check at start of each sampling step
+                check_interrupt()
+
                 # c_in scaling for model input; denoised uses raw x
                 model_input = prediction.calculate_input(sigma, x)
                 timestep = InferenceEngine._sigma_to_discrete(sigma, log_sigmas)
                 inp = model_input.to(dtype=model_dtype)
 
-                unet_kwargs: dict[str, Any] = {
-                    "encoder_hidden_states": cond,
-                }
-                if added_cond_kwargs_cond is not None:
-                    unet_kwargs["added_cond_kwargs"] = added_cond_kwargs_cond
-
-                with torch.no_grad():
-                    raw_out = model(inp, timestep, **unet_kwargs)
-                    cond_out = _extract_model_output(raw_out).to(x.dtype)
-                cond_denoised = prediction.calculate_denoised(
-                    sigma, cond_out, x,
-                )
-
+                # No CFG needed — single conditional pass
                 if uncond is None or cfg_scale == 1.0:
-                    return cond_denoised
+                    unet_kwargs: dict[str, Any] = {
+                        "encoder_hidden_states": cond,
+                    }
+                    if added_cond_kwargs_cond is not None:
+                        unet_kwargs["added_cond_kwargs"] = added_cond_kwargs_cond
 
-                uncond_kwargs: dict[str, Any] = {
-                    "encoder_hidden_states": uncond,
-                }
-                if added_cond_kwargs_uncond is not None:
-                    uncond_kwargs["added_cond_kwargs"] = added_cond_kwargs_uncond
+                    with torch.no_grad():
+                        raw_out = model(inp, timestep, **unet_kwargs)
+                        cond_out = _extract_model_output(raw_out).to(x.dtype)
+                    return prediction.calculate_denoised(sigma, cond_out, x)
 
-                with torch.no_grad():
-                    raw_out = model(inp, timestep, **uncond_kwargs)
-                    uncond_out = _extract_model_output(raw_out).to(x.dtype)
-                uncond_denoised = prediction.calculate_denoised(
-                    sigma, uncond_out, x,
-                )
+                # CFG path: batched or sequential
+                if batch_cfg:
+                    # Batch cond+uncond into a single forward pass
+                    batched_inp = torch.cat([inp, inp], dim=0)
+                    batched_ts = torch.cat([timestep, timestep], dim=0) if timestep.ndim > 0 else timestep
+
+                    # Merge encoder_hidden_states
+                    batched_enc = torch.cat([cond, uncond], dim=0)
+                    batched_kwargs: dict[str, Any] = {
+                        "encoder_hidden_states": batched_enc,
+                    }
+
+                    # Merge added_cond_kwargs (SDXL)
+                    if added_cond_kwargs_cond is not None and added_cond_kwargs_uncond is not None:
+                        merged_added: dict[str, Any] = {}
+                        for key in added_cond_kwargs_cond:
+                            c_val = added_cond_kwargs_cond[key]
+                            u_val = added_cond_kwargs_uncond[key]
+                            if isinstance(c_val, Tensor) and isinstance(u_val, Tensor):
+                                merged_added[key] = torch.cat([c_val, u_val], dim=0)
+                            else:
+                                merged_added[key] = c_val
+                        batched_kwargs["added_cond_kwargs"] = merged_added
+                    elif added_cond_kwargs_cond is not None:
+                        batched_kwargs["added_cond_kwargs"] = added_cond_kwargs_cond
+
+                    with torch.no_grad():
+                        raw_out = model(batched_inp, batched_ts, **batched_kwargs)
+                        batched_out = _extract_model_output(raw_out).to(x.dtype)
+
+                    cond_out, uncond_out_t = batched_out.chunk(2, dim=0)
+                    cond_denoised = prediction.calculate_denoised(sigma, cond_out, x)
+                    uncond_denoised = prediction.calculate_denoised(sigma, uncond_out_t, x)
+                else:
+                    # Sequential: two separate forward passes
+                    cond_kwargs: dict[str, Any] = {
+                        "encoder_hidden_states": cond,
+                    }
+                    if added_cond_kwargs_cond is not None:
+                        cond_kwargs["added_cond_kwargs"] = added_cond_kwargs_cond
+
+                    with torch.no_grad():
+                        raw_out = model(inp, timestep, **cond_kwargs)
+                        cond_out = _extract_model_output(raw_out).to(x.dtype)
+                    cond_denoised = prediction.calculate_denoised(sigma, cond_out, x)
+
+                    uncond_kwargs: dict[str, Any] = {
+                        "encoder_hidden_states": uncond,
+                    }
+                    if added_cond_kwargs_uncond is not None:
+                        uncond_kwargs["added_cond_kwargs"] = added_cond_kwargs_uncond
+
+                    with torch.no_grad():
+                        raw_out = model(inp, timestep, **uncond_kwargs)
+                        uncond_out_t = _extract_model_output(raw_out).to(x.dtype)
+                    uncond_denoised = prediction.calculate_denoised(sigma, uncond_out_t, x)
 
                 return apply_cfg(
                     cond_denoised, uncond_denoised, cfg_scale,

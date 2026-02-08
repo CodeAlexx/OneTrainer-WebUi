@@ -86,6 +86,9 @@ def attention_sdp(
     v: Tensor,
     heads: int,
     mask: Tensor | None = None,
+    *,
+    skip_reshape: bool = False,
+    skip_output_reshape: bool = False,
 ) -> Tensor:
     """Compute attention via PyTorch scaled dot-product attention.
 
@@ -97,6 +100,8 @@ def attention_sdp(
         v: Value tensor, same shape.
         heads: Number of attention heads.
         mask: Optional attention mask.
+        skip_reshape: Skip initial Q/K/V reshape to multi-head format.
+        skip_output_reshape: Skip reshaping output back.
 
     Returns:
         Output tensor ``(batch, seq_len, heads * dim_head)``.
@@ -105,9 +110,10 @@ def attention_sdp(
     dim_head = inner_dim // heads
 
     # Reshape to (batch, heads, seq, dim_head)
-    q = q.view(b, seq_len, heads, dim_head).transpose(1, 2)
-    k = k.view(b, seq_len, heads, dim_head).transpose(1, 2)
-    v = v.view(b, seq_len, heads, dim_head).transpose(1, 2)
+    if not skip_reshape:
+        q = q.view(b, seq_len, heads, dim_head).transpose(1, 2)
+        k = k.view(b, seq_len, heads, dim_head).transpose(1, 2)
+        v = v.view(b, seq_len, heads, dim_head).transpose(1, 2)
 
     # Prepare mask
     attn_mask: Tensor | None = None
@@ -121,19 +127,30 @@ def attention_sdp(
     batch_limit = _get_sdp_batch_limit()
     if batch_limit >= b:
         out = _sdpa(q, k, v, attn_mask=attn_mask)
-        out = out.transpose(1, 2).reshape(b, seq_len, inner_dim)
+        if not skip_output_reshape:
+            out = out.transpose(1, 2).reshape(b, seq_len, inner_dim)
     else:
         # Chunk along batch dimension to respect NVIDIA limits
-        out = torch.empty(
-            (b, seq_len, inner_dim), dtype=q.dtype, layout=q.layout, device=q.device,
-        )
-        for i in range(0, b, batch_limit):
-            end = min(i + batch_limit, b)
-            m = attn_mask
-            if m is not None and m.shape[0] > 1:
-                m = m[i:end]
-            chunk_out = _sdpa(q[i:end], k[i:end], v[i:end], attn_mask=m)
-            out[i:end] = chunk_out.transpose(1, 2).reshape(-1, seq_len, inner_dim)
+        if skip_output_reshape:
+            # Output stays in (batch, heads, seq, dim_head) layout
+            out = torch.empty_like(q)
+            for i in range(0, b, batch_limit):
+                end = min(i + batch_limit, b)
+                m = attn_mask
+                if m is not None and m.shape[0] > 1:
+                    m = m[i:end]
+                out[i:end] = _sdpa(q[i:end], k[i:end], v[i:end], attn_mask=m)
+        else:
+            out = torch.empty(
+                (b, seq_len, inner_dim), dtype=q.dtype, layout=q.layout, device=q.device,
+            )
+            for i in range(0, b, batch_limit):
+                end = min(i + batch_limit, b)
+                m = attn_mask
+                if m is not None and m.shape[0] > 1:
+                    m = m[i:end]
+                chunk_out = _sdpa(q[i:end], k[i:end], v[i:end], attn_mask=m)
+                out[i:end] = chunk_out.transpose(1, 2).reshape(-1, seq_len, inner_dim)
 
     return out
 
@@ -149,8 +166,11 @@ def attention_einsum(
     v: Tensor,
     heads: int,
     mask: Tensor | None = None,
+    *,
+    skip_reshape: bool = False,
+    skip_output_reshape: bool = False,
 ) -> Tensor:
-    """Pure einsum attention — ultimate fallback, no external deps.
+    """Pure einsum attention -- ultimate fallback, no external deps.
 
     Uses chunked computation to prevent OOM on large sequences.
 
@@ -160,6 +180,8 @@ def attention_einsum(
         v: Value tensor, same shape.
         heads: Number of attention heads.
         mask: Optional attention mask.
+        skip_reshape: Skip initial Q/K/V reshape to multi-head format.
+        skip_output_reshape: Skip reshaping output back.
 
     Returns:
         Output tensor ``(batch, seq_len, heads * dim_head)``.
@@ -169,27 +191,28 @@ def attention_einsum(
     scale = dim_head ** -0.5
 
     # Reshape to (batch * heads, seq, dim_head)
-    q = (
-        q.unsqueeze(3)
-        .reshape(b, seq_len, heads, dim_head)
-        .permute(0, 2, 1, 3)
-        .reshape(b * heads, seq_len, dim_head)
-        .contiguous()
-    )
-    k = (
-        k.unsqueeze(3)
-        .reshape(b, seq_len, heads, dim_head)
-        .permute(0, 2, 1, 3)
-        .reshape(b * heads, seq_len, dim_head)
-        .contiguous()
-    )
-    v = (
-        v.unsqueeze(3)
-        .reshape(b, seq_len, heads, dim_head)
-        .permute(0, 2, 1, 3)
-        .reshape(b * heads, seq_len, dim_head)
-        .contiguous()
-    )
+    if not skip_reshape:
+        q = (
+            q.unsqueeze(3)
+            .reshape(b, seq_len, heads, dim_head)
+            .permute(0, 2, 1, 3)
+            .reshape(b * heads, seq_len, dim_head)
+            .contiguous()
+        )
+        k = (
+            k.unsqueeze(3)
+            .reshape(b, seq_len, heads, dim_head)
+            .permute(0, 2, 1, 3)
+            .reshape(b * heads, seq_len, dim_head)
+            .contiguous()
+        )
+        v = (
+            v.unsqueeze(3)
+            .reshape(b, seq_len, heads, dim_head)
+            .permute(0, 2, 1, 3)
+            .reshape(b * heads, seq_len, dim_head)
+            .contiguous()
+        )
 
     # Compute attention scores via einsum
     sim = torch.einsum("b i d, b j d -> b i j", q, k) * scale
@@ -221,11 +244,12 @@ def attention_einsum(
     out = torch.einsum("b i j, b j d -> b i d", sim.to(v.dtype), v)
 
     # Reshape back to (batch, seq, heads * dim_head)
-    out = (
-        out.unsqueeze(0)
-        .reshape(b, heads, seq_len, dim_head)
-        .permute(0, 2, 1, 3)
-        .reshape(b, seq_len, inner_dim)
-    )
+    if not skip_output_reshape:
+        out = (
+            out.unsqueeze(0)
+            .reshape(b, heads, seq_len, dim_head)
+            .permute(0, 2, 1, 3)
+            .reshape(b, seq_len, inner_dim)
+        )
 
     return out

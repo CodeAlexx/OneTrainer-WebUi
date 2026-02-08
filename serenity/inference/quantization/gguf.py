@@ -122,6 +122,28 @@ class GGUFLinear(QuantizedLinear):
                 bias = bias.to(x.dtype)
         return F.linear(x, weight, bias)
 
+    def _load_from_state_dict(
+        self, state_dict: dict, prefix: str, *args: Any, **kwargs: Any,
+    ) -> None:
+        """Detect and handle pre-quantized GGUF weights in state dict."""
+        weight_key = f"{prefix}weight"
+
+        if weight_key in state_dict:
+            weight = state_dict[weight_key]
+            # Check if already GGUF-quantized
+            if hasattr(weight, "gguf_cls") or hasattr(weight, "gguf_quantization_type"):
+                # Store as-is, skip re-quantization
+                self.weight = nn.Parameter(weight, requires_grad=False)
+                del state_dict[weight_key]
+                # Handle bias
+                bias_key = f"{prefix}bias"
+                if bias_key in state_dict:
+                    self.bias = nn.Parameter(state_dict.pop(bias_key), requires_grad=False)
+                return
+
+        # Fall through to normal loading
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
 
 # ---------------------------------------------------------------------------
 # Model-level GGUF baking

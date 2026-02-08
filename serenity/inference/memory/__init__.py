@@ -7,12 +7,15 @@ from serenity.inference.memory.vram import (
     VRAMState,
     calculate_budget,
     detect_vram_state,
+    device_supports_non_blocking,
+    get_accelerator_type,
     get_free_memory,
     get_total_memory,
     is_cuda_available,
     is_linux,
     is_nvidia,
     is_windows,
+    is_xpu_available,
     minimum_inference_memory,
 )
 from serenity.inference.memory.streams import (
@@ -35,6 +38,11 @@ from serenity.inference.memory.manager import (
     LoadedModel,
     ModelManager,
 )
+from serenity.inference.memory.ram import (
+    get_ram_usage_ratio,
+    get_system_ram_info,
+    is_ram_pressure_high,
+)
 
 __all__ = [
     # vram
@@ -42,12 +50,15 @@ __all__ = [
     "VRAMState",
     "calculate_budget",
     "detect_vram_state",
+    "device_supports_non_blocking",
+    "get_accelerator_type",
     "get_free_memory",
     "get_total_memory",
     "is_cuda_available",
     "is_linux",
     "is_nvidia",
     "is_windows",
+    "is_xpu_available",
     "minimum_inference_memory",
     # streams
     "CastBuffer",
@@ -65,4 +76,8 @@ __all__ = [
     # manager
     "LoadedModel",
     "ModelManager",
+    # ram
+    "get_ram_usage_ratio",
+    "get_system_ram_info",
+    "is_ram_pressure_high",
 ]

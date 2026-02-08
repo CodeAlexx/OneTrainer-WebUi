@@ -6,7 +6,10 @@ import functools
 import logging
 from collections.abc import Callable
 from enum import Enum
+from typing import Any
 
+import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 __all__ = [
@@ -15,6 +18,7 @@ __all__ = [
     "detect_available_backends",
     "get_attention_fn",
     "select_best_backend",
+    "vae_attention",
 ]
 
 logger = logging.getLogger(__name__)
@@ -180,8 +184,11 @@ def attention(
     mask: Tensor | None = None,
     *,
     backend: str = "auto",
+    skip_reshape: bool = False,
+    skip_output_reshape: bool = False,
+    attn_precision: Any = None,
 ) -> Tensor:
-    """Unified attention entry point — dispatches to the best available backend.
+    """Unified attention entry point -- dispatches to the best available backend.
 
     Args:
         q: Query tensor ``(batch, seq_len, heads * dim_head)``.
@@ -190,14 +197,77 @@ def attention(
         heads: Number of attention heads.
         mask: Optional attention mask.
         backend: ``"auto"`` or a specific backend name.
+        skip_reshape: Skip the initial Q/K/V reshape to multi-head format
+            (caller has already reshaped).
+        skip_output_reshape: Skip reshaping the output back to
+            ``(batch, seq_len, heads * dim_head)``.
+        attn_precision: Optional ``torch.dtype`` to cast Q/K/V before
+            computation. The output is cast back to the original dtype.
 
     Returns:
         Output tensor ``(batch, seq_len, heads * dim_head)``.
     """
+    # Precision casting
+    orig_dtype = q.dtype
+    if attn_precision is not None:
+        q = q.to(attn_precision)
+        k = k.to(attn_precision)
+        v = v.to(attn_precision)
+
     if backend == "auto":
         _selected, fn = _resolve_auto_backend()
-        return fn(q, k, v, heads, mask=mask)
+        result = fn(
+            q, k, v, heads, mask=mask,
+            skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape,
+        )
+    else:
+        selected = select_best_backend(backend)
+        fn = get_attention_fn(selected)
+        result = fn(
+            q, k, v, heads, mask=mask,
+            skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape,
+        )
 
-    selected = select_best_backend(backend)
-    fn = get_attention_fn(selected)
-    return fn(q, k, v, heads, mask=mask)
+    # Cast back to original dtype if needed
+    if attn_precision is not None and result.dtype != orig_dtype:
+        result = result.to(orig_dtype)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# VAE-specific attention
+# ---------------------------------------------------------------------------
+
+
+def vae_attention(q: Tensor, k: Tensor, v: Tensor, heads: int = 1) -> Tensor:
+    """Attention for VAE with ``(B, C, H, W)`` spatial tensors.
+
+    Reshapes internally to ``(B*heads, H*W, C//heads)``, computes
+    attention via SDP, and reshapes back to ``(B, C, H, W)``.
+    Avoids unnecessary memory overhead during VAE decoding.
+
+    Args:
+        q: Query tensor ``(B, C, H, W)``.
+        k: Key tensor, same shape.
+        v: Value tensor, same shape.
+        heads: Number of attention heads.
+
+    Returns:
+        Output tensor ``(B, C, H, W)``.
+    """
+    B, C, H, W = q.shape
+    head_dim = C // heads
+    seq_len = H * W
+
+    # Reshape: (B, C, H, W) -> (B*heads, H*W, head_dim)
+    q = q.reshape(B * heads, head_dim, seq_len).transpose(1, 2)
+    k = k.reshape(B * heads, head_dim, seq_len).transpose(1, 2)
+    v = v.reshape(B * heads, head_dim, seq_len).transpose(1, 2)
+
+    # Use SDP (always available, handles VAE well)
+    out = F.scaled_dot_product_attention(q, k, v)
+
+    # Reshape back: (B*heads, H*W, head_dim) -> (B, C, H, W)
+    out = out.transpose(1, 2).reshape(B, C, H, W)
+    return out
