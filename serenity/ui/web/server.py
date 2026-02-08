@@ -1,4 +1,8 @@
-"""Serenity web UI server — FastAPI application factory and entry point."""
+"""Serenity API server — FastAPI application factory and entry point.
+
+Provides REST and WebSocket endpoints for inference and training.
+The browser-based frontend has been removed; use the TUI instead.
+"""
 
 from __future__ import annotations
 
@@ -8,14 +12,11 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["create_app", "main"]
-
-_STATIC_DIR = Path(__file__).parent / "static"
 
 
 def create_app(
@@ -40,7 +41,7 @@ def create_app(
     app = FastAPI(
         title="Serenity",
         version="0.1.0",
-        description="Serenity diffusion model inference UI",
+        description="Serenity inference API server",
     )
 
     # Store run config on app state for later retrieval.
@@ -48,7 +49,7 @@ def create_app(
     app.state.port = port
 
     # ------------------------------------------------------------------
-    # CORS — allow localhost development frontends
+    # CORS — allow external frontends (EriUI, etc.)
     # ------------------------------------------------------------------
     app.add_middleware(
         CORSMiddleware,
@@ -87,19 +88,11 @@ def create_app(
     app.include_router(router)
 
     # ------------------------------------------------------------------
-    # Static file mounts
+    # Output images served at /output/<filename>
     # ------------------------------------------------------------------
-    static_dir = _STATIC_DIR
-    static_dir.mkdir(parents=True, exist_ok=True)
-
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-
-    # Output images served at /output/<filename>
     app.mount("/output", StaticFiles(directory=str(output_path)), name="output")
-
-    # Static assets (HTML/CSS/JS) served at /static/<path>
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     # ------------------------------------------------------------------
     # WebSocket endpoint
@@ -119,29 +112,20 @@ def create_app(
             manager.disconnect(websocket)
 
     # ------------------------------------------------------------------
-    # Root — serve index.html
+    # Root — redirect to API docs
     # ------------------------------------------------------------------
+    from fastapi.responses import RedirectResponse
+
     @app.get("/")
-    async def index() -> FileResponse:
-        index_path = static_dir / "index.html"
-        if not index_path.exists():
-            # Return a minimal placeholder when the frontend hasn't been
-            # built yet so the server still starts cleanly.
-            from fastapi.responses import HTMLResponse
+    async def index() -> RedirectResponse:
+        return RedirectResponse(url="/docs")
 
-            return HTMLResponse(
-                "<html><body><h1>Serenity</h1>"
-                "<p>Frontend not built yet. API available at "
-                "<a href='/docs'>/docs</a>.</p></body></html>"
-            )
-        return FileResponse(str(index_path))
-
-    logger.info("Serenity app created (models=%s, output=%s)", models_dir, output_dir)
+    logger.info("Serenity API created (models=%s, output=%s)", models_dir, output_dir)
     return app
 
 
 def main() -> None:
-    """Run the Serenity web UI server."""
+    """Run the Serenity API server."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

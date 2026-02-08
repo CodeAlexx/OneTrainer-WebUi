@@ -12,6 +12,8 @@ from typing import Any, Callable, Generator
 
 import dearpygui.dearpygui as dpg
 
+from serenity.ui.theme import scaled
+
 __all__ = [
     "section",
     "labeled_input",
@@ -32,11 +34,11 @@ __all__ = [
     "INPUT_WIDTH",
 ]
 
-# Default label column width (sized for 4K readability with 22px font)
-LABEL_WIDTH = 280
+# Default label column width -- auto-scaled for display resolution
+LABEL_WIDTH = scaled(200)
 
-# Max width for input fields to prevent full-screen stretch on 4K
-INPUT_WIDTH = 420
+# Max width for input fields -- auto-scaled for display resolution
+INPUT_WIDTH = scaled(300)
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +409,7 @@ def time_entry(
         t = dpg.add_text(label, wrap=LABEL_WIDTH)
         if tip:
             tooltip(t, tip)
-        v_kw: dict[str, Any] = {"default_value": default_value, "width": 160, "format": "%.1f"}
+        v_kw: dict[str, Any] = {"default_value": default_value, "width": scaled(115), "format": "%.1f"}
         if value_tag:
             v_kw["tag"] = value_tag
         if callback:
@@ -417,7 +419,7 @@ def time_entry(
         u_kw: dict[str, Any] = {
             "items": unit_items,
             "default_value": default_unit,
-            "width": 160,
+            "width": scaled(115),
         }
         if unit_tag:
             u_kw["tag"] = unit_tag

@@ -26,7 +26,7 @@ from serenity.core.enums import (
     TimestepDistribution,
 )
 from serenity.ui.state import UIState
-from serenity.ui.theme import apply_dark_theme, create_start_button_theme, create_stop_button_theme, setup_fonts
+from serenity.ui.theme import apply_dark_theme, create_start_button_theme, create_stop_button_theme, scaled, setup_fonts
 from serenity.ui.widgets import enum_values
 
 __all__ = ["SerenityApp"]
@@ -63,13 +63,13 @@ class SerenityApp:
         dpg.create_context()
         dpg.create_viewport(
             title="Serenity - Training UI",
-            width=1600,
-            height=1000,
-            min_width=1000,
-            min_height=700,
+            width=scaled(1140),
+            height=scaled(720),
+            min_width=scaled(720),
+            min_height=scaled(500),
         )
 
-        setup_fonts(size=22)
+        setup_fonts()
         apply_dark_theme()
         self._build_ui()
 
@@ -96,7 +96,7 @@ class SerenityApp:
         with dpg.group(horizontal=True):
             # Brand
             dpg.add_text("Serenity", color=(86, 156, 240))
-            dpg.add_spacer(width=30)
+            dpg.add_spacer(width=scaled(20))
 
             # Model type dropdown
             model_types = [
@@ -120,11 +120,11 @@ class SerenityApp:
                 tag=TAG_MODEL_TYPE,
                 items=model_names,
                 default_value=current_mt,
-                width=180,
+                width=scaled(130),
                 callback=self._on_model_type_changed,
             )
 
-            dpg.add_spacer(width=16)
+            dpg.add_spacer(width=scaled(10))
 
             # Training method dropdown
             dpg.add_text("Method:", color=(160, 160, 175))
@@ -143,11 +143,11 @@ class SerenityApp:
                 tag=TAG_TRAINING_METHOD,
                 items=method_names,
                 default_value=current_tm,
-                width=140,
+                width=scaled(100),
                 callback=self._on_training_method_changed,
             )
 
-            dpg.add_spacer(width=30)
+            dpg.add_spacer(width=scaled(20))
 
             # Config preset
             dpg.add_text("Config:", color=(160, 160, 175))
@@ -155,22 +155,22 @@ class SerenityApp:
                 tag="config_preset",
                 items=self._list_presets(),
                 default_value="(new)",
-                width=200,
+                width=scaled(145),
                 callback=self._on_preset_selected,
             )
-            dpg.add_button(label="Save", callback=self._save_config, width=70)
-            dpg.add_button(label="Save As", callback=self._save_config_as, width=80)
-            dpg.add_button(label="Open", callback=self._open_config, width=70)
+            dpg.add_button(label="Save", callback=self._save_config, width=scaled(50))
+            dpg.add_button(label="Save As", callback=self._save_config_as, width=scaled(58))
+            dpg.add_button(label="Open", callback=self._open_config, width=scaled(50))
 
-            dpg.add_spacer(width=40)
+            dpg.add_spacer(width=scaled(28))
 
             # Train button -- prominent, right side
             dpg.add_button(
                 tag=TAG_TRAIN_BUTTON,
                 label="Start Training",
                 callback=self._toggle_training,
-                width=180,
-                height=36,
+                width=scaled(130),
+                height=scaled(26),
             )
             start_theme = create_start_button_theme()
             dpg.bind_item_theme(TAG_TRAIN_BUTTON, start_theme)
@@ -188,6 +188,7 @@ class SerenityApp:
         from serenity.ui.tabs.general import build_general_tab
         from serenity.ui.tabs.lora import build_lora_tab
         from serenity.ui.tabs.embedding import build_embedding_tab
+        from serenity.ui.tabs.inference import build_inference_tab
 
         with dpg.tab_bar(tag=TAG_TAB_BAR):
             with dpg.tab(label="  Model  "):
@@ -209,6 +210,8 @@ class SerenityApp:
 
             with dpg.tab(label="  Sampling  "):
                 build_sampling_tab(self.ui_state)
+            with dpg.tab(label="  Inference  "):
+                build_inference_tab()
             with dpg.tab(label="  Backup  "):
                 build_backup_tab(self.ui_state)
             with dpg.tab(label="  Settings  "):
@@ -225,30 +228,30 @@ class SerenityApp:
             dpg.add_progress_bar(
                 tag=TAG_STEP_PROGRESS,
                 default_value=0.0,
-                width=300,
+                width=scaled(215),
                 overlay="0 / 0",
             )
-            dpg.add_spacer(width=16)
+            dpg.add_spacer(width=scaled(12))
             dpg.add_text("Epoch", color=(130, 130, 145))
             dpg.add_progress_bar(
                 tag=TAG_EPOCH_PROGRESS,
                 default_value=0.0,
-                width=300,
+                width=scaled(215),
                 overlay="0 / 0",
             )
-            dpg.add_spacer(width=24)
+            dpg.add_spacer(width=scaled(16))
 
             # Status text
             dpg.add_text("Ready", tag=TAG_STATUS_LABEL, color=(100, 200, 130))
             dpg.add_text("", tag=TAG_ETA_LABEL, color=(130, 130, 145))
 
-            dpg.add_spacer(width=24)
+            dpg.add_spacer(width=scaled(16))
 
             # Utility buttons
             dpg.add_button(
                 label="Tensorboard",
                 callback=self._open_tensorboard,
-                width=120,
+                width=scaled(86),
             )
 
     # ------------------------------------------------------------------

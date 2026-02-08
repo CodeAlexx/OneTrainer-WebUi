@@ -11,6 +11,7 @@ from __future__ import annotations
 import dearpygui.dearpygui as dpg
 
 from serenity.ui.state import UIState
+from serenity.ui.theme import scaled
 from serenity.ui.widgets import (
     enum_values,
     labeled_checkbox,
@@ -36,8 +37,8 @@ from serenity.core.enums import (
 
 __all__ = ["build_training_tab"]
 
-# Column width for the 2-column layout (sized for 4K readability)
-_COL_W = 780
+# Column width for the 2-column layout -- auto-scaled
+_COL_W = scaled(560)
 
 
 # ---------------------------------------------------------------------------

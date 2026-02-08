@@ -1,13 +1,21 @@
-"""Dark theme configuration for the Serenity UI with 4K display support."""
+"""Dark theme configuration for the Serenity UI with auto display scaling."""
 
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 
 import dearpygui.dearpygui as dpg
 
-__all__ = ["apply_dark_theme", "setup_fonts", "create_start_button_theme", "create_stop_button_theme"]
+__all__ = [
+    "apply_dark_theme",
+    "setup_fonts",
+    "create_start_button_theme",
+    "create_stop_button_theme",
+    "UI_SCALE",
+    "scaled",
+]
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +57,59 @@ _RED_HI = (180, 45, 55)
 _RED_ACT = (155, 38, 48)
 
 
+# -- Display scale detection ------------------------------------------------
+
+def _detect_screen_height() -> int:
+    """Detect primary display height in pixels."""
+    # Try tkinter (most reliable, cross-platform)
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        h = root.winfo_screenheight()
+        root.destroy()
+        return h
+    except Exception:
+        pass
+
+    # Fallback: xrandr on Linux
+    try:
+        result = subprocess.run(
+            ["xrandr", "--query"],
+            capture_output=True, text=True, timeout=2,
+        )
+        for line in result.stdout.splitlines():
+            if "*" in line:
+                # e.g. "   3840x2160     60.00*+"
+                res = line.split()[0]
+                return int(res.split("x")[1])
+    except Exception:
+        pass
+
+    return 1080
+
+
+def _compute_ui_scale() -> float:
+    """Compute UI scale factor based on screen resolution.
+
+    Returns 1.0 for 1080p, scales up for higher resolutions.
+    """
+    h = _detect_screen_height()
+    if h <= 1200:
+        return 1.0
+    if h <= 1600:
+        return 1.15
+    return 1.4
+
+
+UI_SCALE: float = _compute_ui_scale()
+
+
+def scaled(value: int) -> int:
+    """Scale a base pixel value (designed for 1080p) to current display."""
+    return round(value * UI_SCALE)
+
+
 # -- Font setup -------------------------------------------------------------
 
 _FONT_SEARCH_PATHS = [
@@ -75,12 +136,15 @@ def _find_font(paths: list[str]) -> str | None:
     return None
 
 
-def setup_fonts(size: int = 22) -> None:
-    """Load a readable font at *size* px. Falls back to global font scale."""
+def setup_fonts(size: int = 0) -> None:
+    """Load a readable font scaled to the display. Falls back to global font scale."""
+    if size == 0:
+        size = scaled(16)
+
     font_path = _find_font(_FONT_SEARCH_PATHS)
     if font_path is None:
         log.warning("No TTF font found, using global font scale fallback")
-        dpg.set_global_font_scale(1.6)
+        dpg.set_global_font_scale(1.1 * UI_SCALE)
         return
 
     with dpg.font_registry():
@@ -92,13 +156,14 @@ def setup_fonts(size: int = 22) -> None:
             dpg.add_font(bold_path, size)
 
     dpg.bind_font(default_font)
-    log.info("Loaded font %s at %dpx", font_path, size)
+    log.info("Loaded font %s at %dpx (scale=%.2f)", font_path, size, UI_SCALE)
 
 
 # -- Theme -------------------------------------------------------------------
 
 def apply_dark_theme() -> None:
-    """Apply a modern dark theme tuned for 4K displays."""
+    """Apply a modern dark theme that scales with display resolution."""
+    s = UI_SCALE
     with dpg.theme() as global_theme:
         with dpg.theme_component(dpg.mvAll):
             # Backgrounds
@@ -156,21 +221,21 @@ def apply_dark_theme() -> None:
             dpg.add_theme_color(dpg.mvThemeCol_TableRowBgAlt, _SURFACE)
 
             # Rounding
-            dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 5)
-            dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 8)
-            dpg.add_theme_style(dpg.mvStyleVar_TabRounding, 5)
-            dpg.add_theme_style(dpg.mvStyleVar_GrabRounding, 4)
-            dpg.add_theme_style(dpg.mvStyleVar_ChildRounding, 6)
-            dpg.add_theme_style(dpg.mvStyleVar_PopupRounding, 6)
-            dpg.add_theme_style(dpg.mvStyleVar_ScrollbarRounding, 6)
+            dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, round(4 * s))
+            dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, round(6 * s))
+            dpg.add_theme_style(dpg.mvStyleVar_TabRounding, round(4 * s))
+            dpg.add_theme_style(dpg.mvStyleVar_GrabRounding, round(3 * s))
+            dpg.add_theme_style(dpg.mvStyleVar_ChildRounding, round(4 * s))
+            dpg.add_theme_style(dpg.mvStyleVar_PopupRounding, round(4 * s))
+            dpg.add_theme_style(dpg.mvStyleVar_ScrollbarRounding, round(4 * s))
 
-            # Spacing -- scaled for 4K readability
-            dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 12, 8)
-            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 10, 6)
-            dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 16, 12)
-            dpg.add_theme_style(dpg.mvStyleVar_ScrollbarSize, 16)
-            dpg.add_theme_style(dpg.mvStyleVar_GrabMinSize, 14)
-            dpg.add_theme_style(dpg.mvStyleVar_IndentSpacing, 24)
+            # Spacing -- auto-scaled from 1080p base values
+            dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, round(9 * s), round(6 * s))
+            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, round(7 * s), round(4 * s))
+            dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, round(11 * s), round(9 * s))
+            dpg.add_theme_style(dpg.mvStyleVar_ScrollbarSize, round(11 * s))
+            dpg.add_theme_style(dpg.mvStyleVar_GrabMinSize, round(10 * s))
+            dpg.add_theme_style(dpg.mvStyleVar_IndentSpacing, round(17 * s))
 
     dpg.bind_theme(global_theme)
 
