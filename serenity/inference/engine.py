@@ -18,7 +18,7 @@ from serenity.inference.attention.backends import select_best_backend
 from serenity.inference.config import InferenceConfig
 from serenity.inference.memory.manager import ModelManager
 from serenity.inference.memory.vram import get_free_memory, is_cuda_available
-from serenity.inference.models.detection import ModelConfig, detect_from_file
+from serenity.inference.models.detection import ModelArchitecture, ModelConfig, detect_from_file
 from serenity.inference.sampling.cfg import apply_cfg
 from serenity.inference.sampling.conditioning import Conditioning, create_noise
 from serenity.inference.sampling.prediction import PredictionType, get_prediction
@@ -31,6 +31,12 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+_DTYPE_MAP: dict[str, torch.dtype] = {
+    "float16": torch.float16, "fp16": torch.float16,
+    "float32": torch.float32, "fp32": torch.float32,
+    "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +136,13 @@ class InferenceEngine:
         self._model_loaded: bool = False
         self._unet: Any | None = None
         self._text_encoder: Any | None = None
+        self._tokenizer: Any | None = None
         self._vae_decoder: Any | None = None
+
+        # Sigma schedule (built from model's alphas_cumprod)
+        self._log_sigmas: Tensor | None = None
+        self._sigma_min: float = 0.0292
+        self._sigma_max: float = 14.6146
 
         logger.info(
             "InferenceEngine initialized (device=%s, attention=%s)",
@@ -221,18 +233,19 @@ class InferenceEngine:
         )
         logger.debug("Created noise: shape=%s, seed=%d", noise.shape, seeds[0])
 
-        # Step 6: Compute sigmas
-        sigma_min = 0.03
-        sigma_max = 14.6
+        # Step 5b: Compute sigmas early so we can scale noise
         sigmas = compute_sigmas(
             scheduler=params["scheduler"],
             num_steps=params["steps"],
-            sigma_min=sigma_min,
-            sigma_max=sigma_max,
+            sigma_min=self._sigma_min,
+            sigma_max=self._sigma_max,
         ).to(self._device)
         logger.debug("Computed %d sigmas (%s scheduler)", len(sigmas), params["scheduler"])
 
-        # Step 7: Create model/denoise function
+        # Scale noise to sigma_max (k-diffusion convention)
+        noise = noise * sigmas[0]
+
+        # Step 6: Create model/denoise function
         denoise_fn = self._create_denoise_fn(
             model=self._unet,
             prediction=prediction,
@@ -280,10 +293,10 @@ class InferenceEngine:
         )
 
     def load_model(self, model_path: str | None = None) -> None:
-        """Explicitly load a model, bypassing lazy loading.
+        """Load a model with full weight loading for supported architectures.
 
-        Uses :class:`ModelManager` for caching so repeated calls with the
-        same config are no-ops.
+        Detects the architecture from the checkpoint header, then loads
+        UNet, text encoder, tokenizer, and VAE for supported families.
         """
         path = model_path or self._config.model_path
         if not path:
@@ -298,7 +311,22 @@ class InferenceEngine:
                 "The file may be corrupted or an unsupported format."
             )
 
-        logger.info("Detected architecture: %s", self._model_config.architecture.value)
+        arch = self._model_config.architecture
+        logger.info("Detected architecture: %s", arch.value)
+
+        dtype = _DTYPE_MAP.get(self._config.model_dtype, torch.float16)
+
+        if arch == ModelArchitecture.SD15:
+            self._load_sd15(path, dtype)
+        elif arch in (ModelArchitecture.SDXL, ModelArchitecture.SDXL_REFINER):
+            self._load_sdxl(path, dtype)
+        else:
+            logger.warning(
+                "Full weight loading not yet implemented for %s — "
+                "architecture detected but generation will use fallbacks",
+                arch.value,
+            )
+
         self._model_loaded = True
 
     def unload_all(self) -> None:
@@ -309,7 +337,11 @@ class InferenceEngine:
         self._model_loaded = False
         self._unet = None
         self._text_encoder = None
+        self._tokenizer = None
         self._vae_decoder = None
+        self._log_sigmas = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         logger.info("All models unloaded and caches cleared")
 
     def get_status(self) -> dict[str, Any]:
@@ -328,6 +360,97 @@ class InferenceEngine:
             "cache_entries": self._cache.size,
             "vram_free_bytes": free_mem,
         }
+
+    # ------------------------------------------------------------------
+    # Model loading backends
+    # ------------------------------------------------------------------
+
+    def _load_sd15(self, path: str, dtype: torch.dtype) -> None:
+        """Load SD1.5 checkpoint via diffusers from_single_file."""
+        from diffusers import StableDiffusionPipeline
+
+        from serenity.inference.vae.decoder import VAEDecoder
+
+        logger.info("Loading SD1.5 pipeline from %s", path)
+        pipe = StableDiffusionPipeline.from_single_file(
+            path, torch_dtype=dtype, safety_checker=None,
+        )
+
+        self._unet = pipe.unet.to(self._device)
+        self._unet.eval()
+
+        self._text_encoder = pipe.text_encoder.to(self._device)
+        self._text_encoder.eval()
+
+        self._tokenizer = pipe.tokenizer
+
+        vae = pipe.vae.to(self._device)
+        vae.eval()
+        self._vae_decoder = VAEDecoder(
+            vae_model=vae, dtype=dtype,
+            device=str(self._device), scaling_factor=0.18215,
+        )
+
+        self._build_sigma_schedule(pipe.scheduler.alphas_cumprod)
+
+        del pipe
+        torch.cuda.empty_cache()
+        logger.info(
+            "SD1.5 loaded: UNet + CLIP + VAE on %s (%s)", self._device, dtype,
+        )
+
+    def _load_sdxl(self, path: str, dtype: torch.dtype) -> None:
+        """Load SDXL checkpoint via diffusers from_single_file."""
+        from diffusers import StableDiffusionXLPipeline
+
+        from serenity.inference.vae.decoder import VAEDecoder
+
+        logger.info("Loading SDXL pipeline from %s", path)
+        pipe = StableDiffusionXLPipeline.from_single_file(
+            path, torch_dtype=dtype,
+        )
+
+        self._unet = pipe.unet.to(self._device)
+        self._unet.eval()
+
+        self._text_encoder = pipe.text_encoder.to(self._device)
+        self._text_encoder.eval()
+
+        self._tokenizer = pipe.tokenizer
+
+        vae = pipe.vae.to(self._device)
+        vae.eval()
+        self._vae_decoder = VAEDecoder(
+            vae_model=vae, dtype=dtype,
+            device=str(self._device), scaling_factor=0.13025,
+        )
+
+        self._build_sigma_schedule(pipe.scheduler.alphas_cumprod)
+
+        del pipe
+        torch.cuda.empty_cache()
+        logger.info(
+            "SDXL loaded: UNet + CLIP + VAE on %s (%s)", self._device, dtype,
+        )
+
+    def _build_sigma_schedule(self, alphas_cumprod: Tensor) -> None:
+        """Build log-sigma lookup table from alphas_cumprod."""
+        sigmas = ((1.0 - alphas_cumprod) / alphas_cumprod) ** 0.5
+        self._log_sigmas = sigmas.log().to(self._device)
+        self._sigma_min = float(sigmas[sigmas > 0].min())
+        self._sigma_max = float(sigmas.max())
+        logger.debug(
+            "Sigma schedule: %d steps, min=%.4f, max=%.4f",
+            len(sigmas), self._sigma_min, self._sigma_max,
+        )
+
+    @staticmethod
+    def _sigma_to_discrete(sigma: Tensor, log_sigmas: Tensor) -> Tensor:
+        """Convert continuous sigma to discrete timestep via log-sigma lookup."""
+        log_sigma = sigma.reshape(-1).log()
+        dists = (log_sigma.unsqueeze(1) - log_sigmas.unsqueeze(0)).abs()
+        t = dists.argmin(dim=-1).float()
+        return t.reshape(sigma.shape)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -369,34 +492,41 @@ class InferenceEngine:
         Returns a :class:`Conditioning` with cond and uncond tensors.
         If no text encoder is loaded, returns dummy conditioning.
         """
-        # Check cache
         cache_key = hashlib.sha256(f"{prompt}||{negative_prompt}".encode()).hexdigest()
         cached = self._cache.get(cache_key)
         if cached is not None:
             logger.debug("Using cached text encoding for prompt=%r", prompt[:50])
             return cached
 
-        # If we have a text encoder, use it
-        if self._text_encoder is not None:
-            # Real text encoding would happen here
-            cond_emb = self._text_encoder(prompt)
-            uncond_emb = self._text_encoder(negative_prompt) if negative_prompt else None
+        if self._text_encoder is not None and self._tokenizer is not None:
+            cond_emb = self._run_text_encoder(prompt)
+            # CFG always needs unconditional — use empty string if not provided
+            uncond_emb = self._run_text_encoder(negative_prompt or "")
         else:
-            # Dummy conditioning when no text encoder is available
             logger.debug("No text encoder loaded, using dummy conditioning")
             cond_emb = torch.zeros(1, 77, 768, device=self._device)
-            uncond_emb = torch.zeros(1, 77, 768, device=self._device) if negative_prompt else None
+            uncond_emb = torch.zeros(1, 77, 768, device=self._device)
 
-        conditioning = Conditioning(
-            cond=cond_emb,
-            uncond=uncond_emb,
-        )
+        conditioning = Conditioning(cond=cond_emb, uncond=uncond_emb)
 
-        # Cache it
         if self._config.cache_text_encodings:
             self._cache.put(cache_key, conditioning)
 
         return conditioning
+
+    def _run_text_encoder(self, text: str) -> Tensor:
+        """Tokenize and encode text through the loaded CLIP text encoder."""
+        tokens = self._tokenizer(
+            text,
+            padding="max_length",
+            max_length=77,
+            truncation=True,
+            return_tensors="pt",
+        )
+        input_ids = tokens.input_ids.to(self._device)
+        with torch.no_grad():
+            output = self._text_encoder(input_ids)
+        return output.last_hidden_state
 
     def _create_denoise_fn(
         self,
@@ -408,9 +538,48 @@ class InferenceEngine:
     ) -> Callable:
         """Create the denoising function for the sampler.
 
-        Wraps the model with prediction type and CFG into a single
-        callable ``(noisy_input, sigma) -> denoised``.
+        When a real diffusers UNet is loaded, creates a custom function
+        that handles sigma-to-discrete timestep conversion and the
+        diffusers ``encoder_hidden_states`` call signature.
         """
+        if model is not None and self._log_sigmas is not None:
+            log_sigmas = self._log_sigmas
+            rescale_phi = self._config.rescale_cfg
+            use_mahiro = self._config.mahiro
+            model_dtype = next(model.parameters()).dtype
+
+            def denoise_fn(x: Tensor, sigma: Tensor) -> Tensor:
+                # c_in scaling for model input; denoised uses raw x
+                model_input = prediction.calculate_input(sigma, x)
+                timestep = InferenceEngine._sigma_to_discrete(sigma, log_sigmas)
+                inp = model_input.to(dtype=model_dtype)
+
+                with torch.no_grad():
+                    cond_out = model(
+                        inp, timestep, encoder_hidden_states=cond,
+                    ).sample.to(x.dtype)
+                cond_denoised = prediction.calculate_denoised(
+                    sigma, cond_out, x,
+                )
+
+                if uncond is None or cfg_scale == 1.0:
+                    return cond_denoised
+
+                with torch.no_grad():
+                    uncond_out = model(
+                        inp, timestep, encoder_hidden_states=uncond,
+                    ).sample.to(x.dtype)
+                uncond_denoised = prediction.calculate_denoised(
+                    sigma, uncond_out, x,
+                )
+
+                return apply_cfg(
+                    cond_denoised, uncond_denoised, cfg_scale,
+                    rescale_phi=rescale_phi, mahiro=use_mahiro,
+                )
+
+            return denoise_fn
+
         if model is not None:
             return create_model_fn(
                 model=model,
