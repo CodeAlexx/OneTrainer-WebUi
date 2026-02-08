@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -87,29 +86,17 @@ class SerenityApp:
     def _build_ui(self) -> None:
         with dpg.window(tag=TAG_PRIMARY_WINDOW):
             self._build_top_bar()
+            dpg.add_spacer(height=6)
             self._build_tab_area()
             self._build_bottom_bar()
 
     def _build_top_bar(self) -> None:
-        """Config preset selector + model type + training method."""
+        """Header with branding, model/method selectors, and train button."""
+        # Row 1: Brand + primary controls + train button
         with dpg.group(horizontal=True):
+            # Brand
             dpg.add_text("Serenity", color=(86, 156, 240))
-            dpg.add_spacer(width=20)
-
-            # Config preset combo
-            dpg.add_text("Config:")
-            dpg.add_combo(
-                tag="config_preset",
-                items=self._list_presets(),
-                default_value="(new)",
-                width=200,
-                callback=self._on_preset_selected,
-            )
-            dpg.add_button(label="Save", callback=self._save_config, width=60)
-            dpg.add_button(label="Save As...", callback=self._save_config_as, width=80)
-            dpg.add_button(label="Open...", callback=self._open_config, width=60)
-
-            dpg.add_spacer(width=40)
+            dpg.add_spacer(width=30)
 
             # Model type dropdown
             model_types = [
@@ -122,7 +109,7 @@ class SerenityApp:
                 ("Hunyuan Video", "hunyuan_video"),
                 ("Sana", "sana"), ("HiDream", "hi_dream_full"),
             ]
-            dpg.add_text("Model:")
+            dpg.add_text("Model:", color=(160, 160, 175))
             model_names = [n for n, _ in model_types]
             self._model_type_map = {n: v for n, v in model_types}
             self._model_type_rev = {v: n for n, v in model_types}
@@ -133,12 +120,14 @@ class SerenityApp:
                 tag=TAG_MODEL_TYPE,
                 items=model_names,
                 default_value=current_mt,
-                width=160,
+                width=180,
                 callback=self._on_model_type_changed,
             )
 
+            dpg.add_spacer(width=16)
+
             # Training method dropdown
-            dpg.add_text("Method:")
+            dpg.add_text("Method:", color=(160, 160, 175))
             method_names = ["Fine Tune", "LoRA", "Embedding"]
             self._method_map = {
                 "Fine Tune": TrainingMethod.FINE_TUNE,
@@ -154,99 +143,113 @@ class SerenityApp:
                 tag=TAG_TRAINING_METHOD,
                 items=method_names,
                 default_value=current_tm,
-                width=120,
+                width=140,
                 callback=self._on_training_method_changed,
             )
 
+            dpg.add_spacer(width=30)
+
+            # Config preset
+            dpg.add_text("Config:", color=(160, 160, 175))
+            dpg.add_combo(
+                tag="config_preset",
+                items=self._list_presets(),
+                default_value="(new)",
+                width=200,
+                callback=self._on_preset_selected,
+            )
+            dpg.add_button(label="Save", callback=self._save_config, width=70)
+            dpg.add_button(label="Save As", callback=self._save_config_as, width=80)
+            dpg.add_button(label="Open", callback=self._open_config, width=70)
+
+            dpg.add_spacer(width=40)
+
+            # Train button -- prominent, right side
+            dpg.add_button(
+                tag=TAG_TRAIN_BUTTON,
+                label="Start Training",
+                callback=self._toggle_training,
+                width=180,
+                height=36,
+            )
+            start_theme = create_start_button_theme()
+            dpg.bind_item_theme(TAG_TRAIN_BUTTON, start_theme)
+
+        dpg.add_separator()
+
     def _build_tab_area(self) -> None:
-        """Main tabbed content area."""
-        from serenity.ui.tabs.general import build_general_tab
+        """Main tabbed content area -- workflow order."""
         from serenity.ui.tabs.model import build_model_tab
         from serenity.ui.tabs.data import build_data_tab
         from serenity.ui.tabs.concepts import build_concepts_tab
         from serenity.ui.tabs.training import build_training_tab
         from serenity.ui.tabs.sampling import build_sampling_tab
         from serenity.ui.tabs.backup import build_backup_tab
+        from serenity.ui.tabs.general import build_general_tab
         from serenity.ui.tabs.lora import build_lora_tab
         from serenity.ui.tabs.embedding import build_embedding_tab
 
         with dpg.tab_bar(tag=TAG_TAB_BAR):
-            with dpg.tab(label="General"):
-                build_general_tab(self.ui_state)
-            with dpg.tab(label="Model"):
+            with dpg.tab(label="  Model  "):
                 build_model_tab(self.ui_state)
-            with dpg.tab(label="Data"):
+            with dpg.tab(label="  Data  "):
                 build_data_tab(self.ui_state)
-            with dpg.tab(label="Concepts"):
+            with dpg.tab(label="  Concepts  "):
                 build_concepts_tab(self.ui_state)
-            with dpg.tab(label="Training"):
+            with dpg.tab(label="  Training  "):
                 build_training_tab(self.ui_state)
-            with dpg.tab(label="Sampling"):
-                build_sampling_tab(self.ui_state)
-            with dpg.tab(label="Backup"):
-                build_backup_tab(self.ui_state)
 
-            # Conditional tabs
+            # Conditional tabs based on training method
             if self.ui_state.config.training_method == TrainingMethod.LORA:
-                with dpg.tab(label="LoRA", tag=TAG_LORA_TAB):
+                with dpg.tab(label="  LoRA  ", tag=TAG_LORA_TAB):
                     build_lora_tab(self.ui_state)
             if self.ui_state.config.training_method == TrainingMethod.EMBEDDING:
-                with dpg.tab(label="Embedding", tag=TAG_EMBEDDING_TAB):
+                with dpg.tab(label="  Embedding  ", tag=TAG_EMBEDDING_TAB):
                     build_embedding_tab(self.ui_state)
 
+            with dpg.tab(label="  Sampling  "):
+                build_sampling_tab(self.ui_state)
+            with dpg.tab(label="  Backup  "):
+                build_backup_tab(self.ui_state)
+            with dpg.tab(label="  Settings  "):
+                build_general_tab(self.ui_state)
+
     def _build_bottom_bar(self) -> None:
-        """Progress bars, status, and action buttons."""
+        """Compact status bar with progress and status."""
+        dpg.add_spacer(height=4)
         dpg.add_separator()
+        dpg.add_spacer(height=4)
         with dpg.group(horizontal=True):
-            # Progress section
-            with dpg.group():
-                with dpg.group(horizontal=True):
-                    dpg.add_text("Step:", color=(150, 150, 160))
-                    dpg.add_progress_bar(
-                        tag=TAG_STEP_PROGRESS,
-                        default_value=0.0,
-                        width=350,
-                        overlay="0 / 0",
-                    )
-                with dpg.group(horizontal=True):
-                    dpg.add_text("Epoch:", color=(150, 150, 160))
-                    dpg.add_progress_bar(
-                        tag=TAG_EPOCH_PROGRESS,
-                        default_value=0.0,
-                        width=350,
-                        overlay="0 / 0",
-                    )
+            # Progress
+            dpg.add_text("Step", color=(130, 130, 145))
+            dpg.add_progress_bar(
+                tag=TAG_STEP_PROGRESS,
+                default_value=0.0,
+                width=300,
+                overlay="0 / 0",
+            )
+            dpg.add_spacer(width=16)
+            dpg.add_text("Epoch", color=(130, 130, 145))
+            dpg.add_progress_bar(
+                tag=TAG_EPOCH_PROGRESS,
+                default_value=0.0,
+                width=300,
+                overlay="0 / 0",
+            )
+            dpg.add_spacer(width=24)
 
-            dpg.add_spacer(width=20)
+            # Status text
+            dpg.add_text("Ready", tag=TAG_STATUS_LABEL, color=(100, 200, 130))
+            dpg.add_text("", tag=TAG_ETA_LABEL, color=(130, 130, 145))
 
-            # Status
-            with dpg.group():
-                dpg.add_text("Ready", tag=TAG_STATUS_LABEL, color=(150, 200, 150))
-                dpg.add_text("", tag=TAG_ETA_LABEL, color=(150, 150, 160))
+            dpg.add_spacer(width=24)
 
-            dpg.add_spacer(width=20)
-
-            # Right-aligned buttons
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label="Export Config",
-                    callback=self._export_config,
-                    width=100,
-                )
-                dpg.add_button(
-                    label="Tensorboard",
-                    callback=self._open_tensorboard,
-                    width=100,
-                )
-                dpg.add_button(
-                    tag=TAG_TRAIN_BUTTON,
-                    label="Start Training",
-                    callback=self._toggle_training,
-                    width=140,
-                )
-                # Apply green theme to train button
-                start_theme = create_start_button_theme()
-                dpg.bind_item_theme(TAG_TRAIN_BUTTON, start_theme)
+            # Utility buttons
+            dpg.add_button(
+                label="Tensorboard",
+                callback=self._open_tensorboard,
+                width=120,
+            )
 
     # ------------------------------------------------------------------
     # Callbacks
@@ -261,7 +264,6 @@ class SerenityApp:
         method = self._method_map.get(app_data)
         if method:
             self.ui_state.config.training_method = method
-            # TODO: dynamically add/remove LoRA/Embedding tabs
 
     def _on_preset_selected(self, sender: Any, app_data: str, user_data: Any = None) -> None:
         if app_data == "(new)":
@@ -270,7 +272,6 @@ class SerenityApp:
         preset_path = Path("training_presets") / f"{app_data}.json"
         if preset_path.exists():
             self.ui_state.load_config_file(preset_path)
-            # Update top bar dropdowns
             mt = self.ui_state.config.model_type.value
             if mt in self._model_type_rev:
                 dpg.set_value(TAG_MODEL_TYPE, self._model_type_rev[mt])
@@ -306,7 +307,6 @@ class SerenityApp:
                 try:
                     self.ui_state.load_config_file(path)
                     self._set_status(f"Loaded: {path}")
-                    # Update top bar
                     mt = self.ui_state.config.model_type.value
                     if mt in self._model_type_rev:
                         dpg.set_value(TAG_MODEL_TYPE, self._model_type_rev[mt])
@@ -366,11 +366,9 @@ class SerenityApp:
         self._set_status("Stopping...")
         dpg.set_item_label(TAG_TRAIN_BUTTON, "Stopping...")
         dpg.configure_item(TAG_TRAIN_BUTTON, enabled=False)
-        # Training thread will detect this and stop
         self._is_training = False
 
     def _on_training_progress(self, step: int, total_steps: int, epoch: int, total_epochs: int) -> None:
-        """Called from training thread to update progress bars."""
         if total_steps > 0:
             dpg.set_value(TAG_STEP_PROGRESS, step / total_steps)
             dpg.configure_item(TAG_STEP_PROGRESS, overlay=f"{step} / {total_steps}")
@@ -392,14 +390,12 @@ class SerenityApp:
             pass
 
     def _list_presets(self) -> list[str]:
-        """List available preset configs."""
         presets = ["(new)"]
         preset_dir = Path("training_presets")
         if preset_dir.exists():
             for p in sorted(preset_dir.glob("*.json")):
                 if p.stem != "#":
                     presets.append(p.stem)
-        # Also check serenity/presets
         serenity_dir = Path(__file__).parent.parent / "presets"
         if serenity_dir.exists():
             for p in sorted(serenity_dir.glob("*.json")):

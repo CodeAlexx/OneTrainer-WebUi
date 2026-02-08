@@ -1,18 +1,19 @@
-"""Reusable DearPyGui widget helpers for Serenity UI.
+"""Reusable DearPyGui widget helpers for the Serenity UI.
 
-These helpers mirror OneTrainer's `components.py` pattern: each creates a
-labeled widget bound to a config field, returning the widget tag so callers
-can manipulate it further.
+Provides labeled form widgets, collapsible section cards, and layout
+utilities designed for a clean, modern training interface.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, Generator
 
 import dearpygui.dearpygui as dpg
 
 __all__ = [
+    "section",
     "labeled_input",
     "labeled_float",
     "labeled_int",
@@ -25,6 +26,10 @@ __all__ = [
     "section_header",
     "tooltip",
     "time_entry",
+    "enum_values",
+    "two_columns",
+    "LABEL_WIDTH",
+    "INPUT_WIDTH",
 ]
 
 # Default label column width (sized for 4K readability with 22px font)
@@ -32,6 +37,70 @@ LABEL_WIDTH = 280
 
 # Max width for input fields to prevent full-screen stretch on 4K
 INPUT_WIDTH = 420
+
+
+# ---------------------------------------------------------------------------
+# Layout helpers
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def section(
+    label: str,
+    *,
+    parent: int | str = 0,
+    default_open: bool = True,
+) -> Generator[None, None, None]:
+    """Collapsible card-like section with a styled header.
+
+    Usage::
+
+        with section("Optimizer"):
+            labeled_combo("Type", items=[...])
+            labeled_float("Learning Rate", ...)
+    """
+    dpg.add_spacer(height=8, parent=parent)
+    kwargs: dict[str, Any] = {
+        "label": f"  {label}",
+        "default_open": default_open,
+        "indent": 12,
+    }
+    if parent:
+        kwargs["parent"] = parent
+    with dpg.collapsing_header(**kwargs):
+        dpg.add_spacer(height=4)
+        yield
+        dpg.add_spacer(height=6)
+
+
+@contextmanager
+def two_columns(
+    *,
+    parent: int | str = 0,
+    col_width: int = 0,
+) -> Generator[tuple[int, int], None, None]:
+    """Create a two-column layout. Yields (left_id, right_id).
+
+    Usage::
+
+        with two_columns() as (left, right):
+            # build left column content with parent=left
+            # build right column content with parent=right
+    """
+    kw: dict[str, Any] = {"horizontal": True}
+    if parent:
+        kw["parent"] = parent
+    with dpg.group(**kw):
+        left = dpg.add_child_window(
+            width=col_width or -2,
+            border=False,
+            no_scrollbar=True,
+        )
+        right = dpg.add_child_window(
+            width=col_width or -1,
+            border=False,
+            no_scrollbar=True,
+        )
+        yield left, right
 
 
 def tooltip(parent: int | str, text: str) -> None:
@@ -46,13 +115,20 @@ def section_header(label: str, parent: int | str = 0) -> int:
 
 
 def labeled_separator(label: str, parent: int | str = 0) -> None:
-    """Visual separator with a colored label and breathing room."""
+    """Visual separator with a colored label and breathing room.
+
+    Kept for backward compat -- prefer ``section()`` for new code.
+    """
     dpg.add_spacer(height=10, parent=parent)
     dpg.add_separator(parent=parent)
     dpg.add_spacer(height=4, parent=parent)
     dpg.add_text(label, parent=parent, color=(86, 156, 240))
     dpg.add_spacer(height=6, parent=parent)
 
+
+# ---------------------------------------------------------------------------
+# Labeled form widgets
+# ---------------------------------------------------------------------------
 
 def labeled_input(
     label: str,
@@ -217,14 +293,10 @@ def labeled_combo_kv(
     default_value: str = "",
     callback: Callable | None = None,
     parent: int | str = 0,
-    width: int = -1,
+    width: int = 0,
     tip: str = "",
 ) -> int:
-    """Label + dropdown from (display_name, enum_value) pairs.
-
-    The combo shows display names; the callback receives the display string.
-    Use the returned options list to map back to values.
-    """
+    """Label + dropdown from (display_name, enum_value) pairs."""
     display_names = [name for name, _val in options]
     return labeled_combo(
         label,

@@ -15,7 +15,7 @@ from serenity.ui.widgets import (
     labeled_combo,
     labeled_float,
     labeled_int,
-    labeled_separator,
+    section,
     time_entry,
     tooltip,
 )
@@ -39,52 +39,69 @@ def build_sampling_tab(ui_state: UIState) -> None:
     cb = ui_state.make_callback
 
     # -- Global sampling schedule -------------------------------------------
-    labeled_separator("Sampling Schedule")
+    with section("Sampling Schedule"):
+        time_entry(
+            "Sample After",
+            value_tag="sample_after",
+            unit_tag="sample_after_unit",
+            default_value=cfg.sample_after,
+            default_unit=cfg.sample_after_unit.value
+            if hasattr(cfg.sample_after_unit, "value")
+            else str(cfg.sample_after_unit),
+            callback=cb("sample_after"),
+            tip="Generate samples after this interval",
+        )
+        labeled_int(
+            "Skip First",
+            tag="sample_skip_first",
+            default_value=cfg.sample_skip_first,
+            callback=cb("sample_skip_first"),
+            tip="Skip sample generation for the first N intervals",
+            min_value=0,
+            max_value=10000,
+        )
+        labeled_combo(
+            "Image Format",
+            SAMPLE_IMAGE_FORMATS,
+            tag="sample_image_format",
+            default_value=cfg.sample_image_format.value
+            if hasattr(cfg.sample_image_format, "value")
+            else str(cfg.sample_image_format),
+            callback=cb("sample_image_format"),
+            tip="Output format for generated sample images",
+        )
+        labeled_checkbox(
+            "Non-EMA Sampling",
+            tag="non_ema_sampling",
+            default_value=cfg.non_ema_sampling,
+            callback=cb("non_ema_sampling"),
+            tip="Also generate samples from the non-EMA model weights",
+        )
+        labeled_checkbox(
+            "Samples to Tensorboard",
+            tag="samples_to_tensorboard",
+            default_value=cfg.samples_to_tensorboard,
+            callback=cb("samples_to_tensorboard"),
+            tip="Write generated samples to Tensorboard image log",
+        )
 
-    time_entry(
-        "Sample After",
-        value_tag="sample_after",
-        unit_tag="sample_after_unit",
-        default_value=cfg.sample_after,
-        default_unit=cfg.sample_after_unit.value
-        if hasattr(cfg.sample_after_unit, "value")
-        else str(cfg.sample_after_unit),
-        callback=cb("sample_after"),
-        tip="Generate samples after this interval",
-    )
-    labeled_int(
-        "Skip First",
-        tag="sample_skip_first",
-        default_value=cfg.sample_skip_first,
-        callback=cb("sample_skip_first"),
-        tip="Skip sample generation for the first N intervals",
-        min_value=0,
-        max_value=10000,
-    )
-    labeled_combo(
-        "Image Format",
-        SAMPLE_IMAGE_FORMATS,
-        tag="sample_image_format",
-        default_value=cfg.sample_image_format.value
-        if hasattr(cfg.sample_image_format, "value")
-        else str(cfg.sample_image_format),
-        callback=cb("sample_image_format"),
-        tip="Output format for generated sample images",
-    )
-    labeled_checkbox(
-        "Non-EMA Sampling",
-        tag="non_ema_sampling",
-        default_value=cfg.non_ema_sampling,
-        callback=cb("non_ema_sampling"),
-        tip="Also generate samples from the non-EMA model weights",
-    )
-    labeled_checkbox(
-        "Samples to Tensorboard",
-        tag="samples_to_tensorboard",
-        default_value=cfg.samples_to_tensorboard,
-        callback=cb("samples_to_tensorboard"),
-        tip="Write generated samples to Tensorboard image log",
-    )
+    # -- Sample definitions -------------------------------------------------
+    with section("Sample Definitions"):
+        with dpg.group(horizontal=True):
+            btn = dpg.add_button(
+                label="Add Sample",
+                callback=lambda: _add_sample(ui_state),
+            )
+            tooltip(btn, "Append a new sample prompt definition")
+            dpg.add_text(
+                tag="sample_count",
+                default_value=f"Samples: {len(ui_state.config.samples or [])}",
+            )
+
+        dpg.add_spacer(height=4)
+
+        with dpg.child_window(tag=SAMPLE_LIST_TAG, autosize_x=True, height=-1):
+            _rebuild_sample_list(ui_state)
 
     # Register global bindings
     for tag in [
@@ -96,25 +113,6 @@ def build_sampling_tab(ui_state: UIState) -> None:
         "samples_to_tensorboard",
     ]:
         ui_state.register(tag)
-
-    # -- Sample definitions -------------------------------------------------
-    labeled_separator("Sample Definitions")
-
-    with dpg.group(horizontal=True):
-        btn = dpg.add_button(
-            label="Add Sample",
-            callback=lambda: _add_sample(ui_state),
-        )
-        tooltip(btn, "Append a new sample prompt definition")
-        dpg.add_text(
-            tag="sample_count",
-            default_value=f"Samples: {len(ui_state.config.samples or [])}",
-        )
-
-    dpg.add_spacer(height=4)
-
-    with dpg.child_window(tag=SAMPLE_LIST_TAG, autosize_x=True, height=-1):
-        _rebuild_sample_list(ui_state)
 
 
 # ---------------------------------------------------------------------------

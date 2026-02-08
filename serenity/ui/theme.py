@@ -109,13 +109,13 @@ def apply_dark_theme() -> None:
             dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, _FRAME_HI)
             dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, _FRAME_ACT)
 
-            # Titles / headers
+            # Titles / headers -- collapsing headers styled as cards
             dpg.add_theme_color(dpg.mvThemeCol_TitleBg, _BG_DARK)
             dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, _ACCENT_DIM)
             dpg.add_theme_color(dpg.mvThemeCol_MenuBarBg, _BG_MID)
-            dpg.add_theme_color(dpg.mvThemeCol_Header, _ACCENT_DIM)
-            dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, _ACCENT)
-            dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, _ACCENT_HI)
+            dpg.add_theme_color(dpg.mvThemeCol_Header, (36, 40, 52))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (44, 50, 66))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (50, 58, 76))
 
             # Tabs
             dpg.add_theme_color(dpg.mvThemeCol_Tab, _TAB)

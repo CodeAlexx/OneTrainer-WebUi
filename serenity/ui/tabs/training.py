@@ -1,9 +1,9 @@
 """Training tab -- optimizer, LR, noise, masking, and loss settings.
 
-Three-column layout mirroring OneTrainer's training tab.  Column 0 covers
-optimizer / LR / text-encoder / embedding settings.  Column 1 has EMA,
-precision, transformer, and noise.  Column 2 provides masked training,
-loss functions, and layer filtering.
+Two-column layout with collapsible sections.  Left column covers
+optimizer / LR / training / text-encoder / embedding settings.  Right column
+has precision & memory, noise, loss, transformer, masked training, and layer
+filtering.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from serenity.ui.widgets import (
     labeled_float,
     labeled_input,
     labeled_int,
-    labeled_separator,
+    section,
     time_entry,
 )
 from serenity.core.enums import (
@@ -36,8 +36,8 @@ from serenity.core.enums import (
 
 __all__ = ["build_training_tab"]
 
-# Column widths for the 3-column layout (sized for 4K readability)
-_COL_W = 620
+# Column width for the 2-column layout (sized for 4K readability)
+_COL_W = 780
 
 
 # ---------------------------------------------------------------------------
@@ -70,669 +70,487 @@ def _reg(ui: UIState, tag: str) -> None:
 # Column builders
 # ---------------------------------------------------------------------------
 
-def _build_col0(parent: int | str, ui: UIState) -> None:
-    """Column 0 -- Optimizer, LR, Text Encoder, Embedding."""
+def _build_left(parent: int | str, ui: UIState) -> None:
+    """Left column -- Optimizer & LR, Training, Text Encoder, Embedding."""
     cfg = ui.config
 
-    # ---- Optimizer section ----
-    labeled_separator("Optimizer", parent=parent)
+    # ---- Optimizer & LR section ----
+    with section("Optimizer & LR", parent=parent):
+        labeled_combo(
+            "Optimizer", enum_values(Optimizer),
+            tag="optimizer.optimizer",
+            default_value=_enum_default(cfg.optimizer, "optimizer"),
+            callback=ui.make_callback("optimizer.optimizer"),
+        )
+        labeled_combo(
+            "LR Scheduler", enum_values(LearningRateScheduler),
+            tag="learning_rate_scheduler",
+            default_value=_enum_default(cfg, "learning_rate_scheduler"),
+            callback=ui.make_callback("learning_rate_scheduler"),
+        )
+        labeled_float(
+            "Learning Rate",
+            tag="learning_rate",
+            default_value=cfg.learning_rate,
+            callback=ui.make_callback("learning_rate"),
+            format_str="%.2e",
+        )
+        labeled_float(
+            "LR Warmup Steps",
+            tag="learning_rate_warmup_steps",
+            default_value=cfg.learning_rate_warmup_steps,
+            callback=ui.make_callback("learning_rate_warmup_steps"),
+        )
+        labeled_float(
+            "LR Min Factor",
+            tag="learning_rate_min_factor",
+            default_value=cfg.learning_rate_min_factor,
+            callback=ui.make_callback("learning_rate_min_factor"),
+        )
+        labeled_float(
+            "LR Cycles",
+            tag="learning_rate_cycles",
+            default_value=cfg.learning_rate_cycles,
+            callback=ui.make_callback("learning_rate_cycles"),
+        )
+        labeled_combo(
+            "LR Scaler", enum_values(LearningRateScaler),
+            tag="learning_rate_scaler",
+            default_value=_enum_default(cfg, "learning_rate_scaler"),
+            callback=ui.make_callback("learning_rate_scaler"),
+        )
+        labeled_float(
+            "Clip Grad Norm",
+            tag="clip_grad_norm",
+            default_value=cfg.clip_grad_norm or 1.0,
+            callback=ui.make_callback("clip_grad_norm"),
+        )
+    _reg(ui, "optimizer.optimizer")
+    _reg(ui, "learning_rate_scheduler")
+    _reg(ui, "learning_rate")
+    _reg(ui, "learning_rate_warmup_steps")
+    _reg(ui, "learning_rate_min_factor")
+    _reg(ui, "learning_rate_cycles")
+    _reg(ui, "learning_rate_scaler")
+    _reg(ui, "clip_grad_norm")
 
-    tag = "optimizer.optimizer"
-    labeled_combo(
-        "Optimizer", enum_values(Optimizer),
-        tag=tag,
-        default_value=_enum_default(cfg.optimizer, "optimizer"),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "learning_rate_scheduler"
-    labeled_combo(
-        "LR Scheduler", enum_values(LearningRateScheduler),
-        tag=tag,
-        default_value=_enum_default(cfg, "learning_rate_scheduler"),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "learning_rate"
-    labeled_float(
-        "Learning Rate",
-        tag=tag,
-        default_value=cfg.learning_rate,
-        callback=ui.make_callback(tag),
-        parent=parent,
-        format_str="%.2e",
-    )
-    _reg(ui, tag)
-
-    tag = "learning_rate_warmup_steps"
-    labeled_float(
-        "LR Warmup Steps",
-        tag=tag,
-        default_value=cfg.learning_rate_warmup_steps,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "learning_rate_min_factor"
-    labeled_float(
-        "LR Min Factor",
-        tag=tag,
-        default_value=cfg.learning_rate_min_factor,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "learning_rate_cycles"
-    labeled_float(
-        "LR Cycles",
-        tag=tag,
-        default_value=cfg.learning_rate_cycles,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "epochs"
-    labeled_int(
-        "Epochs",
-        tag=tag,
-        default_value=cfg.epochs,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "batch_size"
-    labeled_int(
-        "Batch Size",
-        tag=tag,
-        default_value=cfg.batch_size,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "gradient_accumulation_steps"
-    labeled_int(
-        "Gradient Accum Steps",
-        tag=tag,
-        default_value=cfg.gradient_accumulation_steps,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "learning_rate_scaler"
-    labeled_combo(
-        "LR Scaler", enum_values(LearningRateScaler),
-        tag=tag,
-        default_value=_enum_default(cfg, "learning_rate_scaler"),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "clip_grad_norm"
-    labeled_float(
-        "Clip Grad Norm",
-        tag=tag,
-        default_value=cfg.clip_grad_norm or 1.0,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
+    # ---- Training section ----
+    with section("Training", parent=parent):
+        labeled_int(
+            "Epochs",
+            tag="epochs",
+            default_value=cfg.epochs,
+            callback=ui.make_callback("epochs"),
+        )
+        labeled_int(
+            "Batch Size",
+            tag="batch_size",
+            default_value=cfg.batch_size,
+            callback=ui.make_callback("batch_size"),
+        )
+        labeled_int(
+            "Gradient Accum Steps",
+            tag="gradient_accumulation_steps",
+            default_value=cfg.gradient_accumulation_steps,
+            callback=ui.make_callback("gradient_accumulation_steps"),
+        )
+        labeled_input(
+            "Resolution",
+            tag="resolution",
+            default_value=cfg.resolution,
+            callback=ui.make_callback("resolution"),
+        )
+    _reg(ui, "epochs")
+    _reg(ui, "batch_size")
+    _reg(ui, "gradient_accumulation_steps")
+    _reg(ui, "resolution")
 
     # ---- Text Encoder section ----
-    labeled_separator("Text Encoder", parent=parent)
-
-    tag = "text_encoder.train"
-    labeled_checkbox(
-        "Train Text Encoder",
-        tag=tag,
-        default_value=cfg.text_encoder.train,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "text_encoder.dropout_probability"
-    labeled_float(
-        "TE Dropout",
-        tag=tag,
-        default_value=cfg.text_encoder.dropout_probability,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "text_encoder.stop_training_after"
-    te_stop = cfg.text_encoder.stop_training_after or 0
-    tag_unit = "text_encoder.stop_training_after_unit"
-    time_entry(
-        "TE Stop After",
-        value_tag=tag,
-        unit_tag=tag_unit,
-        default_value=float(te_stop),
-        default_unit=_enum_default(cfg.text_encoder, "stop_training_after_unit"),
-        unit_items=enum_values(TimeUnit),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-    _reg(ui, tag_unit)
-
-    tag = "text_encoder.learning_rate"
-    labeled_float(
-        "TE Learning Rate",
-        tag=tag,
-        default_value=cfg.text_encoder.learning_rate or 0.0,
-        callback=ui.make_callback(tag),
-        parent=parent,
-        format_str="%.2e",
-    )
-    _reg(ui, tag)
+    with section("Text Encoder", parent=parent, default_open=False):
+        labeled_checkbox(
+            "Train Text Encoder",
+            tag="text_encoder.train",
+            default_value=cfg.text_encoder.train,
+            callback=ui.make_callback("text_encoder.train"),
+        )
+        labeled_float(
+            "TE Dropout",
+            tag="text_encoder.dropout_probability",
+            default_value=cfg.text_encoder.dropout_probability,
+            callback=ui.make_callback("text_encoder.dropout_probability"),
+        )
+        te_stop = cfg.text_encoder.stop_training_after or 0
+        time_entry(
+            "TE Stop After",
+            value_tag="text_encoder.stop_training_after",
+            unit_tag="text_encoder.stop_training_after_unit",
+            default_value=float(te_stop),
+            default_unit=_enum_default(cfg.text_encoder, "stop_training_after_unit"),
+            unit_items=enum_values(TimeUnit),
+            callback=ui.make_callback("text_encoder.stop_training_after"),
+        )
+        labeled_float(
+            "TE Learning Rate",
+            tag="text_encoder.learning_rate",
+            default_value=cfg.text_encoder.learning_rate or 0.0,
+            callback=ui.make_callback("text_encoder.learning_rate"),
+            format_str="%.2e",
+        )
+    _reg(ui, "text_encoder.train")
+    _reg(ui, "text_encoder.dropout_probability")
+    _reg(ui, "text_encoder.stop_training_after")
+    _reg(ui, "text_encoder.stop_training_after_unit")
+    _reg(ui, "text_encoder.learning_rate")
 
     # ---- Embedding section ----
-    labeled_separator("Embedding", parent=parent)
-
-    tag = "embedding_learning_rate"
-    labeled_float(
-        "Embedding LR",
-        tag=tag,
-        default_value=cfg.embedding_learning_rate or 0.0,
-        callback=ui.make_callback(tag),
-        parent=parent,
-        format_str="%.2e",
-    )
-    _reg(ui, tag)
-
-    tag = "preserve_embedding_norm"
-    labeled_checkbox(
-        "Preserve Embedding Norm",
-        tag=tag,
-        default_value=cfg.preserve_embedding_norm,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
+    with section("Embedding", parent=parent, default_open=False):
+        labeled_float(
+            "Embedding LR",
+            tag="embedding_learning_rate",
+            default_value=cfg.embedding_learning_rate or 0.0,
+            callback=ui.make_callback("embedding_learning_rate"),
+            format_str="%.2e",
+        )
+        labeled_checkbox(
+            "Preserve Embedding Norm",
+            tag="preserve_embedding_norm",
+            default_value=cfg.preserve_embedding_norm,
+            callback=ui.make_callback("preserve_embedding_norm"),
+        )
+    _reg(ui, "embedding_learning_rate")
+    _reg(ui, "preserve_embedding_norm")
 
 
-def _build_col1(parent: int | str, ui: UIState) -> None:
-    """Column 1 -- EMA, Precision/Memory, Transformer, Noise."""
+def _build_right(parent: int | str, ui: UIState) -> None:
+    """Right column -- Precision & Memory, Noise, Loss, Transformer, Masked Training, Layer Filter."""
     cfg = ui.config
-
-    # ---- EMA section ----
-    labeled_separator("EMA", parent=parent)
-
-    tag = "ema"
-    labeled_combo(
-        "EMA Mode", enum_values(EMAMode),
-        tag=tag,
-        default_value=_enum_default(cfg, "ema"),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "ema_decay"
-    labeled_float(
-        "EMA Decay",
-        tag=tag,
-        default_value=cfg.ema_decay,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "ema_update_step_interval"
-    labeled_int(
-        "EMA Update Interval",
-        tag=tag,
-        default_value=cfg.ema_update_step_interval,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
 
     # ---- Precision & Memory section ----
-    labeled_separator("Precision & Memory", parent=parent)
+    with section("Precision & Memory", parent=parent):
+        labeled_combo(
+            "Gradient Checkpointing", enum_values(GradientCheckpointingMethod),
+            tag="gradient_checkpointing",
+            default_value=_enum_default(cfg, "gradient_checkpointing"),
+            callback=ui.make_callback("gradient_checkpointing"),
+        )
+        labeled_float(
+            "Layer Offload Fraction",
+            tag="layer_offload_fraction",
+            default_value=cfg.layer_offload_fraction,
+            callback=ui.make_callback("layer_offload_fraction"),
+            min_value=0.0,
+            max_value=1.0,
+        )
+        _train_dtypes = [
+            DataType.FLOAT_32.value,
+            DataType.FLOAT_16.value,
+            DataType.BFLOAT_16.value,
+            DataType.TFLOAT_32.value,
+        ]
+        labeled_combo(
+            "Train Dtype", _train_dtypes,
+            tag="train_dtype",
+            default_value=_enum_default(cfg, "train_dtype"),
+            callback=ui.make_callback("train_dtype"),
+        )
+        _fallback_dtypes = [DataType.FLOAT_32.value, DataType.BFLOAT_16.value]
+        labeled_combo(
+            "Fallback Dtype", _fallback_dtypes,
+            tag="fallback_train_dtype",
+            default_value=_enum_default(cfg, "fallback_train_dtype"),
+            callback=ui.make_callback("fallback_train_dtype"),
+        )
+        labeled_checkbox(
+            "Autocast Cache",
+            tag="enable_autocast_cache",
+            default_value=cfg.enable_autocast_cache,
+            callback=ui.make_callback("enable_autocast_cache"),
+        )
+        labeled_checkbox(
+            "Force Circular Padding",
+            tag="force_circular_padding",
+            default_value=cfg.force_circular_padding,
+            callback=ui.make_callback("force_circular_padding"),
+        )
+    _reg(ui, "gradient_checkpointing")
+    _reg(ui, "layer_offload_fraction")
+    _reg(ui, "train_dtype")
+    _reg(ui, "fallback_train_dtype")
+    _reg(ui, "enable_autocast_cache")
+    _reg(ui, "force_circular_padding")
 
-    tag = "gradient_checkpointing"
-    labeled_combo(
-        "Gradient Checkpointing", enum_values(GradientCheckpointingMethod),
-        tag=tag,
-        default_value=_enum_default(cfg, "gradient_checkpointing"),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "layer_offload_fraction"
-    labeled_float(
-        "Layer Offload Fraction",
-        tag=tag,
-        default_value=cfg.layer_offload_fraction,
-        callback=ui.make_callback(tag),
-        parent=parent,
-        min_value=0.0,
-        max_value=1.0,
-    )
-    _reg(ui, tag)
-
-    # Train dtype -- subset of DataType relevant for training
-    _train_dtypes = [
-        DataType.FLOAT_32.value,
-        DataType.FLOAT_16.value,
-        DataType.BFLOAT_16.value,
-        DataType.TFLOAT_32.value,
-    ]
-    tag = "train_dtype"
-    labeled_combo(
-        "Train Dtype", _train_dtypes,
-        tag=tag,
-        default_value=_enum_default(cfg, "train_dtype"),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    _fallback_dtypes = [DataType.FLOAT_32.value, DataType.BFLOAT_16.value]
-    tag = "fallback_train_dtype"
-    labeled_combo(
-        "Fallback Dtype", _fallback_dtypes,
-        tag=tag,
-        default_value=_enum_default(cfg, "fallback_train_dtype"),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "enable_autocast_cache"
-    labeled_checkbox(
-        "Autocast Cache",
-        tag=tag,
-        default_value=cfg.enable_autocast_cache,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "resolution"
-    labeled_input(
-        "Resolution",
-        tag=tag,
-        default_value=cfg.resolution,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "force_circular_padding"
-    labeled_checkbox(
-        "Force Circular Padding",
-        tag=tag,
-        default_value=cfg.force_circular_padding,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    # ---- Transformer section ----
-    labeled_separator("Transformer", parent=parent)
-
-    tag = "transformer.train"
-    labeled_checkbox(
-        "Train Transformer",
-        tag=tag,
-        default_value=cfg.transformer.train,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "transformer.stop_training_after"
-    tf_stop = cfg.transformer.stop_training_after or 0
-    tag_unit = "transformer.stop_training_after_unit"
-    time_entry(
-        "TF Stop After",
-        value_tag=tag,
-        unit_tag=tag_unit,
-        default_value=float(tf_stop),
-        default_unit=_enum_default(cfg.transformer, "stop_training_after_unit"),
-        unit_items=enum_values(TimeUnit),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-    _reg(ui, tag_unit)
-
-    tag = "transformer.learning_rate"
-    labeled_float(
-        "TF Learning Rate",
-        tag=tag,
-        default_value=cfg.transformer.learning_rate or 0.0,
-        callback=ui.make_callback(tag),
-        parent=parent,
-        format_str="%.2e",
-    )
-    _reg(ui, tag)
-
-    tag = "transformer.attention_mask"
-    labeled_checkbox(
-        "Attention Mask",
-        tag=tag,
-        default_value=cfg.transformer.attention_mask,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "transformer.guidance_scale"
-    labeled_float(
-        "Guidance Scale",
-        tag=tag,
-        default_value=cfg.transformer.guidance_scale,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
+    # ---- EMA section ----
+    with section("EMA", parent=parent):
+        labeled_combo(
+            "EMA Mode", enum_values(EMAMode),
+            tag="ema",
+            default_value=_enum_default(cfg, "ema"),
+            callback=ui.make_callback("ema"),
+        )
+        labeled_float(
+            "EMA Decay",
+            tag="ema_decay",
+            default_value=cfg.ema_decay,
+            callback=ui.make_callback("ema_decay"),
+        )
+        labeled_int(
+            "EMA Update Interval",
+            tag="ema_update_step_interval",
+            default_value=cfg.ema_update_step_interval,
+            callback=ui.make_callback("ema_update_step_interval"),
+        )
+    _reg(ui, "ema")
+    _reg(ui, "ema_decay")
+    _reg(ui, "ema_update_step_interval")
 
     # ---- Noise section ----
-    labeled_separator("Noise", parent=parent)
-
-    tag = "offset_noise_weight"
-    labeled_float(
-        "Offset Noise Weight",
-        tag=tag,
-        default_value=cfg.offset_noise_weight,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "perturbation_noise_weight"
-    labeled_float(
-        "Perturbation Noise",
-        tag=tag,
-        default_value=cfg.perturbation_noise_weight,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "timestep_distribution"
-    labeled_combo(
-        "Timestep Distribution", enum_values(TimestepDistribution),
-        tag=tag,
-        default_value=_enum_default(cfg, "timestep_distribution"),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "min_noising_strength"
-    labeled_float(
-        "Min Noising Strength",
-        tag=tag,
-        default_value=cfg.min_noising_strength,
-        callback=ui.make_callback(tag),
-        parent=parent,
-        min_value=0.0,
-        max_value=1.0,
-    )
-    _reg(ui, tag)
-
-    tag = "max_noising_strength"
-    labeled_float(
-        "Max Noising Strength",
-        tag=tag,
-        default_value=cfg.max_noising_strength,
-        callback=ui.make_callback(tag),
-        parent=parent,
-        min_value=0.0,
-        max_value=1.0,
-    )
-    _reg(ui, tag)
-
-    tag = "noising_weight"
-    labeled_float(
-        "Noising Weight",
-        tag=tag,
-        default_value=cfg.noising_weight,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "noising_bias"
-    labeled_float(
-        "Noising Bias",
-        tag=tag,
-        default_value=cfg.noising_bias,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "timestep_shift"
-    labeled_float(
-        "Timestep Shift",
-        tag=tag,
-        default_value=cfg.timestep_shift,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "dynamic_timestep_shifting"
-    labeled_checkbox(
-        "Dynamic Timestep Shifting",
-        tag=tag,
-        default_value=cfg.dynamic_timestep_shifting,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-
-def _build_col2(parent: int | str, ui: UIState) -> None:
-    """Column 2 -- Masked Training, Loss, Layer Filter."""
-    cfg = ui.config
-
-    # ---- Masked Training section ----
-    labeled_separator("Masked Training", parent=parent)
-
-    tag = "masked_training"
-    labeled_checkbox(
-        "Masked Training",
-        tag=tag,
-        default_value=cfg.masked_training,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "unmasked_probability"
-    labeled_float(
-        "Unmasked Probability",
-        tag=tag,
-        default_value=cfg.unmasked_probability,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "unmasked_weight"
-    labeled_float(
-        "Unmasked Weight",
-        tag=tag,
-        default_value=cfg.unmasked_weight,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "normalize_masked_area_loss"
-    labeled_checkbox(
-        "Normalize Masked Loss",
-        tag=tag,
-        default_value=cfg.normalize_masked_area_loss,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "masked_prior_preservation_weight"
-    labeled_float(
-        "Masked Prior Weight",
-        tag=tag,
-        default_value=cfg.masked_prior_preservation_weight,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "custom_conditioning_image"
-    labeled_checkbox(
-        "Custom Conditioning Image",
-        tag=tag,
-        default_value=cfg.custom_conditioning_image,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
+    with section("Noise", parent=parent):
+        labeled_float(
+            "Offset Noise Weight",
+            tag="offset_noise_weight",
+            default_value=cfg.offset_noise_weight,
+            callback=ui.make_callback("offset_noise_weight"),
+        )
+        labeled_float(
+            "Perturbation Noise",
+            tag="perturbation_noise_weight",
+            default_value=cfg.perturbation_noise_weight,
+            callback=ui.make_callback("perturbation_noise_weight"),
+        )
+        labeled_combo(
+            "Timestep Distribution", enum_values(TimestepDistribution),
+            tag="timestep_distribution",
+            default_value=_enum_default(cfg, "timestep_distribution"),
+            callback=ui.make_callback("timestep_distribution"),
+        )
+        labeled_float(
+            "Min Noising Strength",
+            tag="min_noising_strength",
+            default_value=cfg.min_noising_strength,
+            callback=ui.make_callback("min_noising_strength"),
+            min_value=0.0,
+            max_value=1.0,
+        )
+        labeled_float(
+            "Max Noising Strength",
+            tag="max_noising_strength",
+            default_value=cfg.max_noising_strength,
+            callback=ui.make_callback("max_noising_strength"),
+            min_value=0.0,
+            max_value=1.0,
+        )
+        labeled_float(
+            "Noising Weight",
+            tag="noising_weight",
+            default_value=cfg.noising_weight,
+            callback=ui.make_callback("noising_weight"),
+        )
+        labeled_float(
+            "Noising Bias",
+            tag="noising_bias",
+            default_value=cfg.noising_bias,
+            callback=ui.make_callback("noising_bias"),
+        )
+        labeled_float(
+            "Timestep Shift",
+            tag="timestep_shift",
+            default_value=cfg.timestep_shift,
+            callback=ui.make_callback("timestep_shift"),
+        )
+        labeled_checkbox(
+            "Dynamic Timestep Shifting",
+            tag="dynamic_timestep_shifting",
+            default_value=cfg.dynamic_timestep_shifting,
+            callback=ui.make_callback("dynamic_timestep_shifting"),
+        )
+    _reg(ui, "offset_noise_weight")
+    _reg(ui, "perturbation_noise_weight")
+    _reg(ui, "timestep_distribution")
+    _reg(ui, "min_noising_strength")
+    _reg(ui, "max_noising_strength")
+    _reg(ui, "noising_weight")
+    _reg(ui, "noising_bias")
+    _reg(ui, "timestep_shift")
+    _reg(ui, "dynamic_timestep_shifting")
 
     # ---- Loss section ----
-    labeled_separator("Loss", parent=parent)
+    with section("Loss", parent=parent):
+        labeled_float(
+            "MSE Strength",
+            tag="mse_strength",
+            default_value=cfg.mse_strength,
+            callback=ui.make_callback("mse_strength"),
+        )
+        labeled_float(
+            "MAE Strength",
+            tag="mae_strength",
+            default_value=cfg.mae_strength,
+            callback=ui.make_callback("mae_strength"),
+        )
+        labeled_float(
+            "Log-Cosh Strength",
+            tag="log_cosh_strength",
+            default_value=cfg.log_cosh_strength,
+            callback=ui.make_callback("log_cosh_strength"),
+        )
+        labeled_float(
+            "Huber Strength",
+            tag="huber_strength",
+            default_value=cfg.huber_strength,
+            callback=ui.make_callback("huber_strength"),
+        )
+        labeled_float(
+            "Huber Delta",
+            tag="huber_delta",
+            default_value=cfg.huber_delta,
+            callback=ui.make_callback("huber_delta"),
+        )
+        labeled_combo(
+            "Loss Weight Function", enum_values(LossWeight),
+            tag="loss_weight_fn",
+            default_value=_enum_default(cfg, "loss_weight_fn"),
+            callback=ui.make_callback("loss_weight_fn"),
+        )
+        labeled_float(
+            "Loss Weight Strength",
+            tag="loss_weight_strength",
+            default_value=cfg.loss_weight_strength,
+            callback=ui.make_callback("loss_weight_strength"),
+        )
+        labeled_combo(
+            "Loss Scaler", enum_values(LossScaler),
+            tag="loss_scaler",
+            default_value=_enum_default(cfg, "loss_scaler"),
+            callback=ui.make_callback("loss_scaler"),
+        )
+        labeled_float(
+            "Dropout Probability",
+            tag="dropout_probability",
+            default_value=cfg.dropout_probability,
+            callback=ui.make_callback("dropout_probability"),
+        )
+    _reg(ui, "mse_strength")
+    _reg(ui, "mae_strength")
+    _reg(ui, "log_cosh_strength")
+    _reg(ui, "huber_strength")
+    _reg(ui, "huber_delta")
+    _reg(ui, "loss_weight_fn")
+    _reg(ui, "loss_weight_strength")
+    _reg(ui, "loss_scaler")
+    _reg(ui, "dropout_probability")
 
-    tag = "mse_strength"
-    labeled_float(
-        "MSE Strength",
-        tag=tag,
-        default_value=cfg.mse_strength,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
+    # ---- Transformer section ----
+    with section("Transformer", parent=parent, default_open=False):
+        labeled_checkbox(
+            "Train Transformer",
+            tag="transformer.train",
+            default_value=cfg.transformer.train,
+            callback=ui.make_callback("transformer.train"),
+        )
+        tf_stop = cfg.transformer.stop_training_after or 0
+        time_entry(
+            "TF Stop After",
+            value_tag="transformer.stop_training_after",
+            unit_tag="transformer.stop_training_after_unit",
+            default_value=float(tf_stop),
+            default_unit=_enum_default(cfg.transformer, "stop_training_after_unit"),
+            unit_items=enum_values(TimeUnit),
+            callback=ui.make_callback("transformer.stop_training_after"),
+        )
+        labeled_float(
+            "TF Learning Rate",
+            tag="transformer.learning_rate",
+            default_value=cfg.transformer.learning_rate or 0.0,
+            callback=ui.make_callback("transformer.learning_rate"),
+            format_str="%.2e",
+        )
+        labeled_checkbox(
+            "Attention Mask",
+            tag="transformer.attention_mask",
+            default_value=cfg.transformer.attention_mask,
+            callback=ui.make_callback("transformer.attention_mask"),
+        )
+        labeled_float(
+            "Guidance Scale",
+            tag="transformer.guidance_scale",
+            default_value=cfg.transformer.guidance_scale,
+            callback=ui.make_callback("transformer.guidance_scale"),
+        )
+    _reg(ui, "transformer.train")
+    _reg(ui, "transformer.stop_training_after")
+    _reg(ui, "transformer.stop_training_after_unit")
+    _reg(ui, "transformer.learning_rate")
+    _reg(ui, "transformer.attention_mask")
+    _reg(ui, "transformer.guidance_scale")
 
-    tag = "mae_strength"
-    labeled_float(
-        "MAE Strength",
-        tag=tag,
-        default_value=cfg.mae_strength,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "log_cosh_strength"
-    labeled_float(
-        "Log-Cosh Strength",
-        tag=tag,
-        default_value=cfg.log_cosh_strength,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "huber_strength"
-    labeled_float(
-        "Huber Strength",
-        tag=tag,
-        default_value=cfg.huber_strength,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "huber_delta"
-    labeled_float(
-        "Huber Delta",
-        tag=tag,
-        default_value=cfg.huber_delta,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "loss_weight_fn"
-    labeled_combo(
-        "Loss Weight Function", enum_values(LossWeight),
-        tag=tag,
-        default_value=_enum_default(cfg, "loss_weight_fn"),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "loss_weight_strength"
-    labeled_float(
-        "Loss Weight Strength",
-        tag=tag,
-        default_value=cfg.loss_weight_strength,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "loss_scaler"
-    labeled_combo(
-        "Loss Scaler", enum_values(LossScaler),
-        tag=tag,
-        default_value=_enum_default(cfg, "loss_scaler"),
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "dropout_probability"
-    labeled_float(
-        "Dropout Probability",
-        tag=tag,
-        default_value=cfg.dropout_probability,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
+    # ---- Masked Training section ----
+    with section("Masked Training", parent=parent, default_open=False):
+        labeled_checkbox(
+            "Masked Training",
+            tag="masked_training",
+            default_value=cfg.masked_training,
+            callback=ui.make_callback("masked_training"),
+        )
+        labeled_float(
+            "Unmasked Probability",
+            tag="unmasked_probability",
+            default_value=cfg.unmasked_probability,
+            callback=ui.make_callback("unmasked_probability"),
+        )
+        labeled_float(
+            "Unmasked Weight",
+            tag="unmasked_weight",
+            default_value=cfg.unmasked_weight,
+            callback=ui.make_callback("unmasked_weight"),
+        )
+        labeled_checkbox(
+            "Normalize Masked Loss",
+            tag="normalize_masked_area_loss",
+            default_value=cfg.normalize_masked_area_loss,
+            callback=ui.make_callback("normalize_masked_area_loss"),
+        )
+        labeled_float(
+            "Masked Prior Weight",
+            tag="masked_prior_preservation_weight",
+            default_value=cfg.masked_prior_preservation_weight,
+            callback=ui.make_callback("masked_prior_preservation_weight"),
+        )
+        labeled_checkbox(
+            "Custom Conditioning Image",
+            tag="custom_conditioning_image",
+            default_value=cfg.custom_conditioning_image,
+            callback=ui.make_callback("custom_conditioning_image"),
+        )
+    _reg(ui, "masked_training")
+    _reg(ui, "unmasked_probability")
+    _reg(ui, "unmasked_weight")
+    _reg(ui, "normalize_masked_area_loss")
+    _reg(ui, "masked_prior_preservation_weight")
+    _reg(ui, "custom_conditioning_image")
 
     # ---- Layer Filter section ----
-    labeled_separator("Layer Filter", parent=parent)
-
-    tag = "layer_filter_preset"
-    labeled_input(
-        "Filter Preset",
-        tag=tag,
-        default_value=cfg.layer_filter_preset,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "layer_filter"
-    labeled_input(
-        "Layer Filter",
-        tag=tag,
-        default_value=cfg.layer_filter,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
-
-    tag = "layer_filter_regex"
-    labeled_checkbox(
-        "Regex Filter",
-        tag=tag,
-        default_value=cfg.layer_filter_regex,
-        callback=ui.make_callback(tag),
-        parent=parent,
-    )
-    _reg(ui, tag)
+    with section("Layer Filter", parent=parent, default_open=False):
+        labeled_input(
+            "Filter Preset",
+            tag="layer_filter_preset",
+            default_value=cfg.layer_filter_preset,
+            callback=ui.make_callback("layer_filter_preset"),
+        )
+        labeled_input(
+            "Layer Filter",
+            tag="layer_filter",
+            default_value=cfg.layer_filter,
+            callback=ui.make_callback("layer_filter"),
+        )
+        labeled_checkbox(
+            "Regex Filter",
+            tag="layer_filter_regex",
+            default_value=cfg.layer_filter_regex,
+            callback=ui.make_callback("layer_filter_regex"),
+        )
+    _reg(ui, "layer_filter_preset")
+    _reg(ui, "layer_filter")
+    _reg(ui, "layer_filter_regex")
 
 
 # ---------------------------------------------------------------------------
@@ -742,9 +560,7 @@ def _build_col2(parent: int | str, ui: UIState) -> None:
 def build_training_tab(ui_state: UIState) -> None:
     """Build the Training settings tab inside the current DPG parent."""
     with dpg.group(horizontal=True):
-        with dpg.child_window(width=_COL_W, border=False):
-            _build_col0(dpg.last_container(), ui_state)
-        with dpg.child_window(width=_COL_W, border=False):
-            _build_col1(dpg.last_container(), ui_state)
-        with dpg.child_window(width=_COL_W, border=False):
-            _build_col2(dpg.last_container(), ui_state)
+        col_left = dpg.add_child_window(width=_COL_W, border=False)
+        col_right = dpg.add_child_window(width=_COL_W, border=False)
+    _build_left(col_left, ui_state)
+    _build_right(col_right, ui_state)
