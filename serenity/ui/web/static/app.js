@@ -378,9 +378,16 @@ async function apiFetch(url, options = {}) {
 async function fetchModels() {
     try {
         const data = await apiFetch("/api/models");
-        state.models.checkpoints = data.checkpoints || data.models || [];
-        state.models.loras = data.loras || [];
-        state.models.vaes = data.vaes || [];
+        const ckpts = data.checkpoints || data.checkpoint || [];
+        const diffModels = data.diffusion_model || data.diffusion_models || [];
+        // Filter out multi-file shards (e.g. "model-00003-of-00004")
+        const allModels = [...ckpts, ...diffModels].filter(m => {
+            const name = m.name || m;
+            return !/-\d{5}-of-\d{5}$/.test(name);
+        });
+        state.models.checkpoints = allModels;
+        state.models.loras = data.loras || data.lora || [];
+        state.models.vaes = data.vaes || data.vae || [];
         populateModelDropdown(state.models.checkpoints);
         populateModelsGrid(state.models.checkpoints);
         populateLorasGrid(state.models.loras);

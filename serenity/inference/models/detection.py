@@ -101,6 +101,7 @@ def _detect_unet_prefix(keys: set[str]) -> str:
     candidates = {
         "model.diffusion_model.": 0,
         "model.model.": 0,
+        "model.": 0,
         "net.": 0,
     }
     for k in keys:
@@ -112,7 +113,9 @@ def _detect_unet_prefix(keys: set[str]) -> str:
     top = max(candidates, key=candidates.get)
     if candidates[top] > 5:
         return top
-    return "model."
+    # No known prefix matched — keys are at root level (common for
+    # Flux, Wan, Z-Image, SD3, etc. single-file checkpoints).
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +471,21 @@ def detect_from_file(path: str) -> ModelConfig | None:
                 "safetensors not installed; falling back to torch.load for %s",
                 path,
             )
+
+    if path.endswith(".gguf"):
+        # GGUF files use a different format — detect from filename heuristics
+        # since we can't cheaply read GGUF tensor names without a dedicated parser.
+        basename = os.path.basename(path).lower()
+        if "wan" in basename:
+            return ModelConfig(
+                architecture=ModelArchitecture.WAN,
+                unet_config={},
+                unet_key_prefix=[""],
+                vae_key_prefix=[],
+                prediction_type="flow",
+            )
+        logger.warning("Cannot detect architecture from GGUF file: %s", path)
+        return None
 
     # Fallback: load with torch (maps to CPU, weights_only=True)
     import torch
