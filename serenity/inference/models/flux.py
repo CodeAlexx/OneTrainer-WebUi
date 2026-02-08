@@ -1,0 +1,228 @@
+"""Flux Dev/Schnell model adapters for the Serenity inference engine."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import torch
+import torch.nn as nn
+
+from serenity.inference.models.base import BaseModelAdapter
+from serenity.inference.models.detection import ModelArchitecture
+
+__all__ = [
+    "FluxAdapter",
+    "FluxSchnellAdapter",
+    "ADAPTERS",
+]
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Flux transformer configuration
+# ---------------------------------------------------------------------------
+
+_FLUX_CONFIG = {
+    "in_channels": 64,
+    "num_layers": 19,  # double_blocks
+    "num_single_layers": 38,  # single_blocks
+    "attention_head_dim": 128,
+    "num_attention_heads": 24,
+    "joint_attention_dim": 4096,
+    "pooled_projection_dim": 768,
+    "guidance_embeds": True,
+}
+
+_FLUX_SCHNELL_CONFIG = {
+    **_FLUX_CONFIG,
+    "guidance_embeds": False,
+}
+
+# ---------------------------------------------------------------------------
+# Positional encoding helpers
+# ---------------------------------------------------------------------------
+
+
+def compute_img_ids(
+    height: int,
+    width: int,
+    patch_size: int = 2,
+    device: str | torch.device = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Create positional ID tensor for image patches.
+
+    Returns a tensor of shape ``(h_patches * w_patches, 3)`` where each row
+    contains ``(batch_idx, y, x)`` coordinates for a single patch.
+    """
+    h_patches = height // patch_size
+    w_patches = width // patch_size
+
+    img_ids = torch.zeros(h_patches, w_patches, 3, device=device, dtype=dtype)
+    img_ids[..., 1] = torch.arange(h_patches, device=device, dtype=dtype)[:, None]
+    img_ids[..., 2] = torch.arange(w_patches, device=device, dtype=dtype)[None, :]
+
+    return img_ids.reshape(-1, 3)
+
+
+def _compute_txt_ids(
+    seq_len: int,
+    device: str | torch.device = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Create positional ID tensor for text tokens.
+
+    Returns a zero tensor of shape ``(seq_len, 3)`` — Flux uses zero IDs
+    for text positions.
+    """
+    return torch.zeros(seq_len, 3, device=device, dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# Flux Dev adapter
+# ---------------------------------------------------------------------------
+
+
+class FluxAdapter(BaseModelAdapter):
+    """Model adapter for Flux Dev and its variants.
+
+    Flux is a DiT (Diffusion Transformer) with double-stream architecture that
+    uses both CLIP-L and T5-XXL text encoders with flow matching prediction
+    and mu-based sigma shifting.
+
+    Args:
+        variant: Either ``"dev"`` or ``"schnell"``.
+    """
+
+    def __init__(self, variant: str = "dev") -> None:
+        self._variant = variant
+
+    @property
+    def architecture(self) -> ModelArchitecture:
+        if self._variant == "schnell":
+            return ModelArchitecture.FLUX_SCHNELL
+        return ModelArchitecture.FLUX_DEV
+
+    def create_model(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype = torch.float32,
+        **kwargs: Any,
+    ) -> nn.Module:
+        """Instantiate a Flux transformer and load weights.
+
+        Requires ``diffusers`` to be installed.
+        """
+        try:
+            from diffusers.models import FluxTransformer2DModel  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise NotImplementedError(
+                "FluxAdapter.create_model requires the 'diffusers' package."
+            ) from exc
+
+        config = _FLUX_SCHNELL_CONFIG if self._variant == "schnell" else _FLUX_CONFIG
+        logger.info(
+            "Creating Flux %s transformer on %s (%s)",
+            self._variant,
+            device,
+            dtype,
+        )
+        model = FluxTransformer2DModel(**config)
+        model.load_state_dict(state_dict, strict=False)
+        model = model.to(device=torch.device(device), dtype=dtype)
+        model.eval()
+        return model
+
+    def get_text_encoder_types(self) -> list[str]:
+        return ["clip_l", "t5_xxl"]
+
+    def get_prediction_type(self) -> str:
+        return "flow_flux"
+
+    def get_vae_scaling_factor(self) -> float:
+        return 0.3611
+
+    def get_default_resolution(self) -> tuple[int, int]:
+        return (1024, 1024)
+
+    def get_prediction_kwargs(self) -> dict[str, Any]:
+        """Return kwargs for constructing a FluxPrediction instance.
+
+        Flux dev uses resolution-dependent mu computed from sequence length.
+        Flux schnell uses a fixed mu of 1.0.
+        """
+        if self._variant == "schnell":
+            return {"mu": 1.0}
+        return {
+            "seq_len": 4096,
+            "base_seq_len": 256,
+            "max_seq_len": 4096,
+            "base_shift": 0.5,
+            "max_shift": 1.15,
+        }
+
+    def prepare_conditioning(
+        self,
+        text_outputs: dict[str, torch.Tensor],
+        **kwargs: Any,
+    ) -> dict[str, torch.Tensor]:
+        """Prepare Flux conditioning from text-encoder outputs.
+
+        Flux requires T5 hidden states as the main conditioning, CLIP-L pooled
+        output as vector conditioning, and positional ID tensors for both image
+        patches and text tokens.
+        """
+        t5_hidden = text_outputs.get("t5_xxl", text_outputs.get("encoder_hidden_states"))
+        clip_pooled = text_outputs.get("clip_l_pooled", text_outputs.get("pooled_projections"))
+
+        result: dict[str, torch.Tensor] = {}
+
+        if t5_hidden is not None:
+            result["encoder_hidden_states"] = t5_hidden
+            txt_ids = _compute_txt_ids(
+                t5_hidden.shape[-2],
+                device=t5_hidden.device,
+                dtype=t5_hidden.dtype,
+            )
+            result["txt_ids"] = txt_ids
+
+        if clip_pooled is not None:
+            result["pooled_projections"] = clip_pooled
+
+        # Image IDs are typically computed at sampling time from the actual
+        # latent dimensions.  If height/width are provided, we compute them.
+        height = kwargs.get("height")
+        width = kwargs.get("width")
+        if height is not None and width is not None:
+            result["img_ids"] = compute_img_ids(
+                int(height),
+                int(width),
+                device=t5_hidden.device if t5_hidden is not None else "cpu",
+                dtype=t5_hidden.dtype if t5_hidden is not None else torch.float32,
+            )
+
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Flux Schnell convenience subclass
+# ---------------------------------------------------------------------------
+
+
+class FluxSchnellAdapter(FluxAdapter):
+    """Model adapter for Flux Schnell — fewer inference steps, no CFG needed."""
+
+    def __init__(self) -> None:
+        super().__init__(variant="schnell")
+
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+
+ADAPTERS = {
+    ModelArchitecture.FLUX_DEV: FluxAdapter,
+    ModelArchitecture.FLUX_SCHNELL: FluxSchnellAdapter,
+}
