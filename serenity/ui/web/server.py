@@ -64,13 +64,25 @@ def create_app(
     )
 
     # ------------------------------------------------------------------
-    # Configure scanner and API module
+    # Configure scanner, inference engine, and API module
     # ------------------------------------------------------------------
     from serenity.ui.web.api import configure, router
     from serenity.ui.web.scanner import ModelScanner
 
     scanner = ModelScanner(root_dirs=[models_dir])
-    configure(scanner=scanner, output_dir=output_dir)
+
+    # Create the inference engine.  Fails gracefully if torch is not
+    # available (e.g. lightweight UI-only testing).
+    engine = None
+    try:
+        from serenity.inference import InferenceConfig, InferenceEngine
+
+        engine = InferenceEngine(InferenceConfig())
+        logger.info("Inference engine ready")
+    except Exception as exc:
+        logger.warning("Could not initialise inference engine: %s", exc)
+
+    configure(scanner=scanner, engine=engine, output_dir=output_dir)
 
     app.include_router(router)
 
