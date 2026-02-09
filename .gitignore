@@ -86,3 +86,7 @@ training_presets/
 
 # AGENTS file
 AGENTS.md
+
+# Training output artifacts
+output/
+tests/cache_wan_disney_test/
