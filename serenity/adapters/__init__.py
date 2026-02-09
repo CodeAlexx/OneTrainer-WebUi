@@ -73,11 +73,34 @@ class BaseAdapter(AdapterProtocol):
     constraint: float = 0.0
     rescaled: bool = False
     multiplier: float = 1.0
-    _manager: LyCORISManager | None = field(default=None, init=False, repr=False)
+    _manager: Any = field(default=None, init=False, repr=False)
     _target_module: object | None = field(default=None, init=False, repr=False)
 
-    def _ensure_manager(self) -> LyCORISManager:
-        if self._manager is None:
+    def _ensure_manager(self) -> Any:
+        if self._manager is not None:
+            return self._manager
+
+        if self.adapter_type in (AdapterType.LORA, AdapterType.DORA):
+            from serenity.training.lora_manager import (
+                LoRAManager,
+                DoRAManager,
+                AdapterConfig as NativeAdapterConfig,
+            )
+
+            native_config = NativeAdapterConfig(
+                rank=int(self.rank),
+                alpha=float(self.alpha),
+                target_modules=list(self.target_modules),
+                dropout=float(self.dropout),
+                rs_lora=bool(self.rs_lora),
+                multiplier=float(self.multiplier),
+            )
+            if self.adapter_type == AdapterType.DORA:
+                self._manager = DoRAManager(native_config, model_type=self.model_type)
+            else:
+                self._manager = LoRAManager(native_config, model_type=self.model_type)
+        else:
+            # Exotic adapter types use LyCORIS
             lycoris_type = LyCORISAdapterType(str(self.adapter_type.value))
             self._manager = LyCORISManager(
                 LyCORISAdapterConfig(

@@ -50,7 +50,7 @@ class TestImports:
 
     def test_import_trainer(self):
         """Trainer class imports."""
-        from serenity.training.trainer import Trainer
+        from serenity.core.trainer import Trainer
         assert Trainer is not None
 
     def test_import_config(self):
@@ -186,8 +186,8 @@ class TestTrainingUtilities:
 
     def test_loss_functions(self):
         """Loss functions can be imported."""
-        from serenity.training.loss import compute_loss
-        assert compute_loss is not None
+        from serenity.training.losses import flow_matching_loss
+        assert flow_matching_loss is not None
 
 
 # =============================================================================

@@ -249,16 +249,10 @@ class TestBlockSwapLimits:
 class TestNoGuidance:
     """Test that Klein models don't use guidance."""
 
-    @pytest.mark.skip(reason="predict module not yet implemented")
+    @pytest.mark.skip(reason="predict module removed — guidance handled at model level")
     def test_guidance_is_none_in_predictor(self):
-        """Flux2KleinPredictor should pass guidance=None."""
-        from serenity.training.predict import Flux2KleinPredictor
-
-        predictor = Flux2KleinPredictor()
-
-        # The predictor should exist and be configured for no guidance
-        assert predictor is not None
-        print("  ✅ Flux2KleinPredictor created (will pass guidance=None)")
+        """Klein models should pass guidance=None (handled by model adapter)."""
+        pass
 
 
 # =============================================================================
