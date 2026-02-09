@@ -108,7 +108,7 @@ def create_app(
                 await websocket.receive_text()
         except WebSocketDisconnect:
             manager.disconnect(websocket)
-        except Exception:
+        except (RuntimeError, ConnectionError):
             manager.disconnect(websocket)
 
     # ------------------------------------------------------------------

@@ -109,7 +109,7 @@ def _coerce_dtype(value: torch.dtype | str | None, device: torch.device) -> torc
         try:
             major, _ = torch.cuda.get_device_capability(device)
             return torch.bfloat16 if major >= 8 else torch.float16
-        except Exception:  # pragma: no cover - defensive fallback
+        except (RuntimeError, AttributeError):  # pragma: no cover - defensive fallback
             return torch.float16
 
     return torch.float32

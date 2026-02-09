@@ -205,7 +205,7 @@ def resume_from_checkpoint(
             try:
                 trainer.optimizer.load_state_dict(data.optimizer_state)
                 logger.info("Restored optimizer state from checkpoint")
-            except Exception as exc:
+            except (RuntimeError, ValueError, KeyError) as exc:
                 logger.warning("Failed to load optimizer state: %s", exc)
         else:
             logger.debug("Trainer has no optimizer, skipping optimizer state restore")
@@ -217,7 +217,7 @@ def resume_from_checkpoint(
             try:
                 ema.load_state_dict(data.ema_state)
                 logger.info("Restored EMA state from checkpoint")
-            except Exception as exc:
+            except (RuntimeError, ValueError, KeyError) as exc:
                 logger.warning("Failed to load EMA state: %s", exc)
         else:
             logger.debug("Trainer has no EMA module, skipping EMA state restore")
@@ -233,7 +233,7 @@ def resume_from_checkpoint(
                 restored.global_step,
                 f"{restored.ema_loss:.6f}" if restored.ema_loss is not None else "N/A",
             )
-        except Exception as exc:
+        except (RuntimeError, ValueError, KeyError) as exc:
             logger.warning("Failed to restore training progress: %s", exc)
 
     # ---- Restore model weights (optional) ----
@@ -243,7 +243,7 @@ def resume_from_checkpoint(
             try:
                 model.load_state_dict(data.model_state, strict=strict_model_load)
                 logger.info("Restored model weights from checkpoint")
-            except Exception as exc:
+            except (RuntimeError, ValueError, KeyError) as exc:
                 logger.warning("Failed to load model weights: %s", exc)
         else:
             logger.debug("Trainer model does not support load_state_dict")

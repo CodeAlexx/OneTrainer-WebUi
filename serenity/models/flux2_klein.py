@@ -1154,7 +1154,7 @@ class Flux2KleinModelLoader:
                     torch_dtype=dtype,
                     local_files_only=True,
                 )
-            except Exception:
+            except (OSError, RuntimeError, ValueError):
                 # Try loading as safetensors
                 st_file = list(transformer_path.glob("*.safetensors"))
                 if st_file:
@@ -1483,12 +1483,13 @@ class Flux2KleinSampler:
         Returns:
             Image tensor [1, 3, H, W] in [0, 1] range
         """
-        from ..adapters import create_adapter, detect_adapter_type, detect_rank
+        from ..adapters import create_adapter, detect_adapter_type, detect_rank, is_lycoris_state_dict
         from safetensors.torch import load_file
 
         # Load state dict and detect adapter type
         state_dict = load_file(lora_path)
         adapter_type = detect_adapter_type(state_dict)
+        adapter_backend = "lycoris" if is_lycoris_state_dict(state_dict) else "native"
         rank = detect_rank(state_dict)
 
         print(f"  Loading {adapter_type.value} adapter (rank={rank}) from {lora_path}")
@@ -1497,7 +1498,9 @@ class Flux2KleinSampler:
         adapter = create_adapter(
             adapter_type=adapter_type,
             rank=rank,
+            alpha=float(rank),
             model_type="flux_2_klein",
+            backend=adapter_backend,
             device=self.device,
             dtype=self.dtype,
         )
@@ -1519,7 +1522,7 @@ class Flux2KleinSampler:
             # Cleanup: unload adapter
             try:
                 adapter.unmerge()
-            except Exception:
+            except RuntimeError:
                 pass
 
         return image

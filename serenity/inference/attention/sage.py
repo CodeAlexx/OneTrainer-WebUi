@@ -52,7 +52,7 @@ def _probe() -> bool:
 
         _sageattn = sageattn
         _SAGE_AVAILABLE = True
-    except Exception:
+    except ImportError:
         _SAGE_AVAILABLE = False
 
     return _SAGE_AVAILABLE

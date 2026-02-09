@@ -45,7 +45,8 @@ def dequantize_if_needed(weight: torch.Tensor) -> tuple[torch.Tensor, bool]:
             inner, _meta = weight.__tensor_flatten__()
             main_key = next(iter(inner.keys()))
             return inner[main_key].float(), True
-        except Exception:
+        except (RuntimeError, AttributeError, KeyError):
+            # __tensor_flatten__ protocol failed or returned unexpected structure
             pass
 
     return weight, False

@@ -124,7 +124,7 @@ def _update_count(ui_state: UIState) -> None:
     try:
         count = len(ui_state.config.samples or [])
         dpg.set_value("sample_count", f"Samples: {count}")
-    except Exception:
+    except SystemError:
         pass
 
 

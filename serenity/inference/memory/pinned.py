@@ -41,7 +41,8 @@ def _discard_cuda_async_error() -> None:
         b = torch.tensor([1], dtype=torch.uint8, device="cuda")
         _ = a + b
         torch.cuda.synchronize()
-    except Exception:  # noqa: BLE001
+    except RuntimeError:
+        # CUDA async error or synchronization failed
         pass
 
 

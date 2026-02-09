@@ -238,7 +238,7 @@ class Flux1Model(BaseModelImpl):
                 subfolder="tokenizer",
                 local_files_only=True,
             )
-        except Exception:
+        except (OSError, ValueError):
             tokenizer = CLIPTokenizer.from_pretrained(
                 str(fallback_clip_path),
                 local_files_only=True,
@@ -249,7 +249,7 @@ class Flux1Model(BaseModelImpl):
                 subfolder="tokenizer_2",
                 local_files_only=True,
             )
-        except Exception:
+        except (OSError, ValueError):
             tokenizer_2 = T5Tokenizer.from_pretrained(
                 str(fallback_t5_path),
                 local_files_only=True,

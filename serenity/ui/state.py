@@ -73,7 +73,7 @@ class UIState:
         for tag, (path, hint) in self._bindings.items():
             try:
                 raw = dpg.get_value(tag)
-            except Exception:
+            except SystemError:
                 continue
             value = self._convert_value(tag, raw, hint)
             _set_nested(self.config, path, value)
@@ -85,7 +85,7 @@ class UIState:
         path, hint = self._bindings[tag]
         try:
             raw = dpg.get_value(tag)
-        except Exception:
+        except SystemError:
             return
         value = self._convert_value(tag, raw, hint)
         _set_nested(self.config, path, value)
@@ -101,7 +101,7 @@ class UIState:
             display = self._display_value(tag, value, hint)
             try:
                 dpg.set_value(tag, display)
-            except Exception:
+            except SystemError:
                 pass
 
     # ------------------------------------------------------------------

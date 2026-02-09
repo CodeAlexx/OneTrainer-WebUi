@@ -129,8 +129,9 @@ def _format_chat_prompt(tokenizer: Any, prompt: str) -> str:
         formatted = tokenizer.apply_chat_template(messages, **call_kwargs)
         if isinstance(formatted, str) and formatted.strip():
             return formatted
-    except Exception:
-        pass
+    except (RuntimeError, ValueError, TypeError):
+        import logging
+        logging.debug("Failed to format prompt with chat template, using raw prompt")
 
     return prompt
 

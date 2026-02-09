@@ -585,7 +585,7 @@ class InferenceEngine:
                 "VAE loaded (latent_ch=%d, scaling=%.5f, dtype=%s)",
                 latent_ch, scaling_factor, vae_dtype,
             )
-        except Exception as exc:
+        except (OSError, RuntimeError, ImportError) as exc:
             logger.warning("Failed to load VAE: %s", exc)
 
     def _build_sigma_schedule(self, alphas_cumprod: Tensor) -> None:

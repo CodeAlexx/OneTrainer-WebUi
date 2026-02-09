@@ -79,7 +79,8 @@ def detect_available_backends() -> list[AttentionType]:
         try:
             if checkers[backend]():
                 available.append(backend)
-        except Exception:
+        except (ImportError, RuntimeError):
+            # Skip backends that can't be imported or have CUDA initialization errors
             pass
 
     return available

@@ -31,7 +31,7 @@ def _probe() -> bool:
 
         _xformers_ops = xformers.ops
         _XFORMERS_AVAILABLE = True
-    except Exception:
+    except ImportError:
         _XFORMERS_AVAILABLE = False
 
     return _XFORMERS_AVAILABLE

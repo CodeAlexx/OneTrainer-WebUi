@@ -151,7 +151,10 @@ def load_model(
         dtype=dtype,
         ops_context=ops_context,
     )
-    model = model.to(device=device, dtype=dtype)
+    if ops_context is not None:
+        model = model.to(dtype=dtype)
+    else:
+        model = model.to(device=device, dtype=dtype)
     model.eval()
     return model
 
@@ -241,7 +244,7 @@ def load_vae(
         vae.eval()
         logger.info("Loaded VAE via diffusers AutoencoderKL from %s (latent_ch=%d)", path, latent_ch)
         return vae
-    except Exception:
+    except (ImportError, OSError, RuntimeError):
         logger.debug(
             "diffusers AutoencoderKL not available or failed; "
             "returning raw state dict as a fallback is not supported. "

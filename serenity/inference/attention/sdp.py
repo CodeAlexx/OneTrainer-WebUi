@@ -47,7 +47,8 @@ def _get_sdp_context():
                 if hasattr(SDPBackend, "CUDNN_ATTENTION"):
                     priority.insert(0, SDPBackend.CUDNN_ATTENTION)
                 return lambda: sdpa_kernel(priority, set_priority=True)
-    except Exception:
+    except (ImportError, AttributeError):
+        # Import failed or signature doesn't have set_priority parameter
         pass
     return None
 

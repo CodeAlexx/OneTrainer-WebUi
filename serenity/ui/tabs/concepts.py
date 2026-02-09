@@ -62,7 +62,7 @@ def _update_count(ui_state: UIState) -> None:
     """Refresh the concept count label."""
     try:
         dpg.set_value("concept_count", f"Concepts: {len(ui_state.config.concepts)}")
-    except Exception:
+    except SystemError:
         pass
 
 

@@ -70,7 +70,7 @@ def _is_valid_ltx_root(path: Path) -> bool:
         return False
     try:
         _validate_ltx_model_path(str(path))
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return False
     return True
 

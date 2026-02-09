@@ -90,7 +90,7 @@ def create_embedding(
                     vectors = encoded[: config.num_vectors].detach().clone()
                 else:
                     vectors = torch.randn(config.num_vectors, embedding_dim, dtype=dtype) * 0.01
-        except Exception:
+        except (RuntimeError, ValueError):
             logger.warning("encode_fn failed; using random init for '%s'", config.placeholder)
             vectors = torch.randn(config.num_vectors, embedding_dim, dtype=dtype) * 0.01
     else:

@@ -320,7 +320,7 @@ def _create_optimizer(
         if lion_class is None:
             try:
                 from lion_pytorch import Lion as lion_class
-            except Exception:
+            except ImportError:
                 print("[native/flux2] warning: Lion optimizer unavailable, falling back to AdamW.")
                 optimizer_name = "adamw"
                 lion_class = None
@@ -798,7 +798,7 @@ def _save_transformer_state(
 
         save_file(state_dict, str(output_path))
         return output_path
-    except Exception:
+    except (ImportError, OSError):
         fallback_path = output_path.with_suffix(".pt")
         torch.save(state_dict, fallback_path)
         return fallback_path
@@ -855,6 +855,7 @@ def _maybe_sample(
     sample_block = config.get("sample", {}) if isinstance(config.get("sample"), dict) else {}
     if not sample_block.get("enabled", False):
         return
+    use_live_adapter = _as_bool(sample_block.get("use_live_adapter"), True)
 
     interval = int(sample_block.get("interval", 0) or 0)
     if interval <= 0 or step % interval != 0:
@@ -882,7 +883,7 @@ def _maybe_sample(
     sample_assistant_lora_strength = _optional_float(
         sample_block.get("assistant_lora_inference_strength") or sample_block.get("assistant_lora_strength")
     )
-    if live_adapter is not None and hasattr(live_adapter, "save"):
+    if use_live_adapter and live_adapter is not None and hasattr(live_adapter, "save"):
         try:
             adapter_cache_dir = samples_dir / ".adapter_cache"
             adapter_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -890,7 +891,7 @@ def _maybe_sample(
             live_adapter.save(str(sample_assistant_lora_path))
             if sample_assistant_lora_strength is None:
                 sample_assistant_lora_strength = 1.0
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             print(f"[native/flux2] warning: failed to snapshot live adapter for sampling: {exc}")
             sample_assistant_lora_path = None
 
@@ -1094,12 +1095,25 @@ def run_native_flux2_training(
     if not full_finetune:
         rank = int(adapter_block.get("rank") or adapter_block.get("network_dim") or 16)
         alpha = float(adapter_block.get("alpha") or adapter_block.get("network_alpha") or rank)
+        adapter_backend: str | None = None
+        if adapter_type == "lora":
+            if isinstance(config.get("lycoris"), dict):
+                adapter_backend = "lycoris"
+            else:
+                adapter_backend = str(
+                    adapter_block.get("backend")
+                    or adapter_block.get("implementation")
+                    or config.get("lora_backend")
+                    or config.get("adapter_backend")
+                    or "native"
+                ).strip().lower()
         adapter = create_adapter(
             adapter_type=adapter_type,
             rank=rank,
             alpha=alpha,
             model_type=flux_model_type.value,
             dropout=float(adapter_block.get("dropout", 0.0)),
+            backend=adapter_backend,
             **_build_adapter_kwargs(adapter_block),
         )
         trainer.inject_adapter(adapter)

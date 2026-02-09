@@ -69,7 +69,7 @@ def _detect_screen_height() -> int:
         h = root.winfo_screenheight()
         root.destroy()
         return h
-    except Exception:
+    except (ImportError, RuntimeError):
         pass
 
     # Fallback: xrandr on Linux
@@ -83,7 +83,7 @@ def _detect_screen_height() -> int:
                 # e.g. "   3840x2160     60.00*+"
                 res = line.split()[0]
                 return int(res.split("x")[1])
-    except Exception:
+    except (OSError, ValueError, IndexError):
         pass
 
     return 1080

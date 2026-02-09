@@ -16,7 +16,7 @@ import torch.nn as nn
 
 try:  # pragma: no cover - optional dependency guard
     from lycoris import create_lycoris
-except Exception:  # pragma: no cover - optional dependency guard
+except ImportError:  # pragma: no cover - optional dependency guard
     create_lycoris = None
 
 

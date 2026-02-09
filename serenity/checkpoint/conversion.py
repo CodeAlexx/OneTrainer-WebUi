@@ -85,7 +85,7 @@ def _is_lora_safetensors(path: Path) -> bool:
             # LoRA files have keys like "lora_unet_..." or contain "lora" in keys
             lora_keys = [k for k in keys if "lora" in k.lower() or "alpha" in k.lower()]
             return len(lora_keys) > len(keys) * 0.3
-    except Exception:
+    except (OSError, RuntimeError, KeyError):
         # Fall back to size heuristic: LoRA files are typically < 500MB
         return path.stat().st_size < 500 * 1024 * 1024
 
@@ -98,8 +98,8 @@ def _is_lora_torch(path: Path) -> bool:
             keys = list(state.keys())
             lora_keys = [k for k in keys if "lora" in k.lower()]
             return len(lora_keys) > len(keys) * 0.3
-    except Exception:
-        pass
+    except (OSError, RuntimeError, KeyError):
+        logger.debug("Could not read checkpoint file %s for LoRA detection, using size heuristic", path)
     return path.stat().st_size < 500 * 1024 * 1024
 
 

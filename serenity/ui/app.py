@@ -389,7 +389,7 @@ class SerenityApp:
     def _set_status(self, text: str) -> None:
         try:
             dpg.set_value(TAG_STATUS_LABEL, text)
-        except Exception:
+        except SystemError:
             pass
 
     def _list_presets(self) -> list[str]:

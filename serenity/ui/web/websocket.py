@@ -41,7 +41,7 @@ class ConnectionManager:
         for connection in self.active_connections:
             try:
                 await connection.send_json(message)
-            except Exception:
+            except (RuntimeError, ConnectionError, OSError):
                 stale.append(connection)
 
         for ws in stale:

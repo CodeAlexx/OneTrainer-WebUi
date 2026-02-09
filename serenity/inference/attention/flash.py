@@ -31,7 +31,7 @@ def _probe() -> bool:
 
         _flash_attn_func = flash_attn_func
         _FLASH_AVAILABLE = True
-    except Exception:
+    except ImportError:
         _FLASH_AVAILABLE = False
 
     return _FLASH_AVAILABLE
@@ -71,7 +71,8 @@ def _register_flash_custom_op():
             _flash_custom_op = _flash_op
         else:
             _flash_custom_op = flash_attn_func
-    except Exception:
+    except (ImportError, RuntimeError):
+        # flash_attn not available or custom op registration failed
         _flash_custom_op = None
 
     return _flash_custom_op

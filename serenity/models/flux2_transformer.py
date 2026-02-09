@@ -8,10 +8,10 @@ import torch
 
 try:
     from diffusers import Flux2Transformer2DModel as _DiffusersFlux2Transformer2DModel
-except Exception:  # pragma: no cover - optional dependency
+except ImportError:  # pragma: no cover - optional dependency
     try:
         from diffusers import FluxTransformer2DModel as _DiffusersFlux2Transformer2DModel
-    except Exception:  # pragma: no cover - optional dependency
+    except ImportError:  # pragma: no cover - optional dependency
         _DiffusersFlux2Transformer2DModel = None
 
 

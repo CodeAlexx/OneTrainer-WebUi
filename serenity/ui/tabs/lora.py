@@ -233,7 +233,7 @@ def _update_peft_visibility(peft_value) -> None:
     is_lokr = val.upper() == "LOKR"
     try:
         dpg.configure_item("__lokr_settings_group", show=is_lokr)
-    except Exception:
+    except SystemError:
         pass  # Widget may not exist yet during initial build
 
 

@@ -1376,7 +1376,7 @@ def _save_module_state(
 
         save_file(state_dict, str(output_path))
         return output_path
-    except Exception:
+    except (ImportError, OSError):
         fallback_path = output_path.with_suffix(".pt")
         torch.save(state_dict, fallback_path)
         return fallback_path
@@ -1511,6 +1511,7 @@ def _maybe_sample(
     sample_block = config.get("sample", {}) if isinstance(config.get("sample"), dict) else {}
     if not sample_block.get("enabled", False):
         return
+    use_live_adapter = _as_bool(sample_block.get("use_live_adapter"), True)
 
     interval = int(sample_block.get("interval", 0) or 0)
     if interval <= 0 or step % interval != 0:
@@ -1524,7 +1525,7 @@ def _maybe_sample(
     sample_assistant_lora_strength = _optional_float(
         sample_block.get("assistant_lora_inference_strength") or sample_block.get("assistant_lora_strength")
     )
-    if live_adapter is not None and hasattr(live_adapter, "save"):
+    if use_live_adapter and live_adapter is not None and hasattr(live_adapter, "save"):
         try:
             adapter_cache_dir = output_dir / "samples" / ".adapter_cache"
             adapter_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1532,7 +1533,7 @@ def _maybe_sample(
             live_adapter.save(str(sample_assistant_lora_path))
             if sample_assistant_lora_strength is None:
                 sample_assistant_lora_strength = 1.0
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             print(f"[native/diffusion] warning: failed to snapshot live adapter for sampling: {exc}")
             sample_assistant_lora_path = None
 
@@ -1687,7 +1688,7 @@ def _setup_memory_strategy(
     try:
         strategy.setup(SimpleNamespace(transformer=train_module))
         return strategy
-    except Exception as exc:
+    except (ImportError, RuntimeError) as exc:
         print(f"[native/diffusion] warning: memory strategy setup skipped ({exc})")
         return None
 
@@ -1808,7 +1809,7 @@ def _maybe_load_transformer_override(
             "[native/diffusion] loaded transformer override "
             f"from {path} (missing={len(missing)}, unexpected={len(unexpected)})"
         )
-    except Exception as exc:
+    except (OSError, RuntimeError) as exc:
         print(f"[native/diffusion] warning: failed to load override weights {path}: {exc}")
 
 
@@ -2238,12 +2239,25 @@ def run_native_diffusion_training(
         alpha = float(
             adapter_block.get("alpha") or adapter_block.get("network_alpha") or config.get("lora_alpha") or rank
         )
+        adapter_backend: str | None = None
+        if adapter_type == "lora":
+            if isinstance(config.get("lycoris"), dict):
+                adapter_backend = "lycoris"
+            else:
+                adapter_backend = str(
+                    adapter_block.get("backend")
+                    or adapter_block.get("implementation")
+                    or config.get("lora_backend")
+                    or config.get("adapter_backend")
+                    or "native"
+                ).strip().lower()
         adapter = create_adapter(
             adapter_type=adapter_type,
             rank=rank,
             alpha=alpha,
             model_type=model_type_enum.value,
             dropout=float(adapter_block.get("dropout", 0.0)),
+            backend=adapter_backend,
             **_build_adapter_kwargs(adapter_block),
         )
         adapter.inject(train_module)

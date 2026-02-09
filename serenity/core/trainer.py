@@ -211,13 +211,13 @@ class BackupManager:
             self._last_backup_step = progress.global_step
             logger.info("Backup created at step %d -> %s", progress.global_step, backup_path)
 
-        except Exception:
+        except OSError:
             logger.error("Failed to create backup: %s", traceback.format_exc())
             # Clean up partial backup
             try:
                 if backup_path.is_dir():
                     shutil.rmtree(backup_path)
-            except Exception:
+            except OSError:
                 logger.error("Failed to clean up partial backup: %s", traceback.format_exc())
             return None
 
@@ -265,7 +265,7 @@ class BackupManager:
                 shutil.rmtree(dirpath)
                 removed.append(dirpath)
                 logger.info("Removed old backup: %s", dirpath)
-            except Exception:
+            except OSError:
                 logger.warning("Could not delete old backup: %s", dirpath)
 
         return removed

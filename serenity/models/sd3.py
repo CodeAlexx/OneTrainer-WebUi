@@ -103,7 +103,7 @@ def _resolve_transformer_checkpoint_dir(transformer_dir: Path) -> Path:
     try:
         index_data = json.loads(sharded_diffusers_index.read_text())
         shard_names = sorted(set(index_data.get("weight_map", {}).values()))
-    except Exception:
+    except (OSError, json.JSONDecodeError, KeyError):
         shard_names = []
 
     for shard_name in shard_names:

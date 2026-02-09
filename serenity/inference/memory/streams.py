@@ -250,7 +250,8 @@ class GatheredTransfer:
             try:
                 inner_names, _meta = w.__tensor_flatten__()
                 w = getattr(w, inner_names[0])
-            except Exception:
+            except (RuntimeError, AttributeError):
+                # __tensor_flatten__ protocol failed or tensor structure unexpected
                 pass  # Fall through to normal measurement.
         total = _tensor_aligned_size(w)
         if bias is not None:
@@ -291,7 +292,7 @@ class GatheredTransfer:
                 }
                 # Use the primary inner tensor for the packed buffer.
                 weight = inner_tensors[inner_names[0]]
-            except Exception:
+            except (RuntimeError, AttributeError):
                 logger.debug("QuantizedTensor flatten failed, falling back to plain pack")
                 quant_state = {}
 
@@ -366,7 +367,7 @@ class GatheredTransfer:
                 weight = cls.__tensor_unflatten__(  # type: ignore[union-attr]
                     inner_tensors, metadata, weight.size(), weight.stride(),
                 )
-            except Exception:
+            except (RuntimeError, AttributeError):
                 logger.debug("QuantizedTensor unflatten failed, returning plain tensor")
 
         return weight, bias

@@ -88,7 +88,7 @@ class CacheManager:
             return None
         try:
             return torch.load(cache_path, map_location="cpu", weights_only=True)
-        except Exception:
+        except (OSError, RuntimeError, EOFError):
             logger.warning("Failed to load cached latent: %s", cache_path)
             return None
 
@@ -144,7 +144,7 @@ class CacheManager:
             return None
         try:
             return torch.load(cache_path, map_location="cpu", weights_only=True)
-        except Exception:
+        except (OSError, RuntimeError, EOFError):
             logger.warning("Failed to load cached text embedding: %s", cache_path)
             return None
 

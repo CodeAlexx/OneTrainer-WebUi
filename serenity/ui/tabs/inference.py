@@ -22,10 +22,10 @@ from typing import Any
 import dearpygui.dearpygui as dpg
 
 from serenity.ui.theme import scaled
+from serenity.ui.web.scanner import ModelScanner
 from serenity.ui.widgets import (
     labeled_checkbox,
     labeled_combo,
-    labeled_file,
     labeled_dir,
     labeled_float,
     labeled_input,
@@ -104,11 +104,68 @@ _ASPECT_PRESETS = {
 
 # -- Module-level state --------------------------------------------------------
 
+_scanner = ModelScanner(root_dirs=["/home/alex/EriDiffusion/Models"])
+_model_path_map: dict[str, str] = {}
+_lora_path_map: dict[str, str] = {}
+
 _engine: Any = None
 _generating = False
 _cancel_flag = False
 _gen_thread: threading.Thread | None = None
 _history: list[dict[str, Any]] = []
+
+
+# -- Scanner helpers -----------------------------------------------------------
+
+
+def _fmt_size(mb: float) -> str:
+    """Format a size in MB to a human-readable string."""
+    if mb >= 1024:
+        return f"{mb / 1024:.1f} GB"
+    return f"{mb:.0f} MB"
+
+
+def _populate_models() -> list[str]:
+    """Scan and return display labels for checkpoint models."""
+    global _model_path_map
+    models = _scanner.scan_checkpoints()
+    _model_path_map = {}
+    items: list[str] = []
+    for m in models:
+        label = f"{m.name} ({_fmt_size(m.size_mb)})"
+        _model_path_map[label] = m.path
+        items.append(label)
+    return items
+
+
+def _populate_loras() -> list[str]:
+    """Scan and return display labels for LoRA models."""
+    global _lora_path_map
+    loras = _scanner.scan_loras()
+    _lora_path_map = {"(None)": ""}
+    items: list[str] = ["(None)"]
+    for m in loras:
+        label = f"{m.name} ({_fmt_size(m.size_mb)})"
+        _lora_path_map[label] = m.path
+        items.append(label)
+    return items
+
+
+def _refresh_models(
+    _s: Any = None, _a: Any = None, _u: Any = None,
+) -> None:
+    """Refresh model and LoRA lists from disk."""
+    _scanner.refresh()
+    model_items = _populate_models()
+    lora_items = _populate_loras()
+    try:
+        dpg.configure_item(TAG_INF_MODEL_PATH, items=model_items)
+        if model_items:
+            dpg.set_value(TAG_INF_MODEL_PATH, model_items[0])
+        dpg.configure_item(TAG_INF_LORA_PATH, items=lora_items)
+        dpg.set_value(TAG_INF_LORA_PATH, "(None)")
+    except SystemError:
+        pass
 
 
 # -- Public entry point --------------------------------------------------------
@@ -131,11 +188,18 @@ def _build_left(parent: int | str) -> None:
 
     # -- Model section ---------------------------------------------------------
     with section("Model", parent=parent):
-        labeled_file(
-            "Model Path",
+        model_items = _populate_models()
+        labeled_combo(
+            "Model",
+            model_items,
             tag=TAG_INF_MODEL_PATH,
-            default_value="",
-            tip="Path to .safetensors, .ckpt, or .gguf model file",
+            default_value=model_items[0] if model_items else "",
+            tip="Select a model from scanned directories",
+        )
+        dpg.add_button(
+            label="Refresh",
+            callback=_refresh_models,
+            width=scaled(70),
         )
 
     # -- Prompt section --------------------------------------------------------
@@ -265,11 +329,13 @@ def _build_right(parent: int | str) -> None:
 
     # -- LoRA section ----------------------------------------------------------
     with section("LoRA", parent=parent, default_open=False):
-        labeled_file(
-            "LoRA Path",
+        lora_items = _populate_loras()
+        labeled_combo(
+            "LoRA",
+            lora_items,
             tag=TAG_INF_LORA_PATH,
-            default_value="",
-            tip="Path to LoRA .safetensors file",
+            default_value="(None)",
+            tip="Select a LoRA from scanned directories",
         )
         labeled_float(
             "LoRA Weight",
@@ -379,12 +445,12 @@ def _update_vram_label() -> None:
             text = "VRAM: No CUDA device"
     except ImportError:
         text = "VRAM: torch not available"
-    except Exception:
+    except RuntimeError:
         text = "VRAM: unknown"
 
     try:
         dpg.set_value(TAG_INF_VRAM_LABEL, text)
-    except Exception:
+    except SystemError:
         pass
 
 
@@ -396,7 +462,7 @@ def _set_status(text: str, color: tuple[int, int, int] = (100, 200, 130)) -> Non
     try:
         dpg.set_value(TAG_INF_STATUS, text)
         dpg.configure_item(TAG_INF_STATUS, color=color)
-    except Exception:
+    except SystemError:
         pass
 
 
@@ -427,7 +493,7 @@ def _on_generate_click(
 
     # Gather parameters
     params = {
-        "model_path": dpg.get_value(TAG_INF_MODEL_PATH),
+        "model_path": _model_path_map.get(dpg.get_value(TAG_INF_MODEL_PATH), ""),
         "prompt": dpg.get_value(TAG_INF_PROMPT),
         "negative_prompt": dpg.get_value(TAG_INF_NEG_PROMPT),
         "seed": dpg.get_value(TAG_INF_SEED),
@@ -444,7 +510,7 @@ def _on_generate_click(
         "rescale_cfg": dpg.get_value(TAG_INF_RESCALE_CFG),
         "mahiro": dpg.get_value(TAG_INF_MAHIRO),
         "batch_count": dpg.get_value(TAG_INF_BATCH_COUNT),
-        "lora_path": dpg.get_value(TAG_INF_LORA_PATH),
+        "lora_path": _lora_path_map.get(dpg.get_value(TAG_INF_LORA_PATH), ""),
         "lora_weight": dpg.get_value(TAG_INF_LORA_WEIGHT),
     }
 
@@ -538,7 +604,7 @@ def _run_generation(params: dict[str, Any]) -> None:
                     TAG_INF_PROGRESS,
                     overlay=f"{step + 1} / {total}",
                 )
-            except Exception:
+            except SystemError:
                 pass
 
         # Run generation
@@ -615,7 +681,7 @@ def _run_generation(params: dict[str, Any]) -> None:
         ]
         try:
             dpg.set_value(TAG_INF_INFO_PANEL, "\n".join(info_lines))
-        except Exception:
+        except SystemError:
             pass
 
         # Add to history
@@ -651,7 +717,7 @@ def _finish_generation() -> None:
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (25, 135, 80))
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (20, 110, 65))
         dpg.bind_item_theme(TAG_INF_GENERATE_BTN, gen_theme)
-    except Exception:
+    except SystemError:
         pass
 
 
@@ -694,7 +760,7 @@ def _rebuild_history() -> None:
     """Redraw the history list."""
     try:
         dpg.delete_item(TAG_INF_HISTORY_LIST, children_only=True)
-    except Exception:
+    except SystemError:
         return
 
     for entry in _history:

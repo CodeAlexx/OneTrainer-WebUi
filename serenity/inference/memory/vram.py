@@ -230,7 +230,8 @@ def device_supports_non_blocking(device: torch.device) -> bool:
         elif device.type == "xpu" and hasattr(torch, "xpu"):
             torch.xpu.synchronize(device)
         _NON_BLOCKING_CACHE[key] = True
-    except Exception:
+    except RuntimeError:
+        # Non-blocking transfer not supported on this device/driver
         _NON_BLOCKING_CACHE[key] = False
 
     return _NON_BLOCKING_CACHE[key]

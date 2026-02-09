@@ -239,7 +239,8 @@ def _needs_conv3d_workaround() -> bool:
         # Conservative detection: if cudnn_convolution is available,
         # assume we might need the workaround on Ampere/Ada GPUs.
         _CONV3D_WORKAROUND = hasattr(torch, "cudnn_convolution")
-    except Exception:
+    except (RuntimeError, AttributeError):
+        # CUDA check failed or cudnn_convolution not available
         _CONV3D_WORKAROUND = False
 
     return _CONV3D_WORKAROUND
