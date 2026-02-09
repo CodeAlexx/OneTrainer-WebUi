@@ -7,7 +7,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from serenity.inference.models.base import BaseModelAdapter
+from serenity.inference.models.base import BaseModelAdapter, log_state_dict_info, place_model
 from serenity.inference.models.detection import ModelArchitecture
 
 __all__ = [
@@ -100,13 +100,9 @@ class SD3Adapter(BaseModelAdapter):
 
         model = SD3Transformer2DModel(**config)
         missing, unexpected, mismatched = safe_load_state_dict(model, model_sd)
-        if missing:
-            logger.warning("SD3: %d missing keys", len(missing))
-        if unexpected:
-            logger.debug("SD3: %d unexpected keys", len(unexpected))
+        log_state_dict_info(missing, unexpected, "SD3")
 
-        model = model.to(device=torch.device(device), dtype=dtype)
-        model.eval()
+        model = place_model(model, device, dtype, ops_context=kwargs.get("ops_context"))
         return model
 
     def get_text_encoder_types(self) -> list[str]:

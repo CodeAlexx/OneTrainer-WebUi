@@ -14,6 +14,14 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from serenity.training.adapter_utils import (
+    MODEL_ALIASES as _MODEL_ALIASES,
+    normalize_model_type as _normalize_model_type,
+    coerce_dtype as _coerce_dtype,
+    resolve_target_module as _resolve_target_module_impl,
+    dedupe as _dedupe_impl,
+)
+
 try:  # pragma: no cover - optional dependency guard
     from lycoris import create_lycoris
 except ImportError:  # pragma: no cover - optional dependency guard
@@ -55,30 +63,7 @@ _ALGO_MAP: dict[AdapterType, str] = {
 }
 
 
-_MODEL_ALIASES: dict[str, str] = {
-    "z_image": "zimage",
-    "sd_15": "sd15",
-    "sd_15_inpainting": "sd15_inpainting",
-    "sd_20": "sd20",
-    "sd_20_base": "sd20_base",
-    "sd_20_inpainting": "sd20_inpainting",
-    "sd_20_depth": "sd20_depth",
-    "sd_21": "sd21",
-    "sd_21_base": "sd21_base",
-    "sd3.5": "sd35",
-    "stable_diffusion_3": "sd3",
-    "stable_diffusion_35": "sd35",
-    "stable_diffusion_3.5": "sd35",
-    "flux2": "flux_2",
-    "flux_2_dev": "flux_2",
-    "flux_klein": "flux_2_klein",
-    "flux2_klein": "flux_2_klein",
-    "flux2_klein_4b": "flux_2_klein_4b",
-    "flux2_klein_9b": "flux_2_klein_9b",
-    "flux_fill": "flux_fill_dev",
-    "hidream": "hi_dream_full",
-    "chroma": "chroma_1",
-}
+# _MODEL_ALIASES, _normalize_model_type, _coerce_dtype — from adapter_utils
 
 _LYCORIS_DISABLED_MODEL_TYPES: set[str] = {"ltx2"}
 
@@ -118,24 +103,7 @@ DEFAULT_TARGETS: dict[str, list[str]] = {
 }
 
 
-def _normalize_model_type(value: str) -> str:
-    normalized = str(value).strip().lower().replace("-", "_")
-    return _MODEL_ALIASES.get(normalized, normalized)
-
-
-def _coerce_dtype(value: torch.dtype | str | None) -> torch.dtype | None:
-    if value is None:
-        return None
-    if isinstance(value, torch.dtype):
-        return value
-    normalized = str(value).strip().lower().replace("-", "").replace("_", "")
-    if normalized in {"bf16", "bfloat16"}:
-        return torch.bfloat16
-    if normalized in {"fp16", "float16", "half"}:
-        return torch.float16
-    if normalized in {"fp32", "float32", "float"}:
-        return torch.float32
-    return None
+# _normalize_model_type, _coerce_dtype — imported from adapter_utils above
 
 
 @dataclass
@@ -232,32 +200,7 @@ class LyCORISManager:
         self._target_module: nn.Module | None = None
 
     def _resolve_target_module(self, model_or_pipeline: Any) -> nn.Module:
-        candidates: list[Any] = []
-        if isinstance(model_or_pipeline, dict):
-            candidates.extend(
-                model_or_pipeline[key]
-                for key in ("module", "pipeline", "model", "unet", "transformer")
-                if key in model_or_pipeline
-            )
-        else:
-            candidates.append(model_or_pipeline)
-            candidates.extend(
-                getattr(model_or_pipeline, attr)
-                for attr in ("pipeline", "model", "unet", "transformer")
-                if hasattr(model_or_pipeline, attr)
-            )
-
-        for candidate in candidates:
-            if candidate is None:
-                continue
-            for attr in ("unet", "transformer", "prior_prior"):
-                component = getattr(candidate, attr, None)
-                if isinstance(component, nn.Module):
-                    return component
-            if isinstance(candidate, nn.Module):
-                return candidate
-
-        raise TypeError("Could not resolve a trainable torch.nn.Module for LyCORIS attachment.")
+        return _resolve_target_module_impl(model_or_pipeline)
 
     def _algo_name(self) -> str:
         return _ALGO_MAP.get(self.config.adapter_type, "lora")
@@ -298,14 +241,7 @@ class LyCORISManager:
 
     @staticmethod
     def _dedupe(values: list[str]) -> list[str]:
-        out: list[str] = []
-        seen: set[str] = set()
-        for value in values:
-            if value in seen:
-                continue
-            seen.add(value)
-            out.append(value)
-        return out
+        return _dedupe_impl(values, strip=False)
 
     def _target_preset_path(self) -> Path | None:
         """

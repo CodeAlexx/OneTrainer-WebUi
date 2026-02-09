@@ -297,7 +297,7 @@ def test_load_media_tensor_repeats_image_for_ltx_video_mode(monkeypatch):
     base = torch.ones(3, 4, 4, dtype=torch.float32)
 
     monkeypatch.setattr(
-        "serenity.cli.native_diffusion._load_image_tensor",
+        "serenity.cli.diffusion_data._load_image_tensor",
         lambda *_args, **_kwargs: base.clone(),
     )
 
@@ -320,7 +320,7 @@ def test_load_media_tensor_decodes_and_pads_video_frames(monkeypatch):
     raw = frame_a.tobytes() + frame_b.tobytes()
 
     monkeypatch.setattr(
-        "serenity.cli.native_diffusion.subprocess.run",
+        "serenity.cli.diffusion_data.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=raw, stderr=b""),
     )
 

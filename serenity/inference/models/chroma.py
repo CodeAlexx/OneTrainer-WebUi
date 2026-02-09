@@ -8,7 +8,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from serenity.inference.models.base import BaseModelAdapter
+from serenity.inference.models.base import BaseModelAdapter, log_state_dict_info, place_model
 from serenity.inference.models.detection import ModelArchitecture
 
 __all__ = [
@@ -88,12 +88,9 @@ class ChromaAdapter(BaseModelAdapter):
 
         model = FluxTransformer2DModel(**_CHROMA_CONFIG)
         missing, unexpected, mismatched = safe_load_state_dict(model, model_sd)
-        if missing:
-            logger.warning("Chroma: %d missing keys", len(missing))
-        if unexpected:
-            logger.debug("Chroma: %d unexpected keys", len(unexpected))
-        model = model.to(device=torch.device(device), dtype=dtype)
-        model.eval()
+        log_state_dict_info(missing, unexpected, "Chroma")
+
+        model = place_model(model, device, dtype, ops_context=kwargs.get("ops_context"))
         return model
 
     def get_text_encoder_types(self) -> list[str]:

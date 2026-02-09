@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from serenity.inference.models.base import BaseModelAdapter
+from serenity.inference.models.base import BaseModelAdapter, log_state_dict_info, place_model
 from serenity.inference.models.detection import ModelArchitecture
 
 __all__ = [
@@ -156,13 +156,12 @@ class FluxAdapter(BaseModelAdapter):
 
         model = FluxTransformer2DModel(**config)
         missing, unexpected, mismatched = safe_load_state_dict(model, model_sd)
-        if missing:
-            logger.warning("Flux %s: %d missing keys", self._variant, len(missing))
-        if unexpected:
-            logger.debug("Flux %s: %d unexpected keys", self._variant, len(unexpected))
+        log_state_dict_info(missing, unexpected, f"Flux {self._variant}")
 
-        model = model.to(device=torch.device(device), dtype=dtype)
-        model.eval()
+        ops_context = kwargs.get("ops_context")
+        model = place_model(model, device, dtype, ops_context=ops_context)
+        if ops_context is not None:
+            logger.info("Flux %s: offload active, keeping model on CPU for managed placement", self._variant)
         return model
 
     def get_text_encoder_types(self) -> list[str]:
@@ -346,13 +345,12 @@ class FluxKlein4BAdapter(FluxAdapter):
 
         model = FluxTransformer2DModel(**_FLUX_KLEIN_4B_CONFIG)
         missing, unexpected, mismatched = safe_load_state_dict(model, model_sd)
-        if missing:
-            logger.warning("Flux Klein 4B: %d missing keys", len(missing))
-        if unexpected:
-            logger.debug("Flux Klein 4B: %d unexpected keys", len(unexpected))
+        log_state_dict_info(missing, unexpected, "Flux Klein 4B")
 
-        model = model.to(device=torch.device(device), dtype=dtype)
-        model.eval()
+        ops_context = kwargs.get("ops_context")
+        model = place_model(model, device, dtype, ops_context=ops_context)
+        if ops_context is not None:
+            logger.info("Flux Klein 4B: offload active, keeping model on CPU for managed placement")
         return model
 
 
@@ -403,13 +401,12 @@ class FluxKlein9BAdapter(FluxAdapter):
         # Klein 9B uses the same config as standard Flux (19/38 blocks)
         model = FluxTransformer2DModel(**_FLUX_CONFIG)
         missing, unexpected, mismatched = safe_load_state_dict(model, model_sd)
-        if missing:
-            logger.warning("Flux Klein 9B: %d missing keys", len(missing))
-        if unexpected:
-            logger.debug("Flux Klein 9B: %d unexpected keys", len(unexpected))
+        log_state_dict_info(missing, unexpected, "Flux Klein 9B")
 
-        model = model.to(device=torch.device(device), dtype=dtype)
-        model.eval()
+        ops_context = kwargs.get("ops_context")
+        model = place_model(model, device, dtype, ops_context=ops_context)
+        if ops_context is not None:
+            logger.info("Flux Klein 9B: offload active, keeping model on CPU for managed placement")
         return model
 
 

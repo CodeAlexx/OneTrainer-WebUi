@@ -7,7 +7,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from serenity.inference.models.base import BaseModelAdapter
+from serenity.inference.models.base import BaseModelAdapter, log_state_dict_info, place_model
 from serenity.inference.models.detection import ModelArchitecture
 
 __all__ = [
@@ -148,13 +148,9 @@ class SDXLAdapter(BaseModelAdapter):
 
         model = UNet2DConditionModel(**_SDXL_UNET_CONFIG)
         missing, unexpected, mismatched = safe_load_state_dict(model, unet_sd)
-        if missing:
-            logger.warning("SDXL UNet: %d missing keys", len(missing))
-        if unexpected:
-            logger.debug("SDXL UNet: %d unexpected keys", len(unexpected))
+        log_state_dict_info(missing, unexpected, "SDXL UNet")
 
-        model = model.to(device=torch.device(device), dtype=dtype)
-        model.eval()
+        model = place_model(model, device, dtype, ops_context=kwargs.get("ops_context"))
         return model
 
     def get_text_encoder_types(self) -> list[str]:
@@ -267,13 +263,9 @@ class SDXLRefinerAdapter(BaseModelAdapter):
 
         model = UNet2DConditionModel(**_SDXL_REFINER_UNET_CONFIG)
         missing, unexpected, mismatched = safe_load_state_dict(model, unet_sd)
-        if missing:
-            logger.warning("SDXL Refiner UNet: %d missing keys", len(missing))
-        if unexpected:
-            logger.debug("SDXL Refiner UNet: %d unexpected keys", len(unexpected))
+        log_state_dict_info(missing, unexpected, "SDXL Refiner UNet")
 
-        model = model.to(device=torch.device(device), dtype=dtype)
-        model.eval()
+        model = place_model(model, device, dtype, ops_context=kwargs.get("ops_context"))
         return model
 
     def get_text_encoder_types(self) -> list[str]:

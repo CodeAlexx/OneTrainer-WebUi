@@ -12,6 +12,26 @@ from pathlib import Path
 from typing import Any
 
 from serenity.adapters import create_adapter
+from serenity.cli.utils import (
+    IMAGE_EXTENSIONS as _IMAGE_EXTENSIONS,
+    COND_LABEL_SUFFIXES as _COND_LABEL_SUFFIXES,
+    coerce_dtype as _coerce_dtype,
+    as_bool as _as_bool,
+    coerce_int_or_none as _coerce_int_or_none,
+    optional_int as _optional_int,
+    optional_float as _optional_float,
+    normalize_model_type as _normalize_model_type,
+    first_config_value as _first_config_value,
+    resolve_hf_local_path as _resolve_hf_local_path,
+    is_condlabel_image as _is_condlabel_image,
+    strip_condlabel_suffix as _strip_condlabel_suffix,
+    load_image_tensor as _load_image_tensor,
+    load_caption as _load_caption,
+    collect_concept_dirs as _collect_concept_dirs,
+    build_training_pairs as _build_training_pairs,
+    resolve_reference_image_path as _resolve_reference_image_path,
+    build_edit_training_pairs as _build_edit_training_pairs,
+)
 from serenity.core.interfaces import ModelType
 from serenity.models.flux2_klein import Flux2KleinModelLoader
 from serenity.sampling.sampler import create_sampler
@@ -23,8 +43,17 @@ import torch
 import numpy as np
 from PIL import Image
 
-_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-_COND_LABEL_SUFFIXES = ("-condlabel", "_condlabel")
+from serenity.cli.flux2_optimizer import (
+    _create_lr_scheduler,
+    _create_optimizer,
+    _normalize_optimizer_name,
+    _normalize_scheduler_name,
+    _resolve_optimizer_steps,
+    _resolve_warmup_steps,
+    _resolve_scheduler_min_factor,
+    _resolve_scheduler_cycles,
+)
+
 _FULL_TRAINING_METHODS = {"full", "full_finetune", "full_fine_tune", "fine_tune", "finetune"}
 _UNSUPPORTED_NATIVE_FLUX2_TRAINING_METHODS = {"embedding", "fine_tune_vae", "finetune_vae"}
 _ADAPTER_ALIASES = {
@@ -51,37 +80,6 @@ _KNOWN_ADAPTER_KEYS = (
     "full",
 )
 
-_CONSTANT_SCHEDULERS = {"", "none", "off", "constant", "constant_with_warmup", "adafactor"}
-_LINEAR_SCHEDULERS = {"linear"}
-_COSINE_SCHEDULERS = {"cosine"}
-_COSINE_RESTART_SCHEDULERS = {"cosine_with_restarts", "cosine_with_hard_restarts", "cosine_restarts"}
-_SCHEDULER_ALIASES = {
-    "": "constant",
-    "none": "constant",
-    "off": "constant",
-    "constant_with_warmup": "constant",
-    "cosine_with_hard_restart": "cosine_with_hard_restarts",
-    "cosine_restart": "cosine_with_restarts",
-    "learning_rate_scheduler": "constant",
-}
-_OPTIMIZER_ALIASES = {
-    "adamw": "adamw",
-    "adamw_8bit": "adamw",
-    "adamw8bit": "adamw",
-    "paged_adamw_8bit": "adamw",
-    "paged_adamw8bit": "adamw",
-    "schedule_free_adamw": "adamw",
-    "schedulefree_adamw": "adamw",
-    "adam": "adam",
-    "adam_8bit": "adam",
-    "adam8bit": "adam",
-    "paged_adam_8bit": "adam",
-    "paged_adam8bit": "adam",
-    "sgd": "sgd",
-    "adafactor": "adafactor",
-    "lion": "lion",
-}
-
 
 @dataclass
 class _CachedSample:
@@ -96,311 +94,8 @@ class _CachedEditSample:
     text_embeddings: torch.Tensor
 
 
-def _resolve_hf_local_path(model_path: str) -> str:
-    expanded = Path(model_path).expanduser()
-    if expanded.exists():
-        return str(expanded)
-
-    if "/" not in model_path:
-        raise FileNotFoundError(
-            f"Model path not found locally: {model_path}. "
-            "Expected a local path or a cached HF repo id."
-        )
-
-    org, name = model_path.split("/", 1)
-    cache_root = Path.home() / ".cache" / "huggingface" / "hub"
-    repo_dir = cache_root / f"models--{org}--{name}"
-    if not repo_dir.exists():
-        raise FileNotFoundError(f"HF cache not found for {model_path}: {repo_dir}")
-
-    refs_main = repo_dir / "refs" / "main"
-    if refs_main.exists():
-        revision = refs_main.read_text().strip()
-        snapshot = repo_dir / "snapshots" / revision
-        if snapshot.exists():
-            return str(snapshot)
-
-    snapshots_dir = repo_dir / "snapshots"
-    snapshots = sorted(snapshots_dir.glob("*")) if snapshots_dir.exists() else []
-    if snapshots:
-        return str(snapshots[-1])
-
-    raise FileNotFoundError(f"No HF snapshots found in cache for {model_path}")
-
-
-def _coerce_dtype(value: Any, default: torch.dtype = torch.bfloat16) -> torch.dtype:
-    if isinstance(value, torch.dtype):
-        return value
-    if value is None:
-        return default
-
-    normalized = str(value).strip().lower().replace("-", "").replace("_", "")
-    if normalized in {"bf16", "bfloat16"}:
-        return torch.bfloat16
-    if normalized in {"fp16", "float16", "half"}:
-        return torch.float16
-    if normalized in {"fp32", "float32", "float"}:
-        return torch.float32
-    return default
-
-
-def _normalize_model_type(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip().lower().replace("-", "_")
-
-
-def _as_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int | float):
-        return bool(value)
-    normalized = str(value).strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off", "none", "null"}:
-        return False
-    return default
-
-
-def _first_config_value(
-    primary: dict[str, Any],
-    secondary: dict[str, Any],
-    keys: tuple[str, ...],
-    default: Any = None,
-) -> Any:
-    for key in keys:
-        if key in primary and primary.get(key) is not None:
-            return primary.get(key)
-        if key in secondary and secondary.get(key) is not None:
-            return secondary.get(key)
-    return default
-
-
-def _normalize_optimizer_name(value: Any, default: str = "adamw") -> str:
-    normalized = _normalize_model_type(value or default)
-    normalized = _OPTIMIZER_ALIASES.get(normalized, normalized)
-
-    if normalized in _OPTIMIZER_ALIASES:
-        return _OPTIMIZER_ALIASES[normalized]
-    if "adafactor" in normalized:
-        return "adafactor"
-    if "lion" in normalized:
-        return "lion"
-    if normalized.startswith("sgd"):
-        return "sgd"
-    if normalized.startswith("adamw"):
-        return "adamw"
-    if normalized.startswith("adam"):
-        return "adam"
-    return default
-
-
-def _normalize_scheduler_name(value: Any, default: str = "constant") -> str:
-    normalized = _normalize_model_type(value or default)
-    normalized = _SCHEDULER_ALIASES.get(normalized, normalized)
-    if normalized in _CONSTANT_SCHEDULERS | _LINEAR_SCHEDULERS | _COSINE_SCHEDULERS | _COSINE_RESTART_SCHEDULERS:
-        return normalized
-    return default
-
-
-def _resolve_optimizer_steps(max_steps: int, grad_accum: int) -> int:
-    return max(1, math.ceil(float(max_steps) / float(max(1, grad_accum))))
-
-
-def _resolve_warmup_steps(
-    config: dict[str, Any],
-    scheduler_block: dict[str, Any],
-    total_optimizer_steps: int,
-) -> int:
-    warmup_raw = _first_config_value(
-        scheduler_block,
-        config,
-        ("warmup_steps", "lr_warmup_steps", "learning_rate_warmup_steps"),
-        0,
-    )
-    warmup_steps = int(float(warmup_raw or 0))
-    return max(0, min(warmup_steps, total_optimizer_steps))
-
-
-def _resolve_scheduler_min_factor(config: dict[str, Any], scheduler_block: dict[str, Any]) -> float:
-    min_factor_raw = _first_config_value(
-        scheduler_block,
-        config,
-        ("min_factor", "min_lr_factor", "lr_min_factor", "eta_min_ratio", "min_lr_ratio"),
-        0.0,
-    )
-    min_factor = float(min_factor_raw or 0.0)
-    return max(0.0, min(min_factor, 1.0))
-
-
-def _resolve_scheduler_cycles(config: dict[str, Any], scheduler_block: dict[str, Any]) -> float:
-    num_cycles_raw = _first_config_value(
-        scheduler_block,
-        config,
-        ("num_cycles", "lr_num_cycles", "cosine_num_cycles"),
-        1.0,
-    )
-    num_cycles = float(num_cycles_raw or 1.0)
-    return max(1.0, num_cycles)
-
-
-def _create_optimizer(
-    params: list[torch.nn.Parameter],
-    *,
-    config: dict[str, Any],
-    optimizer_block: dict[str, Any],
-    learning_rate: float,
-) -> tuple[torch.optim.Optimizer, str]:
-    optimizer_name_raw = _first_config_value(
-        optimizer_block,
-        config,
-        ("optimizer", "optimizer_type"),
-        "adamw",
-    )
-    optimizer_name = _normalize_optimizer_name(optimizer_name_raw)
-
-    weight_decay = float(_first_config_value(optimizer_block, config, ("weight_decay",), 0.0))
-    beta1 = float(_first_config_value(optimizer_block, config, ("beta1",), 0.9))
-    beta2 = float(_first_config_value(optimizer_block, config, ("beta2",), 0.999))
-    eps = float(_first_config_value(optimizer_block, config, ("eps", "epsilon"), 1e-8))
-    amsgrad = _as_bool(_first_config_value(optimizer_block, config, ("amsgrad",), False))
-
-    if optimizer_name == "adafactor":
-        from transformers import Adafactor
-
-        clip_threshold_raw = _first_config_value(optimizer_block, config, ("clip_threshold",), None)
-        adafactor_kwargs: dict[str, Any] = {
-            "lr": learning_rate,
-            "scale_parameter": _as_bool(_first_config_value(optimizer_block, config, ("scale_parameter",), False)),
-            "relative_step": _as_bool(_first_config_value(optimizer_block, config, ("relative_step",), False)),
-            "warmup_init": _as_bool(_first_config_value(optimizer_block, config, ("warmup_init",), False)),
-            "weight_decay": weight_decay,
-            "eps": (eps, 1e-3),
-        }
-        if clip_threshold_raw is not None:
-            adafactor_kwargs["clip_threshold"] = float(clip_threshold_raw)
-        return Adafactor(params, **adafactor_kwargs), optimizer_name
-
-    if optimizer_name == "adam":
-        return (
-            torch.optim.Adam(
-                params,
-                lr=learning_rate,
-                betas=(beta1, beta2),
-                eps=eps,
-                weight_decay=weight_decay,
-                amsgrad=amsgrad,
-            ),
-            optimizer_name,
-        )
-
-    if optimizer_name == "sgd":
-        momentum = float(_first_config_value(optimizer_block, config, ("momentum",), 0.0))
-        dampening = float(_first_config_value(optimizer_block, config, ("dampening",), 0.0))
-        nesterov = _as_bool(_first_config_value(optimizer_block, config, ("nesterov",), False))
-        if momentum <= 0.0:
-            nesterov = False
-        return (
-            torch.optim.SGD(
-                params,
-                lr=learning_rate,
-                weight_decay=weight_decay,
-                momentum=momentum,
-                dampening=dampening,
-                nesterov=nesterov,
-            ),
-            optimizer_name,
-        )
-
-    if optimizer_name == "lion":
-        lion_class = getattr(torch.optim, "Lion", None)
-        if lion_class is None:
-            try:
-                from lion_pytorch import Lion as lion_class
-            except ImportError:
-                print("[native/flux2] warning: Lion optimizer unavailable, falling back to AdamW.")
-                optimizer_name = "adamw"
-                lion_class = None
-        if lion_class is not None:
-            return (
-                lion_class(
-                    params,
-                    lr=learning_rate,
-                    betas=(beta1, beta2),
-                    weight_decay=weight_decay,
-                ),
-                optimizer_name,
-            )
-
-    return (
-        torch.optim.AdamW(
-            params,
-            lr=learning_rate,
-            betas=(beta1, beta2),
-            eps=eps,
-            weight_decay=weight_decay,
-            amsgrad=amsgrad,
-        ),
-        "adamw",
-    )
-
-
-def _create_lr_scheduler(
-    optimizer: torch.optim.Optimizer,
-    *,
-    config: dict[str, Any],
-    scheduler_block: dict[str, Any],
-    total_optimizer_steps: int,
-) -> tuple[torch.optim.lr_scheduler.LambdaLR | None, str]:
-    scheduler_name_raw = _first_config_value(
-        scheduler_block,
-        config,
-        ("scheduler", "lr_scheduler", "learning_rate_scheduler"),
-        "constant",
-    )
-    scheduler_name = _normalize_scheduler_name(scheduler_name_raw)
-    warmup_steps = _resolve_warmup_steps(config, scheduler_block, total_optimizer_steps)
-    min_factor = _resolve_scheduler_min_factor(config, scheduler_block)
-    num_cycles = _resolve_scheduler_cycles(config, scheduler_block)
-
-    use_constant_schedule = scheduler_name in _CONSTANT_SCHEDULERS
-    if use_constant_schedule and warmup_steps <= 0 and min_factor <= 0.0:
-        return None, scheduler_name
-
-    def _lr_lambda(last_epoch: int) -> float:
-        step = max(0, int(last_epoch) + 1)
-
-        if warmup_steps > 0 and step <= warmup_steps:
-            warmup_progress = float(step) / float(max(1, warmup_steps))
-            return max(min_factor, min(1.0, warmup_progress))
-
-        if total_optimizer_steps <= warmup_steps:
-            progress = 1.0
-        else:
-            progress = (float(step) - float(warmup_steps)) / float(max(1, total_optimizer_steps - warmup_steps))
-        progress = min(max(progress, 0.0), 1.0)
-
-        if scheduler_name in _LINEAR_SCHEDULERS:
-            base_factor = 1.0 - progress
-        elif scheduler_name in _COSINE_SCHEDULERS:
-            base_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
-        elif scheduler_name in _COSINE_RESTART_SCHEDULERS:
-            if progress >= 1.0:
-                base_factor = 0.0
-            else:
-                cycle_position = (num_cycles * progress) % 1.0
-                base_factor = 0.5 * (1.0 + math.cos(math.pi * cycle_position))
-        else:
-            base_factor = 1.0
-
-        factor = min_factor + (1.0 - min_factor) * base_factor
-        return min(max(float(factor), min_factor), 1.0)
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_lambda)
-    return scheduler, scheduler_name
+# _resolve_hf_local_path, _coerce_dtype, _normalize_model_type, _as_bool,
+# _first_config_value — imported from serenity.cli.utils above
 
 
 def _collect_sample_prompts(sample_block: dict[str, Any]) -> list[str]:
@@ -433,21 +128,7 @@ def _collect_sample_prompts(sample_block: dict[str, Any]) -> list[str]:
     return prompts
 
 
-def _coerce_int_or_none(value: Any) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        return int(float(text))
-    except ValueError:
-        return None
+# _coerce_int_or_none, _optional_int, _optional_float — imported from serenity.cli.utils above
 
 
 def _collect_sample_seeds(sample_block: dict[str, Any], default_seed: int) -> list[int]:
@@ -477,24 +158,6 @@ def _resolve_sample_output_extension(sample_block: dict[str, Any], default: str)
     if not ext.startswith("."):
         ext = f".{ext}"
     return ext
-
-
-def _optional_int(value: Any) -> int | None:
-    return _coerce_int_or_none(value)
-
-
-def _optional_float(value: Any) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, int | float):
-        return float(value)
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
 
 
 def _normalize_adapter_type(value: Any, default: str = "lora") -> str:
@@ -598,112 +261,9 @@ def _build_adapter_kwargs(adapter_block: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _collect_concept_dirs(config: dict[str, Any]) -> list[tuple[Path, str]]:
-    data_block = config.get("data", {}) if isinstance(config.get("data"), dict) else {}
-    concepts = data_block.get("concepts") or config.get("concepts") or []
-
-    out: list[tuple[Path, str]] = []
-    for concept in concepts:
-        if isinstance(concept, str):
-            out.append((Path(concept).expanduser(), ".txt"))
-            continue
-
-        if not isinstance(concept, dict):
-            continue
-
-        concept_path = concept.get("path")
-        if not concept_path:
-            continue
-
-        caption_ext = str(concept.get("caption_file_ext") or ".txt")
-        if not caption_ext.startswith("."):
-            caption_ext = f".{caption_ext}"
-
-        out.append((Path(concept_path).expanduser(), caption_ext))
-
-    return out
-
-
-def _load_caption(image_path: Path, caption_ext: str) -> str:
-    caption_path = image_path.with_suffix(caption_ext)
-    if caption_path.exists():
-        text = caption_path.read_text(encoding="utf-8", errors="ignore").strip()
-        if text:
-            return text
-    return image_path.stem.replace("_", " ").strip()
-
-
-def _is_condlabel_image(path: Path) -> bool:
-    stem = path.stem.lower()
-    return any(stem.endswith(suffix) for suffix in _COND_LABEL_SUFFIXES)
-
-
-def _strip_condlabel_suffix(stem: str) -> str:
-    lowered = stem.lower()
-    for suffix in _COND_LABEL_SUFFIXES:
-        if lowered.endswith(suffix):
-            return stem[: -len(suffix)]
-    return stem
-
-
-def _resolve_reference_image_path(image_path: Path) -> Path | None:
-    base_stem = _strip_condlabel_suffix(image_path.stem)
-    parent = image_path.parent
-    for suffix in _COND_LABEL_SUFFIXES:
-        for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
-            candidate = parent / f"{base_stem}{suffix}{ext}"
-            if candidate.exists() and candidate.is_file():
-                return candidate
-    return None
-
-
-def _load_image_tensor(image_path: Path, resolution: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-    image = Image.open(image_path).convert("RGB")
-    image = image.resize((resolution, resolution), Image.Resampling.LANCZOS)
-    array = np.asarray(image, dtype=np.float32) / 127.5 - 1.0
-    tensor = torch.from_numpy(array).permute(2, 0, 1).contiguous()
-    return tensor.to(device=device, dtype=dtype)
-
-
-def _build_training_pairs(config: dict[str, Any]) -> list[tuple[Path, str]]:
-    pairs: list[tuple[Path, str]] = []
-    for concept_dir, caption_ext in _collect_concept_dirs(config):
-        if not concept_dir.exists():
-            continue
-        for image_path in sorted(concept_dir.rglob("*")):
-            if not image_path.is_file():
-                continue
-            if image_path.suffix.lower() not in _IMAGE_EXTENSIONS:
-                continue
-            if _is_condlabel_image(image_path):
-                continue
-            caption = _load_caption(image_path, caption_ext)
-            if caption:
-                pairs.append((image_path, caption))
-    return pairs
-
-
-def _build_edit_training_pairs(config: dict[str, Any]) -> list[tuple[Path, Path, str]]:
-    pairs: list[tuple[Path, Path, str]] = []
-    for concept_dir, caption_ext in _collect_concept_dirs(config):
-        if not concept_dir.exists():
-            continue
-        for image_path in sorted(concept_dir.rglob("*")):
-            if not image_path.is_file():
-                continue
-            if image_path.suffix.lower() not in _IMAGE_EXTENSIONS:
-                continue
-            if _is_condlabel_image(image_path):
-                continue
-
-            reference_path = _resolve_reference_image_path(image_path)
-            if reference_path is None:
-                continue
-
-            caption = _load_caption(image_path, caption_ext)
-            if caption:
-                pairs.append((image_path, reference_path, caption))
-    return pairs
+# _collect_concept_dirs, _load_caption, _is_condlabel_image, _strip_condlabel_suffix,
+# _resolve_reference_image_path, _load_image_tensor, _build_training_pairs,
+# _build_edit_training_pairs — imported from serenity.cli.utils above
 
 
 def _cache_training_data(

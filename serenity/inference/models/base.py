@@ -13,6 +13,8 @@ from serenity.inference.models.detection import ModelArchitecture
 __all__ = [
     "BaseModelAdapter",
     "ModelAdapter",
+    "place_model",
+    "log_state_dict_info",
 ]
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,38 @@ class ModelAdapter(ABC):
         """Prepare model-specific conditioning from text-encoder outputs."""
 
 
+def place_model(
+    model: nn.Module,
+    device: str | torch.device,
+    dtype: torch.dtype,
+    *,
+    ops_context: object | None = None,
+) -> nn.Module:
+    """Place model on device/dtype, respecting offload context.
+
+    When ``ops_context`` is provided (offloading active), only dtype is set
+    and the ModelManager handles device placement later.
+    """
+    if ops_context is not None:
+        model = model.to(dtype=dtype)
+    else:
+        model = model.to(device=torch.device(device), dtype=dtype)
+    model.eval()
+    return model
+
+
+def log_state_dict_info(
+    missing: list[str],
+    unexpected: list[str],
+    model_name: str,
+) -> None:
+    """Log missing/unexpected keys from state_dict loading."""
+    if missing:
+        logger.warning("%s: %d missing keys", model_name, len(missing))
+    if unexpected:
+        logger.debug("%s: %d unexpected keys", model_name, len(unexpected))
+
+
 class BaseModelAdapter(ModelAdapter):
     """Concrete base with sensible defaults for common architectures.
 
@@ -99,6 +133,10 @@ class BaseModelAdapter(ModelAdapter):
 
     def get_default_resolution(self) -> tuple[int, int]:
         return (512, 512)
+
+    def get_prediction_kwargs(self) -> dict[str, object]:
+        """Return extra kwargs for the denoising prediction call."""
+        return {}
 
     def prepare_conditioning(
         self,
