@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from math import ceil
-from typing import Iterable, Iterator, List, Sequence
+from typing import Iterator, List
 
-import torch
 from torch.utils.data import DataLoader, Sampler
 
 

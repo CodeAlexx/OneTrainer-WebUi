@@ -11,7 +11,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from PIL import Image
 
 from serenity.cli.utils import (
     as_bool as _as_bool,

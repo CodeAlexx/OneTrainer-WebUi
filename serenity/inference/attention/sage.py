@@ -7,7 +7,6 @@ from collections.abc import Callable
 from enum import Enum
 from typing import TYPE_CHECKING
 
-import torch
 from torch import Tensor
 
 if TYPE_CHECKING:

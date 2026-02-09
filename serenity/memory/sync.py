@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import gc
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 import torch
 

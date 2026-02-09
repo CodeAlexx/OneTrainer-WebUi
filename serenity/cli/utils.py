@@ -6,7 +6,6 @@ Extracted from native_flux2.py and native_diffusion.py to eliminate duplication.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 

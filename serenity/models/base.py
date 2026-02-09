@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-import torch
 
 from serenity.core.interfaces import ModelType
 

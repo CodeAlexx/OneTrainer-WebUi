@@ -28,10 +28,8 @@ from serenity.ui.widgets import (
     labeled_combo,
     labeled_dir,
     labeled_float,
-    labeled_input,
     labeled_int,
     section,
-    tooltip,
 )
 
 __all__ = ["build_inference_tab"]

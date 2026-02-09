@@ -20,7 +20,6 @@ from serenity.core.enums import (
     LossScaler,
     LossWeight,
     ModelFormat,
-    NoiseScheduler,
     Optimizer,
     PeftType,
     TimeUnit,

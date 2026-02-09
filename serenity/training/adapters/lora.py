@@ -7,11 +7,9 @@ Replaces PEFT with a lightweight, Serenity-native LoRA that wraps
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 __all__ = [
     "LoRALinear",

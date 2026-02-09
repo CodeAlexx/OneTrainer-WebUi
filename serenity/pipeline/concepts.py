@@ -5,10 +5,9 @@ from __future__ import annotations
 import re
 import random
 from pathlib import Path
-from typing import Any
 
 from serenity.pipeline.concept import Concept
-from serenity.core.concept_config import ConceptConfig, ConceptTextConfig
+from serenity.core.concept_config import ConceptTextConfig
 
 
 # Supported image extensions

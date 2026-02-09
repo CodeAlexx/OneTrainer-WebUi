@@ -31,9 +31,9 @@ from serenity.inference.quantization.ops import OperationContext
 from serenity.inference.sampling.cfg import apply_cfg
 from serenity.inference.utils.interrupt import check_interrupt
 from serenity.inference.sampling.conditioning import Conditioning, create_noise
-from serenity.inference.sampling.prediction import PredictionType, get_prediction
-from serenity.inference.sampling.sampler import SamplerType, create_model_fn, sample
-from serenity.inference.sampling.schedulers import SchedulerType, compute_sigmas
+from serenity.inference.sampling.prediction import get_prediction
+from serenity.inference.sampling.sampler import create_model_fn, sample
+from serenity.inference.sampling.schedulers import compute_sigmas
 from serenity.inference.text.encoders import TextEncoderManager, get_required_encoders
 from serenity.inference.vae.decoder import VAEDecoder
 

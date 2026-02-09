@@ -7,7 +7,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from serenity.inference.memory.vram import is_cuda_available, is_linux, is_windows
+from serenity.inference.memory.vram import is_cuda_available, is_windows
 
 __all__ = [
     "PinnedMemoryManager",

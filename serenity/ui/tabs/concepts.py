@@ -18,7 +18,6 @@ from serenity.ui.widgets import (
     labeled_float,
     labeled_input,
     labeled_int,
-    labeled_separator,
     tooltip,
 )
 

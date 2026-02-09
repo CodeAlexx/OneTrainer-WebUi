@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import random
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,14 +10,10 @@ from torch.utils.data import Dataset
 
 from serenity.core.concept_config import ConceptConfig
 from serenity.pipeline.augmentations import (
-    AugmentationResult,
     apply_augmentations,
-    apply_crop_jitter,
 )
 from serenity.pipeline.concepts import (
-    ImageCaptionPair,
     discover_images,
-    load_caption_for_image,
     resolve_prompt,
 )
 

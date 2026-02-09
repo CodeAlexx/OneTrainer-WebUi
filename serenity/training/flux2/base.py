@@ -19,7 +19,7 @@ from enum import Enum
 import inspect
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -28,7 +28,6 @@ from torch import Tensor
 
 # Import conductor-based checkpointing
 from serenity.training.checkpointing import (
-    enable_checkpointing_for_flux2_transformer,
     LayerOffloadConductor,
 )
 from serenity.training.torch_util import torch_gc

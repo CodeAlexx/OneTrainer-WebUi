@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 
 __all__ = [
     "build_token_weight_map",

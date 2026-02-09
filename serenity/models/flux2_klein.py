@@ -18,7 +18,7 @@ Key differences from FLUX.1:
 - Different block counts and embedding dimensions
 """
 
-from typing import Any, Optional, Dict, Tuple, TYPE_CHECKING, Union, List
+from typing import Any, Optional, Dict, Tuple, Union, List
 from pathlib import Path
 
 import torch

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 
 import torch
-import torch.nn.functional as F
 
 from serenity.inference.quantization.ops import QuantizedLinear
 

@@ -12,12 +12,10 @@ Features:
 - Latent and text embedding caching
 """
 
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 
 from .base import Flux2BaseTrainer, Flux2TrainerConfig

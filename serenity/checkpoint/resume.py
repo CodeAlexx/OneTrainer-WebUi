@@ -18,7 +18,6 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
 
-import torch
 
 from serenity.checkpoint.loader import CheckpointData, load_checkpoint
 from serenity.checkpoint.manager import CheckpointManager

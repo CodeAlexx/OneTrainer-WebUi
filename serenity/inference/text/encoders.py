@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Any
 
 from serenity.inference.models.detection import ModelArchitecture
-from serenity.inference.text.clip import CLIPEncoder, TextOutput
+from serenity.inference.text.clip import CLIPEncoder
 from serenity.inference.text.gemma import GemmaEncoder
 from serenity.inference.text.qwen_enc import QwenEncoder
 from serenity.inference.text.t5 import T5Encoder

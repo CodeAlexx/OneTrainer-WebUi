@@ -6,11 +6,10 @@ Supports CLIP, T5, Llama, and dual-encoder configurations.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Iterator
+from typing import Any
 
-import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)

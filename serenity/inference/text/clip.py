@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -188,7 +188,6 @@ class CLIPEncoder:
         import torch
 
         from serenity.inference.text.tokenizer import (
-            build_token_weight_map,
             has_non_default_weights,
             parse_prompt_weights,
             split_segments_at_break,

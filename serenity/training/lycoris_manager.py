@@ -15,7 +15,6 @@ import torch
 import torch.nn as nn
 
 from serenity.training.adapter_utils import (
-    MODEL_ALIASES as _MODEL_ALIASES,
     normalize_model_type as _normalize_model_type,
     coerce_dtype as _coerce_dtype,
     resolve_target_module as _resolve_target_module_impl,

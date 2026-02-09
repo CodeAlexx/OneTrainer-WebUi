@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import logging
-import math
 import platform
 
 import torch

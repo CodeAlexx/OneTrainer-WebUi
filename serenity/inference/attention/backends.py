@@ -8,7 +8,6 @@ from collections.abc import Callable
 from enum import Enum
 from typing import Any
 
-import torch
 import torch.nn.functional as F
 from torch import Tensor
 

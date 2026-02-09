@@ -12,7 +12,6 @@ import torch
 import torch.nn as nn
 
 from serenity.inference.memory.vram import (
-    VRAMBudget,
     calculate_budget,
     get_free_memory,
     is_cuda_available,

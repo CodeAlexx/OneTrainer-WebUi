@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dearpygui.dearpygui as dpg
 
 from serenity.ui.state import UIState
 from serenity.ui.widgets import (
