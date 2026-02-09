@@ -170,6 +170,7 @@ class BaseAdapter(AdapterProtocol):
             state_dict = load_file(str(path))
         else:
             state_dict = torch.load(str(path), map_location="cpu", weights_only=True)
+        # load_state_dict in LoRAManager already handles diffusers↔native conversion
         manager.load_state_dict(state_dict, strict=False)
 
     def merge(self, model=None):

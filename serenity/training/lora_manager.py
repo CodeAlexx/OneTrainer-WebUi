@@ -24,6 +24,51 @@ from serenity.training.lycoris_manager import DEFAULT_TARGETS
 
 logger = logging.getLogger(__name__)
 
+# Model families that use a UNet (prefix "unet.") rather than a transformer.
+_UNET_FAMILIES: frozenset[str] = frozenset({
+    "sd15", "sd15_inpainting",
+    "sd20", "sd20_base", "sd20_inpainting", "sd20_depth",
+    "sd21", "sd21_base",
+    "sdxl", "sdxl_10_base", "sdxl_inpainting",
+})
+
+
+def _to_diffusers_state_dict(
+    state: dict[str, torch.Tensor],
+    model_type: str,
+) -> dict[str, torch.Tensor]:
+    """Convert native LoRA keys to diffusers/PEFT format.
+
+    Native format:  ``transformer_blocks.0.attn.to_k.lora_down.weight``
+    Diffusers:      ``transformer.transformer_blocks.0.attn.to_k.lora_A.weight``
+    """
+    prefix = "unet" if model_type in _UNET_FAMILIES else "transformer"
+    out: dict[str, torch.Tensor] = {}
+    for key, value in state.items():
+        new_key = key.replace(".lora_down.", ".lora_A.").replace(".lora_up.", ".lora_B.")
+        out[f"{prefix}.{new_key}"] = value
+    return out
+
+
+def _from_diffusers_state_dict(
+    state: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Convert diffusers/PEFT keys back to native LoRA format.
+
+    Strips ``transformer.`` / ``unet.`` prefix and renames lora_A→lora_down,
+    lora_B→lora_up so that ``load_lora_state_dict`` can match internal modules.
+    """
+    out: dict[str, torch.Tensor] = {}
+    for key, value in state.items():
+        new_key = key
+        for pfx in ("transformer.", "unet."):
+            if new_key.startswith(pfx):
+                new_key = new_key[len(pfx):]
+                break
+        new_key = new_key.replace(".lora_A.", ".lora_down.").replace(".lora_B.", ".lora_up.")
+        out[new_key] = value
+    return out
+
 
 @dataclass
 class AdapterConfig:
@@ -145,6 +190,12 @@ class LoRAManager:
         if self._target_module is None:
             raise RuntimeError("LoRA adapter is not attached. Call apply() before loading adapter weights.")
 
+        # Accept both diffusers format (lora_A/lora_B with prefix) and native
+        # format (lora_down/lora_up without prefix).
+        first_key = next(iter(state_dict), "")
+        if first_key.startswith(("transformer.", "unet.")) or ".lora_A." in first_key or ".lora_B." in first_key:
+            state_dict = _from_diffusers_state_dict(state_dict)
+
         from serenity.training.adapters.lora import load_lora_state_dict
 
         load_lora_state_dict(self._target_module, state_dict, strict=strict)
@@ -164,6 +215,11 @@ class LoRAManager:
             state_dict = load_file(str(path))
         else:
             state_dict = torch.load(str(path), map_location="cpu", weights_only=True)
+
+        # Accept both diffusers format and native format.
+        first_key = next(iter(state_dict), "")
+        if first_key.startswith(("transformer.", "unet.")) or ".lora_A." in first_key or ".lora_B." in first_key:
+            state_dict = _from_diffusers_state_dict(state_dict)
 
         from serenity.training.adapters.lora import load_lora_state_dict
 
@@ -199,6 +255,11 @@ class LoRAManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         target_dtype = _coerce_dtype(dtype)
         state = self.state_dict()
+
+        # Convert to diffusers/PEFT format so saved LoRAs are loadable by
+        # diffusers pipelines, ComfyUI, and Serenity's own sampler.
+        state = _to_diffusers_state_dict(state, self.model_type)
+
         if target_dtype is not None:
             state = {
                 key: value.to(dtype=target_dtype) if torch.is_tensor(value) else value
@@ -237,4 +298,6 @@ __all__ = [
     "AdapterConfig",
     "LoRAManager",
     "DoRAManager",
+    "_to_diffusers_state_dict",
+    "_from_diffusers_state_dict",
 ]

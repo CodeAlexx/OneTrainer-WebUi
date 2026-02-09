@@ -299,13 +299,22 @@ def _load_assistant_lora_into_transformer(
     if transformer is None or lora_state_fn is None or load_fn is None:
         return False
 
+    # Diffusers requires weight_name in offline mode.  When the caller
+    # provides a direct file path, split it into (directory, filename) so
+    # that diffusers can resolve it without reaching out to the Hub.
+    effective_path: str = str(lora_path)
+    effective_weight_name = weight_name
+    if effective_weight_name is None and lora_path.is_file():
+        effective_path = str(lora_path.parent)
+        effective_weight_name = lora_path.name
+
     state_kwargs: dict[str, Any] = {"local_files_only": True}
-    if weight_name is not None:
-        state_kwargs["weight_name"] = weight_name
+    if effective_weight_name is not None:
+        state_kwargs["weight_name"] = effective_weight_name
     if "return_alphas" in inspect.signature(lora_state_fn).parameters:
         state_kwargs["return_alphas"] = True
 
-    lora_state = lora_state_fn(str(lora_path), **state_kwargs)
+    lora_state = lora_state_fn(effective_path, **state_kwargs)
     state_dict: dict[str, torch.Tensor]
     network_alphas: dict[str, float] | None = None
     metadata: Any = None
@@ -359,14 +368,21 @@ def _load_assistant_lora_into_pipeline(
     if load_fn is None:
         return False
 
+    # Same directory/filename split as _load_assistant_lora_into_transformer.
+    effective_path: str = str(lora_path)
+    effective_weight_name = weight_name
+    if effective_weight_name is None and lora_path.is_file():
+        effective_path = str(lora_path.parent)
+        effective_weight_name = lora_path.name
+
     load_kwargs: dict[str, Any] = {
         "adapter_name": adapter_name,
         "local_files_only": True,
     }
-    if weight_name is not None:
-        load_kwargs["weight_name"] = weight_name
+    if effective_weight_name is not None:
+        load_kwargs["weight_name"] = effective_weight_name
 
-    _call_with_filtered_kwargs(load_fn, str(lora_path), **load_kwargs)
+    _call_with_filtered_kwargs(load_fn, effective_path, **load_kwargs)
 
     with suppress(Exception):
         if hasattr(pipeline, "set_adapters"):
@@ -802,7 +818,9 @@ class Flux2Sampler(DiffusersSampler):
     default_guidance = 4.0
     resolution_multiple = 64
     use_cpu_offload_on_cuda = True
-    use_sequential_cpu_offload_on_cuda = True
+    # model_cpu_offload (not sequential) keeps params on CPU, not meta device,
+    # so LoRA weights can be loaded into the transformer after offloading.
+    use_sequential_cpu_offload_on_cuda = False
     use_generic_assistant_lora = False
 
     def __init__(self, model: Any = None, *, model_type: ModelType | None = None) -> None:
@@ -1008,7 +1026,7 @@ class QwenSampler(DiffusersSampler):
     default_guidance = 4.0
     resolution_multiple = 64
     use_cpu_offload_on_cuda = True
-    use_sequential_cpu_offload_on_cuda = True
+    use_sequential_cpu_offload_on_cuda = False
 
 
 class QwenImageEditSampler(DiffusersSampler):
@@ -1016,7 +1034,7 @@ class QwenImageEditSampler(DiffusersSampler):
     default_guidance = 4.0
     resolution_multiple = 64
     use_cpu_offload_on_cuda = True
-    use_sequential_cpu_offload_on_cuda = True
+    use_sequential_cpu_offload_on_cuda = False
 
     def _candidate_pipeline_names(self, **_: Any) -> tuple[str, ...]:
         return ("QwenImageImg2ImgPipeline", "QwenImageEditPipeline", "QwenImagePipeline")
