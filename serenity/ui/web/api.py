@@ -27,7 +27,8 @@ router = APIRouter(prefix="/api")
 # ---------------------------------------------------------------------------
 
 _scanner: ModelScanner | None = None
-_output_dir: Path = Path("/home/alex/serenity/output")
+from serenity.core.config import default_output_dir
+_output_dir: Path = default_output_dir()
 _engine: Any = None  # InferenceEngine — typed as Any to avoid torch import at module level
 _current_model: str = ""
 
@@ -67,7 +68,7 @@ _SCHEDULERS: list[str] = [
 def configure(
     scanner: ModelScanner,
     engine: Any = None,
-    output_dir: str | Path = "/home/alex/serenity/output",
+    output_dir: str | Path | None = None,
 ) -> None:
     """Bind a ``ModelScanner``, inference engine, and output directory.
 
@@ -76,7 +77,7 @@ def configure(
     global _scanner, _output_dir, _engine  # noqa: PLW0603
     _scanner = scanner
     _engine = engine
-    _output_dir = Path(output_dir)
+    _output_dir = Path(output_dir) if output_dir is not None else default_output_dir()
     _output_dir.mkdir(parents=True, exist_ok=True)
 
 

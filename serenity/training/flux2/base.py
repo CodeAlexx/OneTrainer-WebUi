@@ -174,6 +174,7 @@ class Flux2BaseTrainer(ABC):
         # Training state
         self.global_step = 0
         self.current_epoch = 0
+        self._is_training = True
 
         # Device setup
         self.train_device = torch.device(config.train_device)
@@ -446,29 +447,35 @@ class Flux2BaseTrainer(ABC):
 
         return t
 
-    def get_velocity_weight(self, timesteps: Tensor) -> Tensor:
+    def get_velocity_weight(
+        self, timesteps: Tensor, num_train_timesteps: int = 1000,
+    ) -> Tensor:
         """
         Get weighting for velocity loss at each timestep.
 
         Args:
-            timesteps: Timesteps tensor [B,]
+            timesteps: Discrete timesteps tensor [B,] (integers 0..999)
+            num_train_timesteps: Total number of training timesteps
 
         Returns:
             Weights tensor [B,]
         """
         if self.config.velocity_weighting == "uniform":
-            return torch.ones_like(timesteps)
-        elif self.config.velocity_weighting == "sigma_sqrt":
+            return torch.ones_like(timesteps, dtype=torch.float32)
+
+        # Convert discrete timesteps to normalized sigma (0, 1]
+        # Same formula as compute_noisy_latents: sigma = (t + 1) / N
+        sigma = (timesteps.float() + 1) / num_train_timesteps
+
+        if self.config.velocity_weighting == "sigma_sqrt":
             # Weight by sqrt(sigma) to emphasize low noise
-            sigma = timesteps
             return torch.sqrt(sigma + 1e-6)
         elif self.config.velocity_weighting == "snr":
-            # SNR-based weighting
-            sigma = timesteps
+            # SNR-based weighting: SNR = (1 - sigma) / sigma
             snr = (1 - sigma) / (sigma + 1e-6)
             return snr / (snr + 1)
         else:
-            return torch.ones_like(timesteps)
+            return torch.ones_like(timesteps, dtype=torch.float32)
 
     # =========================================================================
     # Flow Matching

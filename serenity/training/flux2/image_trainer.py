@@ -197,7 +197,7 @@ class Flux2ImageTrainer(Flux2BaseTrainer):
         processed = []
         for caption in captions:
             # Caption dropout
-            if self.training and self.config.caption_dropout > 0:
+            if self._is_training and self.config.caption_dropout > 0:
                 if torch.rand(1).item() < self.config.caption_dropout:
                     caption = ""  # Drop caption for CFG training
                     processed.append(caption)
@@ -210,7 +210,7 @@ class Flux2ImageTrainer(Flux2BaseTrainer):
                 caption = f"{caption} {self.config.caption_suffix}"
 
             # Optional shuffle
-            if self.training and self.config.caption_shuffle:
+            if self._is_training and self.config.caption_shuffle:
                 words = caption.split()
                 import random
                 random.shuffle(words)

@@ -104,7 +104,8 @@ _ASPECT_PRESETS = {
 
 # -- Module-level state --------------------------------------------------------
 
-_scanner = ModelScanner(root_dirs=["/home/alex/EriDiffusion/Models"])
+from serenity.core.config import default_model_dir
+_scanner = ModelScanner(root_dirs=[str(default_model_dir())])
 _model_path_map: dict[str, str] = {}
 _lora_path_map: dict[str, str] = {}
 

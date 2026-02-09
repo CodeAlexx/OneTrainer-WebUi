@@ -358,6 +358,9 @@ class Flux2EditTrainer(Flux2BaseTrainer):
         else:
             ref_conditioning = None
 
+        # Track original latent channels for output slicing after concat
+        output_channels = noisy_latents.shape[1]
+
         # Prepare conditioning injection
         if ref_conditioning is not None and self.config.conditioning_injection == "concat":
             # Concatenate reference with noisy latents
@@ -405,9 +408,13 @@ class Flux2EditTrainer(Flux2BaseTrainer):
 
         # Unpack - handle potential channel expansion from conditioning
         if ref_conditioning is not None and self.config.conditioning_injection == "concat":
-            # Split prediction back
-            pred_channels = packed_pred.shape[-1] // 2 if packed_pred.dim() == 3 else packed_pred.shape[1]
-            packed_pred = packed_pred[..., :pred_channels] if packed_pred.dim() == 3 else packed_pred
+            # Slice to original output channels (not hardcoded //2)
+            if packed_pred.dim() == 3:
+                # Packed format [B, seq, C] — slice last dim to output_channels
+                packed_pred = packed_pred[..., :output_channels]
+            else:
+                # Unpacked [B, C, H, W] — slice channel dim
+                packed_pred = packed_pred[:, :output_channels]
             prediction = self.model.unpack_latents(packed_pred, height, width)
         else:
             prediction = self.model.unpack_latents(packed_pred, height, width)

@@ -620,7 +620,8 @@ class InferenceEngine:
         self._sigma_min = 1e-4
         self._sigma_max = 1.0
         # For flow matching, sigmas are the timesteps themselves
-        sigmas = torch.linspace(1.0, 0.0, 1000)
+        # Clamp minimum to 1e-5 to avoid log(0) = -inf
+        sigmas = torch.linspace(1.0, 1e-5, 1000)
         self._log_sigmas = sigmas.log().to(self._device)
         logger.debug(
             "Flow sigma schedule: min=%.4f, max=%.4f",

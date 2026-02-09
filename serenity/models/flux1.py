@@ -128,13 +128,18 @@ def _resolve_local_t5_safetensor() -> Path | None:
         if path.exists():
             return path
 
-    candidates = (
-        Path("/home/alex/eriui/comfyui/ComfyUI/models/clip/t5xxl_fp16.safetensors"),
-        Path("/home/alex/eriui/comfyui/ComfyUI/models/clip/t5xxl_enconly.safetensors"),
-    )
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
+    # Search in model directory and common ComfyUI locations
+    from serenity.core.config import default_model_dir
+    search_dirs = [
+        default_model_dir() / "clip",
+        Path.home() / "ComfyUI" / "models" / "clip",
+    ]
+    filenames = ("t5xxl_fp16.safetensors", "t5xxl_enconly.safetensors")
+    for search_dir in search_dirs:
+        for fname in filenames:
+            candidate = search_dir / fname
+            if candidate.exists():
+                return candidate
     return None
 
 

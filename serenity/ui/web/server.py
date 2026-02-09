@@ -20,8 +20,8 @@ __all__ = ["create_app", "main"]
 
 
 def create_app(
-    models_dir: str = "/home/alex/EriDiffusion/Models",
-    output_dir: str = "/home/alex/serenity/output",
+    models_dir: str | None = None,
+    output_dir: str | None = None,
     host: str = "0.0.0.0",
     port: int = 7860,
 ) -> FastAPI:
@@ -38,6 +38,13 @@ def create_app(
     port:
         Bind port (stored on ``app.state`` for the runner).
     """
+    from serenity.core.config import default_model_dir, default_output_dir
+
+    if models_dir is None:
+        models_dir = str(default_model_dir())
+    if output_dir is None:
+        output_dir = str(default_output_dir())
+
     app = FastAPI(
         title="Serenity",
         version="0.1.0",

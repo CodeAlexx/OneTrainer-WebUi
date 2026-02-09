@@ -553,17 +553,11 @@ class Trainer:
                 # Scale loss for gradient accumulation
                 loss = loss / gradient_accumulation_steps
 
-                # ---- Backward pass ---- #
-                if grad_scaler is not None:
-                    grad_scaler.scale(loss).backward()
-                else:
-                    loss.backward()
-
                 # Track detached loss
                 step_loss = loss.detach().item() * gradient_accumulation_steps
                 accumulated_loss += loss.detach().item()
 
-                # ---- NaN detection ---- #
+                # ---- NaN detection (BEFORE backward to protect optimizer state) ---- #
                 valid, action = self.nan_handler.check_loss(step_loss)
                 if not valid:
                     if action == "abort":
@@ -577,7 +571,15 @@ class Trainer:
                             self.nan_handler.consecutive_nan_count,
                         )
                         backup_callback(progress)
-                    # For "skip", we continue but still accumulate the step
+                    # Skip backward pass — zero grads to keep state clean
+                    optimizer.zero_grad(set_to_none=True)
+                    logger.warning("Skipping backward pass for non-finite loss: %.4f", step_loss)
+                else:
+                    # ---- Backward pass (only for finite loss) ---- #
+                    if grad_scaler is not None:
+                        grad_scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
 
                 micro_step_in_epoch += 1
 

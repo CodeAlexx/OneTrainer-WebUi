@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -638,6 +639,16 @@ def load_config(path: str | Path) -> TrainConfig:
     return TrainConfig(**filtered)
 
 
+def default_model_dir() -> Path:
+    """Return the default model directory from env or sensible default."""
+    return Path(os.environ.get("SERENITY_MODELS_DIR", "./models"))
+
+
+def default_output_dir() -> Path:
+    """Return the default output directory from env or sensible default."""
+    return Path(os.environ.get("SERENITY_OUTPUT_DIR", "./output"))
+
+
 __all__ = [
     "TrainingMethod",
     "TrainConfig",
@@ -647,4 +658,6 @@ __all__ = [
     "ModelType",
     "NoiseConfig",
     "load_config",
+    "default_model_dir",
+    "default_output_dir",
 ]
