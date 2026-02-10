@@ -640,7 +640,7 @@ def load_config(path: str | Path) -> TrainConfig:
 
 def default_model_dir() -> Path:
     """Return the default model directory from env or sensible default."""
-    return Path(os.environ.get("SERENITY_MODELS_DIR", "./models"))
+    return Path(os.environ.get("SERENITY_MODELS_DIR", os.path.expanduser("~/EriDiffusion/Models")))
 
 
 def default_output_dir() -> Path:
