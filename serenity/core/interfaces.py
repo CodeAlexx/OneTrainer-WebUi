@@ -128,6 +128,10 @@ class ModelType(str, Enum):
             ModelType.FLUX_2_KLEIN_4B_BASE, ModelType.FLUX_2_KLEIN_9B_BASE,
         )
 
+    def is_flux_2_dev(self) -> bool:
+        """True for Flux 2 Dev specifically."""
+        return self == ModelType.FLUX_2_DEV
+
     def is_flux_2_klein(self) -> bool:
         """True for Flux 2 Klein variants."""
         return self in (

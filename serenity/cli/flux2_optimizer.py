@@ -100,7 +100,7 @@ def _resolve_warmup_steps(
         0,
     )
     warmup_steps = int(float(warmup_raw or 0))
-    return max(0, min(warmup_steps, total_optimizer_steps))
+    return max(0, warmup_steps)
 
 
 def _resolve_scheduler_min_factor(config: dict[str, Any], scheduler_block: dict[str, Any]) -> float:

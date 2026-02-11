@@ -1,4 +1,7 @@
-"""Native Flux 2 model adapter."""
+"""Native Flux 2 model adapter.
+
+Supports both Flux 2 Dev (Mistral text encoder) and Klein (Qwen3 text encoder).
+"""
 
 from __future__ import annotations
 
@@ -11,6 +14,84 @@ from serenity.models.base import BaseModelImpl
 
 import torch
 import torch.nn.functional as F
+
+
+# ---------------------------------------------------------------------------
+# Text encoder layer indices for stacked hidden-state embeddings.
+# Dev uses Mistral (layers 10, 20, 30), Klein uses Qwen3 (layers 9, 18, 27).
+# ---------------------------------------------------------------------------
+MISTRAL_HIDDEN_STATES_LAYERS: list[int] = [10, 20, 30]
+QWEN3_HIDDEN_STATES_LAYERS: list[int] = [9, 18, 27]
+
+MISTRAL_SYSTEM_MESSAGE: str = (
+    "You are an AI that reasons about image descriptions. "
+    "You give structured responses focusing on object relationships, "
+    "object attribution and actions without speculation."
+)
+
+
+# ---------------------------------------------------------------------------
+# Diffusers ↔ original (BFL) state-dict key conversion.
+# Ported from OT ``Flux2Model.diffusers_to_original``.
+# ---------------------------------------------------------------------------
+def _diffusers_to_original_mapping(qkv_fusion_fn):
+    """Build the key-mapping list.
+
+    *qkv_fusion_fn* should be ``serenity.checkpoint.conversion.qkv_fusion``
+    (or equivalent).  It returns a list of tuples describing how three
+    separate Q/K/V weight keys merge into one fused QKV key.
+    """
+    return [
+        ("context_embedder", "txt_in"),
+        ("x_embedder", "img_in"),
+        ("time_guidance_embed.timestep_embedder", "time_in", [
+            ("linear_1", "in_layer"),
+            ("linear_2", "out_layer"),
+        ]),
+        ("time_guidance_embed.guidance_embedder", "guidance_in", [
+            ("linear_1", "in_layer"),
+            ("linear_2", "out_layer"),
+        ]),
+        ("double_stream_modulation_img.linear", "double_stream_modulation_img.lin"),
+        ("double_stream_modulation_txt.linear", "double_stream_modulation_txt.lin"),
+        ("single_stream_modulation.linear", "single_stream_modulation.lin"),
+        ("proj_out", "final_layer.linear"),
+        # norm_out uses swap_chunks in both directions
+        ("norm_out.linear", "final_layer.adaLN_modulation.1"),
+        ("transformer_blocks.{i}", "double_blocks.{i}",
+            qkv_fusion_fn("attn.to_q", "attn.to_k", "attn.to_v", "img_attn.qkv")
+            + qkv_fusion_fn("attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj", "txt_attn.qkv")
+            + [
+                ("attn.norm_k.weight", "img_attn.norm.key_norm.scale"),
+                ("attn.norm_q.weight", "img_attn.norm.query_norm.scale"),
+                ("attn.to_out.0", "img_attn.proj"),
+                ("ff.linear_in", "img_mlp.0"),
+                ("ff.linear_out", "img_mlp.2"),
+                ("attn.norm_added_k.weight", "txt_attn.norm.key_norm.scale"),
+                ("attn.norm_added_q.weight", "txt_attn.norm.query_norm.scale"),
+                ("attn.to_add_out", "txt_attn.proj"),
+                ("ff_context.linear_in", "txt_mlp.0"),
+                ("ff_context.linear_out", "txt_mlp.2"),
+            ],
+        ),
+        ("single_transformer_blocks.{i}", "single_blocks.{i}", [
+            ("attn.to_qkv_mlp_proj", "linear1"),
+            ("attn.to_out", "linear2"),
+            ("attn.norm_k.weight", "norm.key_norm.scale"),
+            ("attn.norm_q.weight", "norm.query_norm.scale"),
+        ]),
+    ]
+
+
+def get_diffusers_to_original_mapping():
+    """Return the full mapping list, lazily importing qkv_fusion."""
+    try:
+        from serenity.checkpoint.conversion import qkv_fusion
+    except ImportError:
+        # Fallback: return a no-op fusion that just lists the keys separately
+        def qkv_fusion(q, k, v, fused):
+            return [(q, fused), (k, fused), (v, fused)]
+    return _diffusers_to_original_mapping(qkv_fusion)
 
 
 def _validate_flux2_path(model_path: str) -> None:

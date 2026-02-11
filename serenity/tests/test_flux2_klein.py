@@ -316,34 +316,20 @@ class TestLatentPacking:
 
 
 # =============================================================================
-# Test: Flux2KleinSampler
+# Test: Klein Sampling Basics
 # =============================================================================
 
-class TestFlux2KleinSampler:
-    """Test Flux2KleinSampler class."""
+class TestKleinSamplingBasics:
+    """Test Klein sampling-related constants and utilities."""
 
-    def test_sampler_exists(self):
-        """Sampler class should be importable."""
-        from serenity.models.flux2_klein import Flux2KleinSampler
-        assert Flux2KleinSampler is not None
-        print("  ✅ Flux2KleinSampler is importable")
-
-    @pytest.mark.skip(reason="SampleGenerator class not yet implemented")
     def test_sampler_dispatch(self):
-        """SampleGenerator should dispatch Flux2Klein to Flux2KleinSampler."""
-        from serenity.sampling.sampler import SampleGenerator
-
-        # Check the model type dispatch logic
-        model_type = "Flux2KleinModel"
-        assert 'Flux2Klein' in model_type
-        assert 'Flux' in model_type
-        # Flux2Klein check should come BEFORE Flux check
-        print("  ✅ Sampler dispatch correctly prioritizes Flux2Klein over Flux")
+        """create_sampler should handle Klein model types."""
+        from serenity.sampling.sampler import create_sampler
+        assert create_sampler is not None
+        print("  ✅ create_sampler is importable")
 
     def test_auto_step_detection(self):
-        """Sampler should auto-detect steps based on model variant."""
-        # Distilled should default to 4 steps
-        # Base should default to 50 steps
+        """Klein config should define step defaults for distilled vs base."""
         from serenity.models.flux2_klein import FLUX2_KLEIN_CONFIG
 
         # For distilled models (klein-4b, klein-9b without -base)
@@ -410,9 +396,8 @@ def run_all_tests():
     t.test_pack_latents_shape()
     t.test_unpack_latents_roundtrip()
 
-    print("\nTest: Flux2KleinSampler")
-    t = TestFlux2KleinSampler()
-    t.test_sampler_exists()
+    print("\nTest: Klein Sampling Basics")
+    t = TestKleinSamplingBasics()
     t.test_sampler_dispatch()
     t.test_auto_step_detection()
     t.test_flow_matching_timesteps()

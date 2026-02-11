@@ -336,8 +336,9 @@ class Flux2KleinModel(BaseModel):
         with torch.no_grad():
             outputs = self.text_encoder(
                 input_ids=input_ids,
-                attention_mask=attention_mask,
+                attention_mask=attention_mask.float(),
                 output_hidden_states=True,
+                use_cache=False,
             )
 
         # Stack layers [9, 18, 27]
@@ -667,21 +668,23 @@ class Flux2KleinModel(BaseModel):
         """
         Pack text embeddings with position IDs.
 
-        Text always uses T=1 to distinguish from image tokens.
+        Text uses T=0, H=0, W=0 with L=arange(seq_len).
 
         Args:
             text_embeds: Text embeddings [B, L, D]
 
         Returns:
             text: Text embeddings [B, L, D] (unchanged)
-            txt_ids: Position IDs [L, 4] with T=1
+            txt_ids: Position IDs [L, 4]
         """
         batch_size, seq_len, embed_dim = text_embeds.shape
 
-        # Create text position IDs with T=1 (different from image T=0)
-        t_coord = torch.ones(seq_len, device=text_embeds.device, dtype=text_embeds.dtype)
-        h_coord = torch.ones(seq_len, device=text_embeds.device, dtype=text_embeds.dtype)
-        w_coord = torch.ones(seq_len, device=text_embeds.device, dtype=text_embeds.dtype)
+        # Create text position IDs with T=0, H=0, W=0
+        # OT uses torch.arange(1) which produces [0], NOT ones.
+        # Text is distinguished from image by the L dimension (arange vs grid).
+        t_coord = torch.zeros(seq_len, device=text_embeds.device, dtype=text_embeds.dtype)
+        h_coord = torch.zeros(seq_len, device=text_embeds.device, dtype=text_embeds.dtype)
+        w_coord = torch.zeros(seq_len, device=text_embeds.device, dtype=text_embeds.dtype)
         l_coord = torch.arange(seq_len, device=text_embeds.device, dtype=text_embeds.dtype)
 
         txt_ids = torch.stack([t_coord, h_coord, w_coord, l_coord], dim=-1)
@@ -974,9 +977,18 @@ class Flux2KleinModel(BaseModel):
         # Pack text embeddings
         packed_text, txt_ids = self.pack_text(text_encoder_output)
         pooled_projections = self.pooled_text_projection(packed_text)
-        guidance = torch.ones(batch_size, device=device, dtype=self.transformer.dtype)
 
-        # 8. Transformer forward (NO guidance for Klein)
+        # Check guidance_embeds: Klein=False (no guidance layer), Dev=True.
+        has_guidance = getattr(
+            getattr(self.transformer, "config", None),
+            "guidance_embeds", False,
+        )
+        if has_guidance:
+            guidance = torch.ones(batch_size, device=device, dtype=self.transformer.dtype)
+        else:
+            guidance = None
+
+        # 8. Transformer forward
         transformer_output = self.transformer(
             hidden_states=packed_latent.to(dtype=self.transformer.dtype),
             timestep=timestep_int / 1000,  # discrete timestep normalized
@@ -1305,224 +1317,3 @@ class Flux2KleinModelLoader:
         variant = "4B" if model_type in (ModelType.FLUX_2_KLEIN_4B, ModelType.FLUX_2_KLEIN_4B_BASE) else "9B"
         print(f"  ✅ FLUX.2 Klein {variant} transformer loaded (cache mode)")
         return model
-
-
-class Flux2KleinSampler:
-    """
-    Generates samples using FLUX.2 Klein models.
-
-    Handles both distilled (4 steps) and base (50 steps) variants.
-    Uses flow matching sampling with Euler integration.
-
-    Key differences from FLUX.1:
-    - Single Qwen3 text encoder (stacked layers)
-    - 32-channel VAE with patchification (32 → 128 channels)
-    - NO guidance embeddings (Klein ignores guidance_scale)
-    """
-
-    def __init__(
-        self,
-        model: Flux2KleinModel,
-        device: torch.device,
-        dtype: torch.dtype = torch.bfloat16,
-    ):
-        self.model = model
-        self.device = device
-        self.dtype = dtype
-
-    @torch.no_grad()
-    def sample(
-        self,
-        prompt: str,
-        width: int = 1024,
-        height: int = 1024,
-        num_steps: int = None,
-        guidance_scale: float = None,
-        seed: int = -1,
-    ) -> Tensor:
-        """
-        Generate a sample image using flow matching.
-
-        Args:
-            prompt: Text prompt
-            width: Image width (must be divisible by 16)
-            height: Image height (must be divisible by 16)
-            num_steps: Number of diffusion steps (auto-detected based on variant)
-            guidance_scale: CFG scale (ignored for Klein, kept for API compatibility)
-            seed: Random seed (-1 for random)
-
-        Returns:
-            Image tensor [1, 3, H, W] in [0, 1] range
-        """
-        # Auto-detect steps based on variant
-        if num_steps is None:
-            num_steps = 4 if self.model.is_distilled() else 50
-
-        # Set seed
-        generator = None
-        if seed >= 0:
-            generator = torch.Generator(device=self.device).manual_seed(seed)
-
-        # Move components to device
-        self.model.transformer.to(self.device)
-        if self.model.vae is not None:
-            self.model.vae.to(self.device)
-        if self.model.text_encoder is not None:
-            self.model.text_encoder.to(self.device)
-
-        # Encode prompt using Qwen3 stacked layers
-        prompt_embeds = self.model.encode_prompt(
-            prompt=prompt,
-            device=self.device,
-            max_sequence_length=512,
-        )
-
-        # Prepare latents (32 channels before patchification)
-        latents = self.model.prepare_latents(
-            batch_size=1,
-            height=height,
-            width=width,
-            device=self.device,
-            dtype=self.dtype,
-            generator=generator,
-        )
-
-        # Patchify: 32 → 128 channels
-        latents = self.model.patchify_latents(latents)
-
-        # Normalize using VAE batch norm statistics
-        latents = self.model.normalize_latents(latents)
-
-        # Pack latents for transformer: [B, 128, H, W] → [B, H*W, 128]
-        packed_latents, img_ids = self.model.pack_latents(latents)
-
-        # Pack text embeddings
-        packed_text, txt_ids = self.model.pack_text(prompt_embeds)
-        pooled_projections = self.model.pooled_text_projection(packed_text)
-
-        # Get dimensions for unpacking later
-        _, _, packed_h, packed_w = latents.shape
-
-        # Use scheduler for proper timesteps
-        from diffusers import FlowMatchEulerDiscreteScheduler
-        scheduler = FlowMatchEulerDiscreteScheduler()
-        scheduler.set_timesteps(num_steps, device=self.device)
-
-        # Denoising loop
-        for i, t in enumerate(scheduler.timesteps):
-            # Scheduler provides discrete timesteps, but transformer expects
-            # continuous sigma values (0-1 range)
-            sigma = scheduler.sigmas[i]
-
-            # Forward through transformer
-            # FLUX.2 Klein transformer expects:
-            # - hidden_states: packed latents [B, N, C]
-            # - encoder_hidden_states: text embeddings [B, L, D]
-            # - timestep: sigma value (0-1 range for flow matching)
-            # - img_ids: image position IDs
-            # - txt_ids: text position IDs
-            # - guidance: None for Klein (no CFG)
-            timestep = sigma.expand(packed_latents.shape[0]).to(self.dtype)
-            guidance = torch.ones(packed_latents.shape[0], device=self.device, dtype=self.dtype)
-
-            with torch.autocast(device_type='cuda', dtype=self.dtype):
-                velocity = self.model.transformer(
-                    hidden_states=packed_latents,
-                    timestep=timestep,
-                    encoder_hidden_states=packed_text,
-                    pooled_projections=pooled_projections,
-                    img_ids=img_ids,
-                    txt_ids=txt_ids,
-                    guidance=guidance,
-                    return_dict=False,
-                )[0]
-
-            # Use scheduler step
-            packed_latents = scheduler.step(
-                velocity, t, packed_latents, return_dict=False
-            )[0]
-
-        # Unpack latents: [B, H*W, 128] → [B, 128, H, W]
-        latents = self.model.unpack_latents(packed_latents, packed_h, packed_w)
-
-        # Denormalize
-        latents = self.model.denormalize_latents(latents)
-
-        # Unpatchify: 128 → 32 channels
-        latents = self.model.unpatchify_latents(latents)
-
-        # Decode to image
-        # Cast VAE to float32 for quality decode, then cast back
-        vae_dtype = next(self.model.vae.parameters()).dtype
-        self.model.vae.to(torch.float32)
-        image = self.model.vae.decode(latents.float(), return_dict=False)[0]
-        self.model.vae.to(vae_dtype)
-
-        # Postprocess: [-1, 1] → [0, 1]
-        image = (image / 2 + 0.5).clamp(0, 1)
-
-        return image
-
-    @torch.no_grad()
-    def sample_with_lora(
-        self,
-        prompt: str,
-        lora_path: str,
-        lora_scale: float = 1.0,
-        **kwargs,
-    ) -> Tensor:
-        """
-        Generate image with trained LoRA applied.
-
-        Args:
-            prompt: Text prompt
-            lora_path: Path to LoRA safetensors file
-            lora_scale: LoRA weight scale (0.0-1.0)
-            **kwargs: Additional sampling arguments
-
-        Returns:
-            Image tensor [1, 3, H, W] in [0, 1] range
-        """
-        from ..adapters import create_adapter, detect_adapter_type, detect_rank, is_lycoris_state_dict
-        from safetensors.torch import load_file
-
-        # Load state dict and detect adapter type
-        state_dict = load_file(lora_path)
-        adapter_type = detect_adapter_type(state_dict)
-        adapter_backend = "lycoris" if is_lycoris_state_dict(state_dict) else "native"
-        rank = detect_rank(state_dict)
-
-        print(f"  Loading {adapter_type.value} adapter (rank={rank}) from {lora_path}")
-
-        # Create and inject adapter
-        adapter = create_adapter(
-            adapter_type=adapter_type,
-            rank=rank,
-            alpha=float(rank),
-            model_type="flux_2_klein",
-            backend=adapter_backend,
-            device=self.device,
-            dtype=self.dtype,
-        )
-
-        # Inject adapter into transformer
-        self.model.transformer = adapter.inject(self.model.transformer)
-
-        # Load weights
-        adapter.load(lora_path)
-
-        # Set adapter scale
-        if hasattr(adapter, 'set_adapter_scale'):
-            adapter.set_adapter_scale(lora_scale)
-
-        try:
-            # Generate image
-            image = self.sample(prompt, **kwargs)
-        finally:
-            # Cleanup: unload adapter
-            try:
-                adapter.unmerge()
-            except RuntimeError:
-                pass
-
-        return image

@@ -284,6 +284,23 @@ def _freeze_adapter_parameters(module: Any, adapter_name: str) -> None:
             param.requires_grad_(False)
 
 
+def _is_standard_lora_file(path: Path) -> bool:
+    """Check if a safetensors file contains standard LoRA keys (not LyCORIS)."""
+    try:
+        from safetensors.torch import load_file
+        state_dict = load_file(str(path))
+    except Exception:
+        return True  # Can't check, assume standard
+
+    keys_joined = " ".join(state_dict.keys())
+    # LyCORIS adapter types have distinctive key patterns
+    lycoris_markers = ("lokr_", "hada_", "oft_", "boft_", "diag_oft_", "ia3_")
+    for marker in lycoris_markers:
+        if marker in keys_joined:
+            return False
+    return True
+
+
 def _load_assistant_lora_into_transformer(
     *,
     pipeline: Any,
@@ -292,6 +309,10 @@ def _load_assistant_lora_into_transformer(
     weight_name: str | None = None,
     strength: float | None = None,
 ) -> bool:
+    # Skip diffusers path entirely for non-standard-LoRA files (LyCORIS etc.)
+    if not _is_standard_lora_file(lora_path):
+        return False
+
     transformer = getattr(pipeline, "transformer", None)
     pipeline_cls = pipeline.__class__
     lora_state_fn = getattr(pipeline_cls, "lora_state_dict", None)
@@ -356,6 +377,81 @@ def _load_assistant_lora_into_transformer(
     return True
 
 
+def _load_adapter_native(
+    *,
+    pipeline: Any,
+    adapter_path: Path,
+    strength: float | None = None,
+    model_type: str = "flux_2_klein",
+) -> bool:
+    """Load any adapter (LoRA, LyCORIS, DoRA, etc.) via the native Serenity adapter system.
+
+    This is the fallback when diffusers' built-in LoRA loader can't handle
+    the file (e.g. LyCORIS/LoHa/LoKr/OFT adapters).
+
+    Uses lycoris.create_lycoris_from_weights for LyCORIS files (LoKr, LoHa, OFT, etc.)
+    which infers shapes from the state dict directly — no need to guess factor/rank.
+    Falls back to Serenity's native adapter system for standard LoRA.
+    """
+    transformer = getattr(pipeline, "transformer", None)
+    if transformer is None:
+        return False
+
+    multiplier = float(strength) if strength is not None else 1.0
+
+    # Try lycoris.create_lycoris_from_weights — handles LoKr/LoHa/OFT/etc. natively
+    try:
+        from lycoris import create_lycoris_from_weights
+
+        network, weights_sd = create_lycoris_from_weights(
+            multiplier, str(adapter_path), transformer,
+        )
+        if not network.loras:
+            return False
+
+        network.weights_sd = weights_sd
+        network.apply_to()
+        network.merge_to(weight=multiplier)
+        network.restore()
+
+        for param in transformer.parameters():
+            param.requires_grad_(False)
+
+        return True
+    except ImportError:
+        pass
+    except Exception as lycoris_exc:
+        print(f"[sampler] lycoris direct load failed ({lycoris_exc}), trying serenity adapter")
+
+    # Fallback: Serenity native adapter system
+    from safetensors.torch import load_file
+    from serenity.adapters import create_adapter, detect_adapter_type, detect_rank
+
+    state_dict = load_file(str(adapter_path))
+    adapter_type = detect_adapter_type(state_dict)
+    rank = detect_rank(state_dict)
+
+    adapter = create_adapter(
+        adapter_type=adapter_type,
+        rank=rank,
+        alpha=float(rank),
+        model_type=model_type,
+        dropout=0.0,
+    )
+
+    adapter.inject(transformer)
+    adapter.load(str(adapter_path))
+    adapter.merge()
+
+    if strength is not None and strength != 1.0:
+        print(f"[sampler] warning: native adapter merge uses strength=1.0 (requested {strength})")
+
+    for param in transformer.parameters():
+        param.requires_grad_(False)
+
+    return True
+
+
 def _load_assistant_lora_into_pipeline(
     *,
     pipeline: Any,
@@ -364,6 +460,9 @@ def _load_assistant_lora_into_pipeline(
     weight_name: str | None = None,
     strength: float | None = None,
 ) -> bool:
+    if not _is_standard_lora_file(lora_path):
+        return False
+
     load_fn = getattr(pipeline, "load_lora_weights", None)
     if load_fn is None:
         return False
@@ -416,7 +515,10 @@ class DiffusersSampler(BaseSampler):
     resolution_multiple: int = 8
     use_cpu_offload_on_cuda: bool = False
     use_sequential_cpu_offload_on_cuda: bool = False
-    use_generic_assistant_lora: bool = True
+    # "pipeline" → load_lora_weights on full pipeline (SD15, SDXL, etc.)
+    # "transformer" → load directly into transformer (Flux2, ZImage)
+    # "none" → skip assistant LoRA loading
+    _lora_load_target: str = "pipeline"
     extra_pretrained_kwargs: dict[str, Any] = {}
 
     def __init__(self, model: Any = None, *, model_type: ModelType | None = None) -> None:
@@ -513,7 +615,7 @@ class DiffusersSampler(BaseSampler):
         raise RuntimeError(f"Could not load a pipeline for {self.model_type}: {detail}")
 
     def _apply_assistant_lora(self, pipeline: Any):
-        if not self.use_generic_assistant_lora:
+        if self._lora_load_target == "none":
             return pipeline
 
         path, weight_name, strength = _extract_assistant_lora_settings(self.model)
@@ -524,19 +626,46 @@ class DiffusersSampler(BaseSampler):
         if self._assistant_signature == signature:
             return pipeline
 
+        # Pick diffusers loader based on target
+        if self._lora_load_target == "transformer":
+            load_fn = _load_assistant_lora_into_transformer
+        else:
+            load_fn = _load_assistant_lora_into_pipeline
+
+        loaded = False
+        diffusers_exc = None
         try:
-            loaded = _load_assistant_lora_into_pipeline(
+            loaded = load_fn(
                 pipeline=pipeline,
                 lora_path=path,
                 adapter_name="assistant",
                 weight_name=weight_name,
                 strength=strength,
             )
-            if loaded:
-                self._assistant_signature = signature
-                print(f"[sampler] loaded assistant LoRA from {path}")
         except Exception as exc:
-            print(f"[sampler] warning: failed to load assistant LoRA {path}: {exc}")
+            diffusers_exc = exc
+
+        if loaded:
+            self._assistant_signature = signature
+            print(f"[sampler] loaded assistant LoRA from {path}")
+        else:
+            # Diffusers skipped or failed — try native adapter system (handles LyCORIS etc.)
+            try:
+                loaded = _load_adapter_native(
+                    pipeline=pipeline,
+                    adapter_path=path,
+                    strength=strength,
+                    model_type=str(self.model_type.value) if self.model_type else "unknown",
+                )
+                if loaded:
+                    self._assistant_signature = signature
+                    print(f"[sampler] loaded adapter (native) from {path}")
+                else:
+                    reason = f"diffusers={diffusers_exc}" if diffusers_exc else "diffusers=skipped(non-lora)"
+                    print(f"[sampler] warning: failed to load adapter {path}: {reason}, native=unsupported")
+            except Exception as exc2:
+                reason = f"diffusers={diffusers_exc}" if diffusers_exc else "diffusers=skipped(non-lora)"
+                print(f"[sampler] warning: failed to load adapter {path}: {reason}, native={exc2}")
         return pipeline
 
     def _ensure_pipeline(
@@ -821,11 +950,7 @@ class Flux2Sampler(DiffusersSampler):
     # model_cpu_offload (not sequential) keeps params on CPU, not meta device,
     # so LoRA weights can be loaded into the transformer after offloading.
     use_sequential_cpu_offload_on_cuda = False
-    use_generic_assistant_lora = False
-
-    def __init__(self, model: Any = None, *, model_type: ModelType | None = None) -> None:
-        super().__init__(model=model, model_type=model_type)
-        self._assistant_signature: tuple[str, str | None, float | None] | None = None
+    _lora_load_target = "transformer"
 
     def _candidate_pipeline_names(self, **_: Any) -> tuple[str, ...]:
         klein_types = {
@@ -839,81 +964,13 @@ class Flux2Sampler(DiffusersSampler):
             return ("Flux2KleinPipeline", "Flux2Pipeline")
         return ("Flux2Pipeline", "Flux2KleinPipeline")
 
-    def _ensure_pipeline(
-        self,
-        *,
-        model_source: str,
-        device: torch.device,
-        dtype: torch.dtype,
-        image: Any = None,
-    ):
-        pipeline = super()._ensure_pipeline(model_source=model_source, device=device, dtype=dtype, image=image)
-        path, weight_name, strength = _extract_assistant_lora_settings(self.model)
-        if path is None:
-            return pipeline
-
-        signature = (str(path), weight_name, strength)
-        if self._assistant_signature == signature:
-            return pipeline
-
-        try:
-            loaded = _load_assistant_lora_into_transformer(
-                pipeline=pipeline,
-                lora_path=path,
-                adapter_name="assistant",
-                weight_name=weight_name,
-                strength=strength,
-            )
-            if loaded:
-                self._assistant_signature = signature
-                print(f"[sampler] loaded FLUX.2 assistant LoRA from {path}")
-        except Exception as exc:
-            print(f"[sampler] warning: failed to load FLUX.2 assistant LoRA {path}: {exc}")
-        return pipeline
-
 
 class ZImageSampler(DiffusersSampler):
     pipeline_candidates = ("ZImagePipeline",)
     default_steps = 20
     default_guidance = 5.0
     resolution_multiple = 64
-    use_generic_assistant_lora = False
-
-    def __init__(self, model: Any = None, *, model_type: ModelType | None = None) -> None:
-        super().__init__(model=model, model_type=model_type)
-        self._assistant_signature: tuple[str, str | None, float | None] | None = None
-
-    def _ensure_pipeline(
-        self,
-        *,
-        model_source: str,
-        device: torch.device,
-        dtype: torch.dtype,
-        image: Any = None,
-    ):
-        pipeline = super()._ensure_pipeline(model_source=model_source, device=device, dtype=dtype, image=image)
-        path, weight_name, strength = _extract_assistant_lora_settings(self.model)
-        if path is None:
-            return pipeline
-
-        signature = (str(path), weight_name, strength)
-        if self._assistant_signature == signature:
-            return pipeline
-
-        try:
-            loaded = _load_assistant_lora_into_transformer(
-                pipeline=pipeline,
-                lora_path=path,
-                adapter_name="assistant",
-                weight_name=weight_name,
-                strength=strength,
-            )
-            if loaded:
-                self._assistant_signature = signature
-                print(f"[sampler] loaded Z-Image assistant LoRA from {path}")
-        except Exception as exc:
-            print(f"[sampler] warning: failed to load Z-Image assistant LoRA {path}: {exc}")
-        return pipeline
+    _lora_load_target = "transformer"
 
 
 class ChromaSampler(DiffusersSampler):
@@ -1026,7 +1083,7 @@ class QwenSampler(DiffusersSampler):
     default_guidance = 4.0
     resolution_multiple = 64
     use_cpu_offload_on_cuda = True
-    use_sequential_cpu_offload_on_cuda = False
+    use_sequential_cpu_offload_on_cuda = True
 
 
 class QwenImageEditSampler(DiffusersSampler):
@@ -1034,7 +1091,7 @@ class QwenImageEditSampler(DiffusersSampler):
     default_guidance = 4.0
     resolution_multiple = 64
     use_cpu_offload_on_cuda = True
-    use_sequential_cpu_offload_on_cuda = False
+    use_sequential_cpu_offload_on_cuda = True
 
     def _candidate_pipeline_names(self, **_: Any) -> tuple[str, ...]:
         return ("QwenImageImg2ImgPipeline", "QwenImageEditPipeline", "QwenImagePipeline")

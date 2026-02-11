@@ -620,13 +620,22 @@ class Flux2BaseTrainer(ABC):
                 # FLUX.2 transformer time_text_embed expects pooled text projections.
                 pooled_projections = packed_text.mean(dim=1)
         if guidance is None:
-            guidance_scale = float(getattr(self.config, "guidance_scale", 1.0))
-            guidance = torch.full(
-                (packed_latents.shape[0],),
-                guidance_scale,
-                device=packed_latents.device,
-                dtype=packed_latents.dtype,
+            # Klein has guidance_embeds=False → pass None (no guidance embedding layer).
+            # Dev has guidance_embeds=True → pass guidance tensor.
+            has_guidance = getattr(
+                getattr(self.model.transformer, "config", None),
+                "guidance_embeds", True,
             )
+            if has_guidance:
+                guidance_scale = float(getattr(self.config, "guidance_scale", 1.0))
+                guidance = torch.full(
+                    (packed_latents.shape[0],),
+                    guidance_scale,
+                    device=packed_latents.device,
+                    dtype=packed_latents.dtype,
+                )
+            else:
+                guidance = None
 
         # Get latent dimensions for unpacking.
         _, _, height, width = noisy_latents.shape
