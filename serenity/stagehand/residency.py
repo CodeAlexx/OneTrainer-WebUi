@@ -66,6 +66,11 @@ class ResidencyEntry:
     last_used_step: int = -1
     next_use_step: int | None = None
     transfer_event: torch.cuda.Event | None = None
+    param_layout: list[tuple[str, tuple[int, ...], torch.dtype, int, int]] | None = None
+    """Flattened parameter layout: list of (param_name, shape, dtype, offset_bytes, num_elements).
+
+    Populated when a block is staged to host.  Used to reconstruct individual
+    parameter tensors as views into the contiguous slab/GPU buffer."""
 
 
 # ── map ──────────────────────────────────────────────────────────────────

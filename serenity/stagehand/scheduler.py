@@ -14,6 +14,7 @@ import time
 from typing import TYPE_CHECKING, Protocol
 
 import torch
+from torch import nn
 
 from serenity.stagehand.residency import BlockState
 
@@ -134,6 +135,90 @@ class StaticLookaheadPolicy:
         return current_step - last_used_step > self.eviction_cooldown_steps
 
 
+# ── parameter layout helpers ─────────────────────────────────────────────
+
+
+def _build_param_layout(
+    module: nn.Module,
+    dtype: torch.dtype,
+) -> list[tuple[str, tuple[int, ...], torch.dtype, int, int]]:
+    """Build a contiguous parameter layout for *module*.
+
+    Returns a list of ``(param_name, shape, dtype, offset_bytes, num_elements)``
+    tuples describing how each parameter is packed into a flat buffer.
+    """
+    layout: list[tuple[str, tuple[int, ...], torch.dtype, int, int]] = []
+    offset = 0
+    for name, param in module.named_parameters():
+        numel = param.numel()
+        elem_size = dtype.itemsize
+        nbytes = numel * elem_size
+        layout.append((name, tuple(param.shape), dtype, offset, numel))
+        offset += nbytes
+    return layout
+
+
+def _flatten_params_into_buffer(
+    module: nn.Module,
+    buffer: torch.Tensor,
+    layout: list[tuple[str, tuple[int, ...], torch.dtype, int, int]],
+) -> None:
+    """Copy module parameters into a uint8 *buffer* according to *layout*."""
+    params = dict(module.named_parameters())
+    for name, _shape, dtype, offset_bytes, numel in layout:
+        param = params[name]
+        elem_size = dtype.itemsize
+        nbytes = numel * elem_size
+        # Get a typed view into the buffer region.
+        region = buffer[offset_bytes : offset_bytes + nbytes].view(dtype)
+        region.copy_(param.data.to(dtype).reshape(-1))
+
+
+def _restore_params_from_tensor(
+    module: nn.Module,
+    flat_tensor: torch.Tensor,
+    layout: list[tuple[str, tuple[int, ...], torch.dtype, int, int]],
+) -> None:
+    """Replace module parameter ``.data`` with views into *flat_tensor*.
+
+    *flat_tensor* is the flat contiguous buffer (on GPU or host).
+    After this call, the module's forward pass uses *flat_tensor*'s memory.
+    """
+    # Build a lookup for sub-modules by walking named_parameters to get the
+    # module/attr pairs.  named_parameters returns "layer.weight" etc.
+    # We need to find the parent module and the attribute name.
+    for name, shape, dtype, offset_bytes, numel in layout:
+        elem_size = dtype.itemsize
+        nbytes = numel * elem_size
+        view = flat_tensor[offset_bytes : offset_bytes + nbytes].view(dtype).reshape(shape)
+        # Navigate to the parameter and replace its .data.
+        _set_param_data(module, name, view)
+
+
+def _set_param_data(module: nn.Module, dotted_name: str, data: torch.Tensor) -> None:
+    """Set ``module.<dotted_name>.data = data`` following dot-separated path."""
+    parts = dotted_name.split(".")
+    current = module
+    for part in parts[:-1]:
+        current = getattr(current, part)
+    param = getattr(current, parts[-1])
+    param.data = data
+
+
+def _detach_params(
+    module: nn.Module,
+    layout: list[tuple[str, tuple[int, ...], torch.dtype, int, int]],
+) -> None:
+    """Replace each parameter's ``.data`` with a size-0 empty tensor.
+
+    This releases all views into the contiguous GPU buffer so that
+    setting ``gpu_tensor = None`` actually frees the GPU storage.
+    Without this, parameter views keep the underlying storage alive.
+    """
+    for name, _shape, dtype, _offset_bytes, _numel in layout:
+        _set_param_data(module, name, torch.empty(0, dtype=dtype))
+
+
 # ── scheduler ────────────────────────────────────────────────────────────
 
 
@@ -158,6 +243,9 @@ class StagehandScheduler:
         Telemetry recorder.
     config:
         Runtime configuration.
+    inference_mode:
+        If *True*, eviction always uses ``save_back=False`` (frozen blocks,
+        no gradients to preserve).
     """
 
     def __init__(
@@ -170,6 +258,7 @@ class StagehandScheduler:
         guards: GuardsLike | None,
         telemetry: StagehandTelemetry,
         config: StagehandConfig,
+        inference_mode: bool = False,
     ) -> None:
         self._registry = registry
         self._residency = residency
@@ -179,6 +268,7 @@ class StagehandScheduler:
         self._guards = guards
         self._telemetry = telemetry
         self._config = config
+        self._inference_mode = inference_mode
 
         self._current_step: int = 0
         self._cursor: int = 0
@@ -205,7 +295,7 @@ class StagehandScheduler:
 
     def end_step(self) -> None:
         """Finalize the current step — reap transfers, update telemetry."""
-        self._engine._reap_completed()
+        self._engine.reap()
         self._telemetry.end_step()
 
     # ── per-block hooks ───────────────────────────────────────────────
@@ -223,7 +313,7 @@ class StagehandScheduler:
             if handle is not None:
                 self._engine.wait(handle)
                 self._pending_handles.pop(block_id, None)
-            self._residency.transition(block_id, BlockState.GPU_READY)
+            self._finalize_gpu_load(block_id)
             stall_ms = (time.monotonic() - t0) * 1000.0
             self._telemetry.record_stall(stall_ms)
             self._telemetry.record_prefetch_miss()
@@ -238,7 +328,7 @@ class StagehandScheduler:
                 if handle is not None:
                     self._engine.wait(handle)
                     self._pending_handles.pop(block_id, None)
-                self._residency.transition(block_id, BlockState.GPU_READY)
+                self._finalize_gpu_load(block_id)
             stall_ms = (time.monotonic() - t0) * 1000.0
             self._telemetry.record_stall(stall_ms)
             self._telemetry.record_prefetch_miss()
@@ -315,7 +405,7 @@ class StagehandScheduler:
 
         if state == BlockState.UNLOADED:
             # Stage to host first, then submit H2D.
-            slab = self._stage_block_to_host(block_entry)
+            slab = self._stage_block_to_host(block_entry, res_entry)
             res_entry.host_slab = slab
             state = self._residency.get_state(block_id)  # now HOST_STAGED
 
@@ -338,15 +428,60 @@ class StagehandScheduler:
             self._residency.transition(block_id, BlockState.PREFETCHING)
             self._telemetry.record_h2d(block_entry.size_bytes)
 
-    def _stage_block_to_host(self, block_entry: BlockEntry) -> PinnedSlab:
-        """Acquire a slab and copy block parameters into it."""
+    def _stage_block_to_host(
+        self, block_entry: BlockEntry, res_entry: ResidencyEntry,
+    ) -> PinnedSlab:
+        """Acquire a slab and copy block parameters into it.
+
+        Builds a contiguous param layout, flattens all module parameters
+        into the slab buffer, and stores the layout on the residency entry
+        so GPU-side restoration can reconstruct individual parameter views.
+        """
         slab = self._engine._pool.acquire(block_entry.size_bytes)
-        # In a real implementation, this would flatten all parameters
-        # into the slab buffer.  For now, zero-fill as a placeholder.
-        if not isinstance(slab, list):
-            slab.buffer[:] = 0
+
+        # Resolve the module from the weak reference.
+        module = block_entry.module_ref()
+        if module is not None and any(True for _ in module.parameters()):
+            layout = _build_param_layout(module, block_entry.dtype)
+            res_entry.param_layout = layout
+            if not isinstance(slab, list):
+                _flatten_params_into_buffer(module, slab.buffer, layout)
+        else:
+            # Module has been garbage-collected or has no parameters.
+            # Zero-fill as a fallback.
+            res_entry.param_layout = None
+            if not isinstance(slab, list):
+                slab.buffer[:] = 0
+
         self._residency.transition(block_entry.block_id, BlockState.HOST_STAGED)
         return slab
+
+    def _finalize_gpu_load(self, block_id: str) -> None:
+        """After H2D transfer completes, restore module params from GPU tensor.
+
+        Transitions the block to GPU_READY, uses the stored param_layout
+        to replace each module parameter's ``.data`` with a view into the
+        contiguous GPU buffer, then releases the host slab back to the pool
+        (data now lives on GPU; a fresh slab will be acquired if save-back
+        eviction is needed later).
+        """
+        self._residency.transition(block_id, BlockState.GPU_READY)
+        block_entry = self._registry.get(block_id)
+        res_entry = self._residency.get_entry(block_id)
+
+        if res_entry.param_layout is not None and res_entry.gpu_tensor is not None:
+            module = block_entry.module_ref()
+            if module is not None:
+                # Reinterpret the flat GPU tensor as uint8 so we can index by
+                # byte offset (matching _flatten_params_into_buffer layout).
+                gpu_bytes = res_entry.gpu_tensor.view(torch.uint8)
+                _restore_params_from_tensor(module, gpu_bytes, res_entry.param_layout)
+
+        # Release the host slab — data is now on GPU.  A fresh slab will be
+        # acquired if we later need to evict with save-back (D2H).
+        if res_entry.host_slab is not None:
+            self._engine._pool.release(res_entry.host_slab)
+            res_entry.host_slab = None
 
     # ── eviction logic ────────────────────────────────────────────────
 
@@ -393,7 +528,9 @@ class StagehandScheduler:
         for _score, bid in scored:
             if self._budget.below_low_watermark():
                 break
-            self._evict_block(bid, save_back=False)
+            # In inference mode, never save back (blocks are frozen).
+            save_back = not self._inference_mode
+            self._evict_block(bid, save_back=save_back)
             self._telemetry.record_eviction()
 
     def _evict_block(self, block_id: str, save_back: bool = False) -> None:
@@ -403,19 +540,25 @@ class StagehandScheduler:
         ----------
         save_back:
             If *True*, D2H the GPU tensor before freeing (for blocks with
-            gradients).  If *False*, just free the GPU tensor.
+            gradients that may have been updated by the optimizer).
+            If *False*, just free the GPU tensor.
         """
+        block_entry = self._registry.get(block_id)
         res_entry = self._residency.get_entry(block_id)
+        module = block_entry.module_ref()
 
         if save_back:
             # D2H: GPU_READY -> EVICTING -> HOST_STAGED.
-            # The GPU tensor is freed after D2H to reclaim VRAM.
+            # Acquire a fresh slab for the D2H destination (the original slab
+            # was released after H2D in _finalize_gpu_load).
             self._residency.transition(block_id, BlockState.EVICTING)
-            if res_entry.gpu_tensor is not None and res_entry.host_slab is not None:
+            if res_entry.gpu_tensor is not None:
+                slab = self._engine._pool.acquire(block_entry.size_bytes)
+                res_entry.host_slab = slab
                 handle = self._engine.submit_d2h(
                     block_id=block_id,
                     gpu_src=res_entry.gpu_tensor,
-                    host_slab=res_entry.host_slab,
+                    host_slab=slab,
                 )
                 self._engine.wait(handle)
                 self._telemetry.record_d2h(
@@ -424,13 +567,31 @@ class StagehandScheduler:
             # Free GPU tensor — data is now safely on host slab.
             res_entry.gpu_tensor = None
             self._residency.transition(block_id, BlockState.HOST_STAGED)
+
+            # Restore module parameters to reference host slab views so the
+            # module remains usable (albeit slow) if accidentally accessed.
+            if (
+                module is not None
+                and res_entry.param_layout is not None
+                and res_entry.host_slab is not None
+            ):
+                _restore_params_from_tensor(
+                    module, res_entry.host_slab.buffer, res_entry.param_layout,
+                )
         else:
             # No save-back: GPU_READY -> GPU_FREEING -> UNLOADED.
             self._residency.transition(block_id, BlockState.GPU_FREEING)
-            # Free GPU tensor.
+            # Detach module parameters from GPU storage BEFORE dropping
+            # gpu_tensor.  Without this, parameter views keep the underlying
+            # GPU storage alive and VRAM is never actually freed.
+            if module is not None and res_entry.param_layout is not None:
+                _detach_params(module, res_entry.param_layout)
+            # Free GPU tensor — now safe because no views reference it.
             res_entry.gpu_tensor = None
             # Release host slab if held.
             if res_entry.host_slab is not None:
                 self._engine._pool.release(res_entry.host_slab)
                 res_entry.host_slab = None
+            # Clear param layout since slab is gone.
+            res_entry.param_layout = None
             self._residency.transition(block_id, BlockState.UNLOADED)

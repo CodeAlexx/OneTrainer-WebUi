@@ -219,6 +219,13 @@ class AsyncTransferEngine:
         with self._lock:
             return len(self._inflight)
 
+    def reap(self) -> int:
+        """Reap completed transfers.  Returns number reaped."""
+        with self._lock:
+            before = len(self._inflight)
+            self._reap_completed_locked()
+            return before - len(self._inflight)
+
     def drain(self) -> None:
         """Wait for all inflight transfers to complete."""
         while True:
