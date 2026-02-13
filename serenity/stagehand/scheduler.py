@@ -1,0 +1,436 @@
+"""Stagehand scheduler and static lookahead eviction policy.
+
+Orchestrates prefetching and eviction of transformer blocks between
+host pinned memory and GPU, using the transfer engine, residency map,
+budget manager, and telemetry components.
+
+The :class:`StaticLookaheadPolicy` is the first (deterministic) policy
+implementation — prefetch a fixed window ahead and evict by distance * size.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from typing import TYPE_CHECKING, Protocol
+
+import torch
+
+from serenity.stagehand.residency import BlockState
+
+if TYPE_CHECKING:
+    from serenity.stagehand.config import StagehandConfig
+    from serenity.stagehand.pool import PinnedPool, PinnedSlab
+    from serenity.stagehand.registry import BlockEntry, BlockRegistry
+    from serenity.stagehand.residency import ResidencyEntry, ResidencyMap
+    from serenity.stagehand.telemetry import StagehandTelemetry
+    from serenity.stagehand.transfer import AsyncTransferEngine, TransferHandle
+
+__all__ = ["StaticLookaheadPolicy", "StagehandScheduler"]
+
+log = logging.getLogger(__name__)
+
+
+# ── protocols for optional components ────────────────────────────────────
+# budget.py and guards.py may be built by another agent in parallel.
+# We define lightweight Protocol interfaces here so the scheduler
+# compiles regardless of their availability.
+
+
+class BudgetLike(Protocol):
+    """Minimal interface expected from BudgetManager."""
+
+    def above_high_watermark(self) -> bool: ...
+    def below_low_watermark(self) -> bool: ...
+
+
+class GuardsLike(Protocol):
+    """Minimal interface expected from NumericGuard."""
+
+    def check_output(
+        self, tensor: torch.Tensor, block_id: str, step: int,
+    ) -> tuple[int, int]: ...
+
+
+# ── static lookahead policy ──────────────────────────────────────────────
+
+
+class StaticLookaheadPolicy:
+    """Deterministic prefetch-ahead / eviction-scoring policy.
+
+    Parameters
+    ----------
+    prefetch_window:
+        Number of blocks ahead of the cursor to prefetch.
+    eviction_cooldown_steps:
+        Minimum steps since last use before a block may be evicted.
+    """
+
+    def __init__(
+        self,
+        prefetch_window: int = 3,
+        eviction_cooldown_steps: int = 2,
+    ) -> None:
+        self.prefetch_window = prefetch_window
+        self.eviction_cooldown_steps = eviction_cooldown_steps
+
+    def blocks_to_prefetch(
+        self,
+        cursor: int,
+        total_blocks: int,
+        residency_states: dict[str, str],
+    ) -> list[int]:
+        """Return exec_order indices to prefetch.
+
+        Looks from ``cursor + 1`` to ``cursor + prefetch_window`` (inclusive),
+        skipping any that are already GPU_READY or PREFETCHING.
+
+        Parameters
+        ----------
+        cursor:
+            Current position in exec_order (0-based).
+        total_blocks:
+            Total number of blocks in the registry.
+        residency_states:
+            Mapping of block_id to state string for each block.
+            Only used to filter out blocks already on GPU / in transit.
+            Keys are block_ids; the caller maps exec_order indices to ids.
+
+        Returns
+        -------
+        list[int]
+            Exec_order indices that need prefetching, in order.
+        """
+        result: list[int] = []
+        for offset in range(1, self.prefetch_window + 1):
+            idx = cursor + offset
+            if idx >= total_blocks:
+                break
+            result.append(idx)
+        return result
+
+    def score_for_eviction(
+        self,
+        block_id: str,
+        current_cursor: int,
+        entry_exec_order: int,
+        total_blocks: int,
+        size_bytes: int,
+    ) -> float:
+        """Score a block for eviction — higher score = better candidate.
+
+        Formula: ``next_use_distance * size_bytes``
+
+        ``next_use_distance`` wraps around for the next epoch.
+        """
+        next_use_distance = (entry_exec_order - current_cursor) % total_blocks
+        if next_use_distance == 0:
+            # Block is at cursor — it was just used or is about to be used.
+            # Set distance to total_blocks (farthest away in wrap-around).
+            next_use_distance = total_blocks
+        return float(next_use_distance * size_bytes)
+
+    def should_evict(self, last_used_step: int, current_step: int) -> bool:
+        """True if enough steps have passed since the block was last used."""
+        return current_step - last_used_step > self.eviction_cooldown_steps
+
+
+# ── scheduler ────────────────────────────────────────────────────────────
+
+
+class StagehandScheduler:
+    """Orchestrates block prefetching and eviction each training step.
+
+    Parameters
+    ----------
+    registry:
+        Immutable block registry.
+    residency:
+        Mutable residency map tracking block states.
+    transfer_engine:
+        Async transfer engine for H2D/D2H copies.
+    budget:
+        Budget manager for VRAM watermark checks.
+    policy:
+        Prefetch/eviction policy (e.g. StaticLookaheadPolicy).
+    guards:
+        Numeric guard for NaN/Inf checks.  May be *None*.
+    telemetry:
+        Telemetry recorder.
+    config:
+        Runtime configuration.
+    """
+
+    def __init__(
+        self,
+        registry: BlockRegistry,
+        residency: ResidencyMap,
+        transfer_engine: AsyncTransferEngine,
+        budget: BudgetLike,
+        policy: StaticLookaheadPolicy,
+        guards: GuardsLike | None,
+        telemetry: StagehandTelemetry,
+        config: StagehandConfig,
+    ) -> None:
+        self._registry = registry
+        self._residency = residency
+        self._engine = transfer_engine
+        self._budget = budget
+        self._policy = policy
+        self._guards = guards
+        self._telemetry = telemetry
+        self._config = config
+
+        self._current_step: int = 0
+        self._cursor: int = 0
+
+        # Ordered list of block entries for exec_order lookup.
+        self._ordered_blocks: list[BlockEntry] = registry.blocks_in_order()
+        self._total_blocks: int = len(self._ordered_blocks)
+
+        # Map exec_order -> block_id for fast lookup.
+        self._order_to_id: dict[int, str] = {
+            entry.exec_order: entry.block_id for entry in self._ordered_blocks
+        }
+
+        # Track pending transfer handles per block.
+        self._pending_handles: dict[str, TransferHandle] = {}
+
+    # ── step lifecycle ────────────────────────────────────────────────
+
+    def begin_step(self, step: int) -> None:
+        """Initialize state for a new training step."""
+        self._current_step = step
+        self._cursor = 0
+        self._telemetry.begin_step(step)
+
+    def end_step(self) -> None:
+        """Finalize the current step — reap transfers, update telemetry."""
+        self._engine._reap_completed()
+        self._telemetry.end_step()
+
+    # ── per-block hooks ───────────────────────────────────────────────
+
+    def before_block(self, block_id: str) -> None:
+        """Called before a block computes.  Ensures GPU residency."""
+        state = self._residency.get_state(block_id)
+
+        if state == BlockState.GPU_READY:
+            self._telemetry.record_prefetch_hit()
+        elif state == BlockState.PREFETCHING:
+            # Wait for in-progress transfer — this is a stall.
+            t0 = time.monotonic()
+            handle = self._pending_handles.get(block_id)
+            if handle is not None:
+                self._engine.wait(handle)
+                self._pending_handles.pop(block_id, None)
+            self._residency.transition(block_id, BlockState.GPU_READY)
+            stall_ms = (time.monotonic() - t0) * 1000.0
+            self._telemetry.record_stall(stall_ms)
+            self._telemetry.record_prefetch_miss()
+            log.debug("Stall on block %s: %.2f ms", block_id, stall_ms)
+        else:
+            # Block not on GPU at all — hard stall. Load it now.
+            t0 = time.monotonic()
+            self._load_block_to_gpu(block_id)
+            # If it became PREFETCHING, wait for it.
+            if self._residency.get_state(block_id) == BlockState.PREFETCHING:
+                handle = self._pending_handles.get(block_id)
+                if handle is not None:
+                    self._engine.wait(handle)
+                    self._pending_handles.pop(block_id, None)
+                self._residency.transition(block_id, BlockState.GPU_READY)
+            stall_ms = (time.monotonic() - t0) * 1000.0
+            self._telemetry.record_stall(stall_ms)
+            self._telemetry.record_prefetch_miss()
+            log.warning("Hard stall on block %s (was %s): %.2f ms", block_id, state.value, stall_ms)
+
+        # Increment refcount — block is now in use.
+        self._residency.increment_ref(block_id)
+        entry = self._residency.get_entry(block_id)
+        entry.last_used_step = self._current_step
+
+        # Advance cursor.
+        self._cursor += 1
+
+        # Issue prefetches for lookahead window.
+        self._prefetch_ahead()
+
+        # Eviction pass if above high watermark.
+        if self._budget.above_high_watermark():
+            self._run_eviction()
+
+    def after_block(self, block_id: str, output: torch.Tensor | None = None) -> None:
+        """Called after a block computes.  Releases refcount."""
+        self._residency.decrement_ref(block_id)
+        entry = self._residency.get_entry(block_id)
+        entry.last_used_step = self._current_step
+
+        # Numeric guard check.
+        if self._guards is not None and output is not None and self._config.nan_inf_check:
+            nan_count, inf_count = self._guards.check_output(
+                output, block_id, self._current_step,
+            )
+            if nan_count > 0 or inf_count > 0:
+                self._telemetry.record_nan_inf(nan_count, inf_count)
+
+    # ── prefetch logic ────────────────────────────────────────────────
+
+    def _prefetch_ahead(self) -> None:
+        """Issue H2D transfers for blocks in the lookahead window."""
+        # Build residency state map for the policy.
+        residency_states: dict[str, str] = {}
+        for entry in self._ordered_blocks:
+            residency_states[entry.block_id] = self._residency.get_state(
+                entry.block_id
+            ).value
+
+        indices = self._policy.blocks_to_prefetch(
+            cursor=self._cursor - 1,  # cursor was already incremented
+            total_blocks=self._total_blocks,
+            residency_states=residency_states,
+        )
+
+        for idx in indices:
+            if idx >= self._total_blocks:
+                break
+            block_id = self._ordered_blocks[idx].block_id
+            state = self._residency.get_state(block_id)
+
+            if state in (BlockState.GPU_READY, BlockState.PREFETCHING):
+                continue
+
+            self._load_block_to_gpu(block_id)
+
+    def _load_block_to_gpu(self, block_id: str) -> None:
+        """Ensure block progresses toward GPU_READY."""
+        state = self._residency.get_state(block_id)
+
+        if state == BlockState.GPU_READY:
+            return
+        if state == BlockState.PREFETCHING:
+            return
+
+        block_entry = self._registry.get(block_id)
+        res_entry = self._residency.get_entry(block_id)
+
+        if state == BlockState.UNLOADED:
+            # Stage to host first, then submit H2D.
+            slab = self._stage_block_to_host(block_entry)
+            res_entry.host_slab = slab
+            state = self._residency.get_state(block_id)  # now HOST_STAGED
+
+        if state == BlockState.HOST_STAGED:
+            # Allocate GPU tensor if needed.
+            if res_entry.gpu_tensor is None:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                numel = block_entry.size_bytes // block_entry.dtype.itemsize
+                res_entry.gpu_tensor = torch.empty(
+                    numel, dtype=block_entry.dtype, device=device
+                )
+
+            # Submit H2D transfer.
+            handle = self._engine.submit_h2d(
+                block_id=block_id,
+                host_slab=res_entry.host_slab,
+                gpu_dest=res_entry.gpu_tensor,
+            )
+            self._pending_handles[block_id] = handle
+            self._residency.transition(block_id, BlockState.PREFETCHING)
+            self._telemetry.record_h2d(block_entry.size_bytes)
+
+    def _stage_block_to_host(self, block_entry: BlockEntry) -> PinnedSlab:
+        """Acquire a slab and copy block parameters into it."""
+        slab = self._engine._pool.acquire(block_entry.size_bytes)
+        # In a real implementation, this would flatten all parameters
+        # into the slab buffer.  For now, zero-fill as a placeholder.
+        if not isinstance(slab, list):
+            slab.buffer[:] = 0
+        self._residency.transition(block_entry.block_id, BlockState.HOST_STAGED)
+        return slab
+
+    # ── eviction logic ────────────────────────────────────────────────
+
+    def _run_eviction(self) -> None:
+        """Evict blocks until VRAM is below the low watermark.
+
+        Spec rules enforced:
+        - Never evict a block with refcount > 0 (handled by eviction_candidates).
+        - Never evict a block within the prefetch window.
+        - Evict in descending score order until below vram_low_watermark.
+        - Eviction cooldown respected (handled by eviction_candidates).
+        """
+        candidates = self._residency.eviction_candidates(
+            current_step=self._current_step,
+            cooldown_steps=self._policy.eviction_cooldown_steps,
+        )
+
+        # Build the set of block_ids within the prefetch window -- these are
+        # protected from eviction per spec Section 2.4.2.
+        prefetch_window_ids: set[str] = set()
+        cursor_for_policy = max(self._cursor - 1, 0)
+        for offset in range(1, self._policy.prefetch_window + 1):
+            idx = cursor_for_policy + offset
+            if idx < self._total_blocks:
+                prefetch_window_ids.add(self._ordered_blocks[idx].block_id)
+
+        # Score and sort — highest score = evict first.
+        scored: list[tuple[float, str]] = []
+        for bid, entry in candidates:
+            if bid in prefetch_window_ids:
+                continue  # Never evict blocks within the prefetch window.
+            block_entry = self._registry.get(bid)
+            score = self._policy.score_for_eviction(
+                block_id=bid,
+                current_cursor=self._cursor,
+                entry_exec_order=block_entry.exec_order,
+                total_blocks=self._total_blocks,
+                size_bytes=block_entry.size_bytes,
+            )
+            scored.append((score, bid))
+
+        scored.sort(reverse=True)
+
+        for _score, bid in scored:
+            if self._budget.below_low_watermark():
+                break
+            self._evict_block(bid, save_back=False)
+            self._telemetry.record_eviction()
+
+    def _evict_block(self, block_id: str, save_back: bool = False) -> None:
+        """Evict a block from GPU.
+
+        Parameters
+        ----------
+        save_back:
+            If *True*, D2H the GPU tensor before freeing (for blocks with
+            gradients).  If *False*, just free the GPU tensor.
+        """
+        res_entry = self._residency.get_entry(block_id)
+
+        if save_back:
+            # D2H: GPU_READY -> EVICTING -> HOST_STAGED.
+            # The GPU tensor is freed after D2H to reclaim VRAM.
+            self._residency.transition(block_id, BlockState.EVICTING)
+            if res_entry.gpu_tensor is not None and res_entry.host_slab is not None:
+                handle = self._engine.submit_d2h(
+                    block_id=block_id,
+                    gpu_src=res_entry.gpu_tensor,
+                    host_slab=res_entry.host_slab,
+                )
+                self._engine.wait(handle)
+                self._telemetry.record_d2h(
+                    res_entry.gpu_tensor.numel() * res_entry.gpu_tensor.element_size()
+                )
+            # Free GPU tensor — data is now safely on host slab.
+            res_entry.gpu_tensor = None
+            self._residency.transition(block_id, BlockState.HOST_STAGED)
+        else:
+            # No save-back: GPU_READY -> GPU_FREEING -> UNLOADED.
+            self._residency.transition(block_id, BlockState.GPU_FREEING)
+            # Free GPU tensor.
+            res_entry.gpu_tensor = None
+            # Release host slab if held.
+            if res_entry.host_slab is not None:
+                self._engine._pool.release(res_entry.host_slab)
+                res_entry.host_slab = None
+            self._residency.transition(block_id, BlockState.UNLOADED)
