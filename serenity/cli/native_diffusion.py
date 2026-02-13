@@ -598,6 +598,12 @@ def _maybe_sample(
     if not sample_block.get("enabled", False):
         return
     use_live_adapter = _as_bool(sample_block.get("use_live_adapter"), True)
+    sample_device_raw = sample_block.get("sample_device") or sample_block.get("device")
+    if sample_device_raw:
+        sample_device = torch.device(str(sample_device_raw))
+    else:
+        sample_device = train_device
+    sample_dtype = train_dtype if sample_device.type != "cpu" else torch.float32
 
     interval = int(sample_block.get("interval", 0) or 0)
     if interval <= 0 or step % interval != 0:
@@ -689,8 +695,8 @@ def _maybe_sample(
             "negative_prompt": negative_prompt,
             "model_path": model_path,
             "seed": seed,
-            "device": train_device,
-            "dtype": train_dtype,
+            "device": sample_device,
+            "dtype": sample_dtype,
             "output_path": out_path,
             "unload": prompt_index == len(prompts_to_run) - 1,
             **sample_kwargs,
@@ -1278,6 +1284,42 @@ def run_native_diffusion_training(
     if not cached:
         raise ValueError("No cached samples were produced. Verify dataset paths and conditioning images.")
 
+    runtime_prompt_device = native_model.cache_prompt_device(pipeline, train_device)
+
+    if full_finetune and train_primary:
+        train_module.train()
+    else:
+        train_module.eval()
+
+    adapter = None
+    if not full_finetune:
+        rank = int(adapter_block.get("rank") or adapter_block.get("network_dim") or config.get("lora_rank") or 16)
+        alpha = float(
+            adapter_block.get("alpha") or adapter_block.get("network_alpha") or config.get("lora_alpha") or rank
+        )
+        adapter_backend: str | None = None
+        if adapter_type == "lora":
+            if isinstance(config.get("lycoris"), dict):
+                adapter_backend = "lycoris"
+            else:
+                adapter_backend = str(
+                    adapter_block.get("backend")
+                    or adapter_block.get("implementation")
+                    or config.get("lora_backend")
+                    or config.get("adapter_backend")
+                    or "native"
+                ).strip().lower()
+        adapter = create_adapter(
+            adapter_type=adapter_type,
+            rank=rank,
+            alpha=alpha,
+            model_type=model_type_enum.value,
+            dropout=float(adapter_block.get("dropout", 0.0)),
+            backend=adapter_backend,
+            **_build_adapter_kwargs(adapter_block),
+        )
+        adapter.inject(train_module)
+
     memory_strategy = (
         None if dispatched_train_module else _setup_memory_strategy(train_module, family, memory_block, config)
     )
@@ -1313,40 +1355,6 @@ def run_native_diffusion_training(
     if not placed_on_device and not dispatched_train_module:
         with suppress(Exception):
             train_module.to(train_device)
-
-    if full_finetune and train_primary:
-        train_module.train()
-    else:
-        train_module.eval()
-
-    adapter = None
-    if not full_finetune:
-        rank = int(adapter_block.get("rank") or adapter_block.get("network_dim") or config.get("lora_rank") or 16)
-        alpha = float(
-            adapter_block.get("alpha") or adapter_block.get("network_alpha") or config.get("lora_alpha") or rank
-        )
-        adapter_backend: str | None = None
-        if adapter_type == "lora":
-            if isinstance(config.get("lycoris"), dict):
-                adapter_backend = "lycoris"
-            else:
-                adapter_backend = str(
-                    adapter_block.get("backend")
-                    or adapter_block.get("implementation")
-                    or config.get("lora_backend")
-                    or config.get("adapter_backend")
-                    or "native"
-                ).strip().lower()
-        adapter = create_adapter(
-            adapter_type=adapter_type,
-            rank=rank,
-            alpha=alpha,
-            model_type=model_type_enum.value,
-            dropout=float(adapter_block.get("dropout", 0.0)),
-            backend=adapter_backend,
-            **_build_adapter_kwargs(adapter_block),
-        )
-        adapter.inject(train_module)
 
     offload_active = bool(
         memory_strategy is not None
@@ -1449,6 +1457,7 @@ def run_native_diffusion_training(
                 model_type=model_type_enum,
                 batch=batch,
                 train_device=train_device,
+                prompt_device=runtime_prompt_device,
                 train_dtype=train_dtype,
                 requires_grad=text_encoder_training_active,
             )
@@ -1483,20 +1492,6 @@ def run_native_diffusion_training(
         if step == 1 or step % 10 == 0 or step == max_steps:
             print(f"[native/diffusion] step {step}/{max_steps} loss={float(loss.detach().cpu()):.6f}")
 
-        if distributed_context.is_main_process:
-            _maybe_sample(
-                config,
-                model_type=model_type_enum,
-                model_path=resolved_model_path,
-                output_dir=output_dir,
-                step=step,
-                train_device=train_device,
-                train_dtype=train_dtype,
-                live_adapter=adapter,
-                default_resolution=resolution,
-                default_video_frames=ltx_video_frame_count if allow_video_dataset else None,
-            )
-
         if distributed_context.is_main_process and save_every > 0 and step % save_every == 0:
             saved_path: Path | None = None
             if adapter is not None:
@@ -1518,6 +1513,23 @@ def run_native_diffusion_training(
                     lr_scheduler=lr_scheduler,
                     ema_model=ema_model,
                 )
+
+        if distributed_context.is_main_process:
+            try:
+                _maybe_sample(
+                    config,
+                    model_type=model_type_enum,
+                    model_path=resolved_model_path,
+                    output_dir=output_dir,
+                    step=step,
+                    train_device=train_device,
+                    train_dtype=train_dtype,
+                    live_adapter=adapter,
+                    default_resolution=resolution,
+                    default_video_frames=ltx_video_frame_count if allow_video_dataset else None,
+                )
+            except Exception as exc:
+                print(f"[native/diffusion] warning: sampling failed at step {step}: {exc}")
 
     _distributed_barrier(distributed_context)
 

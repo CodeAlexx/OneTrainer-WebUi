@@ -270,8 +270,11 @@ def _cache_training_data(
         model_impl.move_text_encoders_to_device(pipeline, train_device)
 
     cached: list[_CachedExample] = []
+    total_pairs = len(pairs)
+    if total_pairs > 0:
+        print(f"[native/diffusion] cache progress 0/{total_pairs}")
     with torch.no_grad():
-        for media_path, caption in pairs:
+        for index, (media_path, caption) in enumerate(pairs, start=1):
             if _is_qwen_edit_type(model_type) and _is_condlabel_image(media_path):
                 continue
 
@@ -342,6 +345,8 @@ def _cache_training_data(
                     width=resolution,
                 )
             )
+            if index == 1 or index % 10 == 0 or index == total_pairs:
+                print(f"[native/diffusion] cache progress {index}/{total_pairs}")
 
     pipeline.vae.to("cpu")
     if cache_text_embeddings and not keep_text_encoder_on_device:
@@ -497,6 +502,7 @@ def _materialize_batch_prompt_features(
     model_type: ModelType,
     batch: _Batch,
     train_device: torch.device,
+    prompt_device: torch.device | None = None,
     train_dtype: torch.dtype,
     requires_grad: bool,
 ) -> _Batch:
@@ -510,6 +516,7 @@ def _materialize_batch_prompt_features(
     mask_list: list[torch.Tensor] = []
 
     context = nullcontext() if requires_grad else torch.no_grad()
+    resolved_prompt_device = prompt_device or train_device
     with context:
         for idx, caption in enumerate(batch.captions):
             conditioning_image = None
@@ -520,14 +527,14 @@ def _materialize_batch_prompt_features(
                 prompt_embeds, pooled_prompt_embeds, prompt_mask = model_impl.encode_prompt_features(
                     pipeline,
                     caption,
-                    train_device,
+                    resolved_prompt_device,
                     conditioning_image=conditioning_image,
                 )
             else:
                 prompt_embeds, pooled_prompt_embeds, prompt_mask = model_impl.encode_prompt_features(
                     pipeline,
                     caption,
-                    train_device,
+                    resolved_prompt_device,
                 )
 
             prompt_embeds_list.append(prompt_embeds.squeeze(0))

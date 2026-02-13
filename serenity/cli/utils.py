@@ -135,6 +135,39 @@ def resolve_hf_local_path(model_path: str) -> str:
             "Expected a local path or a cached HF repo id."
         )
 
+    def _ensure_complete_zimage_snapshot(snapshot_path: Path, revision: str | None = None) -> None:
+        # Some local Z-Image caches were created without metadata files required
+        # by diffusers pipeline loading (model_index/scheduler config).
+        if model_path.strip().lower() != "tongyi-mai/z-image":
+            return
+
+        required_files = (
+            "model_index.json",
+            "scheduler/scheduler_config.json",
+        )
+        missing = [rel for rel in required_files if not (snapshot_path / rel).exists()]
+        if not missing:
+            return
+
+        try:
+            from huggingface_hub import hf_hub_download
+        except Exception:
+            return
+
+        rev = revision or snapshot_path.name
+        for rel in missing:
+            try:
+                hf_hub_download(
+                    repo_id=model_path,
+                    filename=rel,
+                    revision=rev,
+                    local_files_only=False,
+                )
+            except Exception:
+                # Non-fatal: caller can still use component fallback if metadata
+                # fetch is unavailable (offline/no network/etc.).
+                continue
+
     org, name = model_path.split("/", 1)
     cache_root = Path.home() / ".cache" / "huggingface" / "hub"
     repo_dir = cache_root / f"models--{org}--{name}"
@@ -146,11 +179,13 @@ def resolve_hf_local_path(model_path: str) -> str:
         revision = refs_main.read_text().strip()
         snapshot = repo_dir / "snapshots" / revision
         if snapshot.exists():
+            _ensure_complete_zimage_snapshot(snapshot, revision=revision)
             return str(snapshot)
 
     snapshots_dir = repo_dir / "snapshots"
     snapshots = sorted(snapshots_dir.glob("*")) if snapshots_dir.exists() else []
     if snapshots:
+        _ensure_complete_zimage_snapshot(snapshots[-1], revision=snapshots[-1].name)
         return str(snapshots[-1])
 
     raise FileNotFoundError(f"No HF snapshots found in cache for {model_path}")

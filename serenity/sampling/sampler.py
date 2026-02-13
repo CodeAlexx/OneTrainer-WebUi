@@ -187,6 +187,56 @@ def _load_pipeline_class(class_name: str):
     return getattr(diffusers, class_name)
 
 
+def _load_zimage_pipeline_without_model_index(
+    *,
+    model_source: str,
+    dtype: torch.dtype,
+):
+    """Build a ZImagePipeline from component subfolders when model_index.json is absent."""
+    from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, ZImagePipeline
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from serenity.models.zimage import _load_transformer, _validate_zimage_model_path
+
+    model_root = _validate_zimage_model_path(model_source)
+    scheduler_dir = model_root / "scheduler"
+    if scheduler_dir.exists():
+        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            str(model_root),
+            subfolder="scheduler",
+            local_files_only=True,
+        )
+    else:
+        scheduler = FlowMatchEulerDiscreteScheduler()
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(model_root),
+        subfolder="tokenizer",
+        local_files_only=True,
+        use_fast=False,
+    )
+    text_encoder = AutoModelForCausalLM.from_pretrained(
+        str(model_root),
+        subfolder="text_encoder",
+        torch_dtype=dtype,
+        local_files_only=True,
+    )
+    vae = AutoencoderKL.from_pretrained(
+        str(model_root),
+        subfolder="vae",
+        torch_dtype=dtype,
+        local_files_only=True,
+    )
+    transformer = _load_transformer(model_root, dtype)
+    return ZImagePipeline(
+        scheduler=scheduler,
+        tokenizer=tokenizer,
+        text_encoder=text_encoder,
+        vae=vae,
+        transformer=transformer,
+    )
+
+
 def _as_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
@@ -557,6 +607,28 @@ class DiffusersSampler(BaseSampler):
         module_name = getattr(self.model.__class__, "__module__", "")
         return module_name.startswith("diffusers") and hasattr(self.model, "to") and callable(self.model)
 
+    def _move_pipeline_to_device(self, pipeline: Any, device: torch.device) -> None:
+        if device.type == "cuda" and self.use_cpu_offload_on_cuda:
+            if self.use_sequential_cpu_offload_on_cuda and hasattr(pipeline, "enable_sequential_cpu_offload"):
+                pipeline.enable_sequential_cpu_offload(device.index or 0)
+            elif hasattr(pipeline, "enable_model_cpu_offload"):
+                pipeline.enable_model_cpu_offload(device.index or 0)
+            else:
+                pipeline.to(device)
+            if hasattr(pipeline, "enable_attention_slicing"):
+                pipeline.enable_attention_slicing("max")
+            vae = getattr(pipeline, "vae", None)
+            if vae is not None and hasattr(vae, "enable_slicing"):
+                vae.enable_slicing()
+            elif hasattr(pipeline, "enable_vae_slicing"):
+                pipeline.enable_vae_slicing()
+            if vae is not None and hasattr(vae, "enable_tiling"):
+                vae.enable_tiling()
+            elif hasattr(pipeline, "enable_vae_tiling"):
+                pipeline.enable_vae_tiling()
+        else:
+            pipeline.to(device)
+
     def _load_pipeline(
         self,
         *,
@@ -581,35 +653,22 @@ class DiffusersSampler(BaseSampler):
                     local_files_only=True,
                     **self.extra_pretrained_kwargs,
                 )
-                if (
-                    device.type == "cuda"
-                    and self.use_cpu_offload_on_cuda
-                ):
-                    if (
-                        self.use_sequential_cpu_offload_on_cuda
-                        and hasattr(pipeline, "enable_sequential_cpu_offload")
-                    ):
-                        pipeline.enable_sequential_cpu_offload(device.index or 0)
-                    elif hasattr(pipeline, "enable_model_cpu_offload"):
-                        pipeline.enable_model_cpu_offload(device.index or 0)
-                    else:
-                        pipeline.to(device)
-                    if hasattr(pipeline, "enable_attention_slicing"):
-                        pipeline.enable_attention_slicing("max")
-                    vae = getattr(pipeline, "vae", None)
-                    if vae is not None and hasattr(vae, "enable_slicing"):
-                        vae.enable_slicing()
-                    elif hasattr(pipeline, "enable_vae_slicing"):
-                        pipeline.enable_vae_slicing()
-                    if vae is not None and hasattr(vae, "enable_tiling"):
-                        vae.enable_tiling()
-                    elif hasattr(pipeline, "enable_vae_tiling"):
-                        pipeline.enable_vae_tiling()
-                else:
-                    pipeline.to(device)
+                self._move_pipeline_to_device(pipeline, device)
                 return pipeline
             except Exception as exc:
-                errors.append(f"{class_name}: load failed ({exc})")
+                if class_name == "ZImagePipeline":
+                    try:
+                        pipeline = _load_zimage_pipeline_without_model_index(
+                            model_source=model_source,
+                            dtype=dtype,
+                        )
+                        self._move_pipeline_to_device(pipeline, device)
+                        print("[sampler] using ZImage component fallback loader (no model_index.json)")
+                        return pipeline
+                    except Exception as fallback_exc:
+                        errors.append(f"{class_name}: load failed ({exc}); fallback failed ({fallback_exc})")
+                else:
+                    errors.append(f"{class_name}: load failed ({exc})")
 
         detail = " | ".join(errors) if errors else "No candidate pipelines configured."
         raise RuntimeError(f"Could not load a pipeline for {self.model_type}: {detail}")

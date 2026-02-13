@@ -254,17 +254,11 @@ class ZImageModel(BaseModelImpl):
 
     def cache_prompt_device(self, pipeline: Any, train_device: torch.device) -> torch.device:
         del pipeline
-        if train_device.type == "cuda":
-            # Keep Qwen text encoding on CPU during cache generation to preserve VRAM for transformer training.
-            return torch.device("cpu")
         return train_device
 
     def move_text_encoders_to_device(self, pipeline: Any, device: torch.device) -> None:
         encoder = getattr(pipeline, "text_encoder", None)
         if encoder is None:
-            return
-        if device.type == "cuda":
-            # Z-Image text encoder is large; prefer CPU caching for stable 24GB operation.
             return
         encoder.to(device)
 
