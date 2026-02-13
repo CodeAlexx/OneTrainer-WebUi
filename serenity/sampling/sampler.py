@@ -193,10 +193,10 @@ def _load_zimage_pipeline_without_model_index(
     dtype: torch.dtype,
 ):
     """Build a ZImagePipeline from component subfolders when model_index.json is absent."""
-    from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, ZImagePipeline
+    from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, ZImagePipeline, ZImageTransformer2DModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from serenity.models.zimage import _load_transformer, _validate_zimage_model_path
+    from serenity.models.zimage import _component_has_weights, _validate_zimage_model_path
 
     model_root = _validate_zimage_model_path(model_source)
     scheduler_dir = model_root / "scheduler"
@@ -227,7 +227,18 @@ def _load_zimage_pipeline_without_model_index(
         torch_dtype=dtype,
         local_files_only=True,
     )
-    transformer = _load_transformer(model_root, dtype)
+    transformer_dir = model_root / "transformer"
+    if not _component_has_weights(transformer_dir):
+        raise FileNotFoundError(f"No transformer weights found under {transformer_dir}")
+    # Prefer direct from_pretrained for sampling. The training-oriented loader uses
+    # an accelerate/meta init path that can leave this fallback pipeline effectively
+    # CPU-dispatched and extremely slow for denoising.
+    transformer = ZImageTransformer2DModel.from_pretrained(
+        str(model_root),
+        subfolder="transformer",
+        torch_dtype=dtype,
+        local_files_only=True,
+    )
     return ZImagePipeline(
         scheduler=scheduler,
         tokenizer=tokenizer,
@@ -447,6 +458,13 @@ def _load_adapter_native(
     if transformer is None:
         return False
 
+    target_device = None
+    target_dtype = None
+    with suppress(Exception):
+        ref_param = next(transformer.parameters())
+        target_device = ref_param.device
+        target_dtype = ref_param.dtype
+
     multiplier = float(strength) if strength is not None else 1.0
 
     # Try lycoris.create_lycoris_from_weights — handles LoKr/LoHa/OFT/etc. natively
@@ -457,7 +475,9 @@ def _load_adapter_native(
             multiplier, str(adapter_path), transformer,
         )
         if not network.loras:
-            return False
+            # Not a LyCORIS-compatible state dict. Fall through to Serenity
+            # native adapter loading instead of silently returning.
+            raise RuntimeError("LyCORIS loader found 0 modules")
 
         network.weights_sd = weights_sd
         network.apply_to()
@@ -491,6 +511,15 @@ def _load_adapter_native(
 
     adapter.inject(transformer)
     adapter.load(str(adapter_path))
+    # Ensure all injected adapter tensors follow the transformer's runtime
+    # placement. Without this, mixed CPU/CUDA adapter tensors can appear on
+    # Z-Image and crash during sampling.
+    if target_device is not None:
+        with suppress(Exception):
+            if isinstance(target_dtype, torch.dtype) and target_dtype.is_floating_point:
+                transformer.to(device=target_device, dtype=target_dtype)
+            else:
+                transformer.to(device=target_device)
     adapter.merge()
 
     if strength is not None and strength != 1.0:
@@ -685,6 +714,24 @@ class DiffusersSampler(BaseSampler):
         if self._assistant_signature == signature:
             return pipeline
 
+        prefer_native_first = self.model_type in {ModelType.ZIMAGE, ModelType.Z_IMAGE}
+        native_exc = None
+
+        if prefer_native_first:
+            try:
+                loaded_native = _load_adapter_native(
+                    pipeline=pipeline,
+                    adapter_path=path,
+                    strength=strength,
+                    model_type=str(self.model_type.value) if self.model_type else "unknown",
+                )
+                if loaded_native:
+                    self._assistant_signature = signature
+                    print(f"[sampler] loaded adapter (native) from {path}")
+                    return pipeline
+            except Exception as exc:
+                native_exc = exc
+
         # Pick diffusers loader based on target
         if self._lora_load_target == "transformer":
             load_fn = _load_assistant_lora_into_transformer
@@ -708,23 +755,28 @@ class DiffusersSampler(BaseSampler):
             self._assistant_signature = signature
             print(f"[sampler] loaded assistant LoRA from {path}")
         else:
-            # Diffusers skipped or failed — try native adapter system (handles LyCORIS etc.)
-            try:
-                loaded = _load_adapter_native(
-                    pipeline=pipeline,
-                    adapter_path=path,
-                    strength=strength,
-                    model_type=str(self.model_type.value) if self.model_type else "unknown",
-                )
-                if loaded:
-                    self._assistant_signature = signature
-                    print(f"[sampler] loaded adapter (native) from {path}")
-                else:
+            # Diffusers skipped/failed — try native adapter system unless already attempted first.
+            if not prefer_native_first:
+                try:
+                    loaded = _load_adapter_native(
+                        pipeline=pipeline,
+                        adapter_path=path,
+                        strength=strength,
+                        model_type=str(self.model_type.value) if self.model_type else "unknown",
+                    )
+                    if loaded:
+                        self._assistant_signature = signature
+                        print(f"[sampler] loaded adapter (native) from {path}")
+                    else:
+                        reason = f"diffusers={diffusers_exc}" if diffusers_exc else "diffusers=skipped(non-lora)"
+                        print(f"[sampler] warning: failed to load adapter {path}: {reason}, native=unsupported")
+                except Exception as exc2:
                     reason = f"diffusers={diffusers_exc}" if diffusers_exc else "diffusers=skipped(non-lora)"
-                    print(f"[sampler] warning: failed to load adapter {path}: {reason}, native=unsupported")
-            except Exception as exc2:
+                    print(f"[sampler] warning: failed to load adapter {path}: {reason}, native={exc2}")
+            else:
+                native_reason = f", native_first={native_exc}" if native_exc is not None else ""
                 reason = f"diffusers={diffusers_exc}" if diffusers_exc else "diffusers=skipped(non-lora)"
-                print(f"[sampler] warning: failed to load adapter {path}: {reason}, native={exc2}")
+                print(f"[sampler] warning: failed to load adapter {path}: {reason}{native_reason}")
         return pipeline
 
     def _ensure_pipeline(

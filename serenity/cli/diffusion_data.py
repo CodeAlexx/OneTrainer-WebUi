@@ -272,7 +272,8 @@ def _cache_training_data(
     cached: list[_CachedExample] = []
     total_pairs = len(pairs)
     if total_pairs > 0:
-        print(f"[native/diffusion] cache progress 0/{total_pairs}")
+        print(f"[native/diffusion] cache progress 0/{total_pairs} (0.0%)")
+    progress_interval = max(1, total_pairs // 20) if total_pairs > 0 else 1
     with torch.no_grad():
         for index, (media_path, caption) in enumerate(pairs, start=1):
             if _is_qwen_edit_type(model_type) and _is_condlabel_image(media_path):
@@ -345,8 +346,9 @@ def _cache_training_data(
                     width=resolution,
                 )
             )
-            if index == 1 or index % 10 == 0 or index == total_pairs:
-                print(f"[native/diffusion] cache progress {index}/{total_pairs}")
+            if index == 1 or index % progress_interval == 0 or index == total_pairs:
+                percent = (float(index) / float(total_pairs) * 100.0) if total_pairs > 0 else 100.0
+                print(f"[native/diffusion] cache progress {index}/{total_pairs} ({percent:.1f}%)")
 
     pipeline.vae.to("cpu")
     if cache_text_embeddings and not keep_text_encoder_on_device:

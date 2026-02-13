@@ -132,6 +132,24 @@ def labeled_separator(label: str, parent: int | str = 0) -> None:
 # Labeled form widgets
 # ---------------------------------------------------------------------------
 
+def _safe_float(value: Any, fallback: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return fallback
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _safe_int(value: Any, fallback: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return fallback
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def labeled_input(
     label: str,
     *,
@@ -182,7 +200,7 @@ def labeled_float(
         if tip:
             tooltip(t, tip)
         kwargs: dict[str, Any] = {
-            "default_value": default_value,
+            "default_value": _safe_float(default_value, 0.0),
             "width": width if width != 0 else INPUT_WIDTH,
             "format": format_str,
         }
@@ -219,7 +237,7 @@ def labeled_int(
         if tip:
             tooltip(t, tip)
         kwargs: dict[str, Any] = {
-            "default_value": default_value,
+            "default_value": _safe_int(default_value, 0),
             "width": width if width != 0 else INPUT_WIDTH,
         }
         if tag:

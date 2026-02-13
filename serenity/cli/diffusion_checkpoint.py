@@ -19,6 +19,19 @@ __all__ = [
 ]
 
 
+def _iter_tensors(value: Any):
+    if torch.is_tensor(value):
+        yield value
+        return
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from _iter_tensors(nested)
+        return
+    if isinstance(value, list | tuple | set):
+        for nested in value:
+            yield from _iter_tensors(nested)
+
+
 def _save_module_state(
     module: torch.nn.Module,
     output_path: Path,
@@ -102,6 +115,8 @@ def _maybe_restore_training_state(
     optimizer: torch.optim.Optimizer,
     lr_scheduler: Any | None,
     ema_model: EMAModel | None,
+    optimizer_state_device: torch.device | None = None,
+    restore_optimizer_state: bool = True,
 ) -> int:
     if resume_state_path is None:
         return 1
@@ -128,7 +143,63 @@ def _maybe_restore_training_state(
 
     optimizer_state = state.get("optimizer_state")
     if isinstance(optimizer_state, dict):
-        optimizer.load_state_dict(optimizer_state)
+        if not restore_optimizer_state:
+            optimizer.state.clear()
+            print("[native/diffusion] warning: skipping optimizer state restore for this resume")
+        else:
+            skip_optimizer_restore = False
+            if optimizer_state_device is not None and optimizer_state_device.type == "cuda":
+                with suppress(StopIteration):
+                    first_param = next(train_module.parameters())
+                    if torch.is_tensor(first_param) and first_param.device.type == "cpu":
+                        skip_optimizer_restore = True
+            if skip_optimizer_restore:
+                optimizer.state.clear()
+                print(
+                    "[native/diffusion] warning: skipping optimizer state restore for offloaded CPU-parameter training; "
+                    "optimizer buffers will reinitialize"
+                )
+            else:
+                try:
+                    optimizer.load_state_dict(optimizer_state)
+                except Exception as exc:
+                    optimizer.state.clear()
+                    print(f"[native/diffusion] warning: failed to restore optimizer state ({exc}); starting optimizer fresh")
+                else:
+                    # Torch restores optimizer buffers on CPU when loading from map_location="cpu".
+                    # Ensure state tensors are on the expected training device before optimizer.step().
+                    fallback_device = optimizer_state_device
+                    for param, param_state in optimizer.state.items():
+                        if not isinstance(param_state, dict):
+                            continue
+                        target_device = fallback_device
+                        if target_device is None and torch.is_tensor(param):
+                            target_device = param.device
+                        if target_device is None:
+                            continue
+                        for key, value in list(param_state.items()):
+                            if not torch.is_tensor(value):
+                                continue
+                            param_state[key] = value.to(device=target_device)
+
+                    # Some historical states can still retain mixed-device internals after load.
+                    # If so, drop optimizer buffers and continue from model weights only.
+                    if optimizer_state_device is not None:
+                        expected = optimizer_state_device.type
+                        mixed = False
+                        for param_state in optimizer.state.values():
+                            for tensor in _iter_tensors(param_state):
+                                if tensor.device.type != expected:
+                                    mixed = True
+                                    break
+                            if mixed:
+                                break
+                        if mixed:
+                            optimizer.state.clear()
+                            print(
+                                "[native/diffusion] warning: optimizer state remained mixed-device after resume; "
+                                "resetting optimizer buffers"
+                            )
 
     scheduler_state = state.get("scheduler_state")
     if lr_scheduler is not None and isinstance(scheduler_state, dict):

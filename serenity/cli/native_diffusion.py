@@ -15,6 +15,7 @@ from __future__ import annotations
 import inspect
 import os
 import random
+import time
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -264,6 +265,15 @@ def _finalize_distributed_context(context: _DistributedContext) -> None:
     if context.initialized_here and torch.distributed.is_available() and torch.distributed.is_initialized():
         with suppress(Exception):
             torch.distributed.destroy_process_group()
+
+
+def _format_eta(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
 def _maybe_wrap_distributed_module(
@@ -690,6 +700,14 @@ def _maybe_sample(
     for prompt_index, prompt in enumerate(prompts_to_run):
         seed = seeds[prompt_index % len(seeds)]
         out_path = samples_dir / f"step_{step:06d}_p{prompt_index:02d}_s{seed}{output_ext}"
+        sample_steps_value = int(sample_steps) if sample_steps is not None else int(sampler.default_steps)
+        print(
+            "[native/diffusion] sampling start "
+            f"step={step} prompt={prompt_index + 1}/{len(prompts_to_run)} "
+            f"device={sample_device.type} size={sample_width}x{sample_height} "
+            f"steps={sample_steps_value} output={out_path}",
+            flush=True,
+        )
         call_kwargs: dict[str, Any] = {
             "prompt": prompt,
             "negative_prompt": negative_prompt,
@@ -712,6 +730,11 @@ def _maybe_sample(
 
         sampler.sample(
             **call_kwargs,
+        )
+        print(
+            "[native/diffusion] sampling complete "
+            f"step={step} prompt={prompt_index + 1}/{len(prompts_to_run)} output={out_path}",
+            flush=True,
         )
 
 
@@ -822,6 +845,11 @@ def _call_with_filtered_kwargs(fn, *args: Any, **kwargs: Any):
         return fn(*args, **kwargs)
     filtered_kwargs = {key: value for key, value in kwargs.items() if key in params}
     return fn(*args, **filtered_kwargs)
+
+
+def _is_cuda_oom_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "cuda out of memory" in text or "cuda error: out of memory" in text
 
 
 def _is_lora_adapter_state_dict(state_dict: dict[str, Any]) -> bool:
@@ -962,6 +990,8 @@ def _run_sd15_vae_finetune(
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         ema_model=ema_model,
+        optimizer_state_device=train_device,
+        restore_optimizer_state=True,
     )
 
     max_grad_norm = float(config.get("max_grad_norm", 1.0))
@@ -1436,6 +1466,8 @@ def run_native_diffusion_training(
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         ema_model=ema_model,
+        optimizer_state_device=train_device,
+        restore_optimizer_state=not offload_active,
     )
     if start_step > max_steps:
         print(
@@ -1446,6 +1478,16 @@ def run_native_diffusion_training(
 
     optimizer.zero_grad(set_to_none=True)
     autocast_enabled = train_device.type == "cuda" and train_dtype in {torch.bfloat16, torch.float16}
+    log_every_steps = max(1, int(config.get("log_every_steps", 5) or 5))
+    last_log_time = time.perf_counter()
+    last_log_step = max(start_step - 1, 0)
+    sample_block = config.get("sample", {}) if isinstance(config.get("sample"), dict) else {}
+    sample_enabled = _as_bool(sample_block.get("enabled"), False)
+    sample_interval = int(sample_block.get("interval", 0) or 0)
+    print(
+        f"[native/diffusion] training loop start step={start_step}/{max_steps} "
+        f"log_every={log_every_steps} save_every={save_every}"
+    )
 
     for step in range(start_step, max_steps + 1):
         batch = _pick_batch(cached, batch_size, train_device, train_dtype, family)
@@ -1489,8 +1531,26 @@ def run_native_diffusion_training(
                 ema_model.update()
             optimizer.zero_grad(set_to_none=True)
 
-        if step == 1 or step % 10 == 0 or step == max_steps:
-            print(f"[native/diffusion] step {step}/{max_steps} loss={float(loss.detach().cpu()):.6f}")
+        should_log = step == start_step or step % log_every_steps == 0 or step == max_steps
+        if should_log:
+            now = time.perf_counter()
+            steps_since_log = max(step - last_log_step, 1)
+            elapsed_since_log = max(now - last_log_time, 1e-6)
+            steps_per_second = steps_since_log / elapsed_since_log
+            steps_remaining = max(max_steps - step, 0)
+            eta = _format_eta(float(steps_remaining) / max(steps_per_second, 1e-6))
+            current_lr = (
+                float(optimizer.param_groups[0].get("lr", learning_rate))
+                if getattr(optimizer, "param_groups", None)
+                else float(learning_rate)
+            )
+            print(
+                f"[native/diffusion] step {step}/{max_steps} "
+                f"loss={float(loss.detach().cpu()):.6f} "
+                f"lr={current_lr:.2e} speed={steps_per_second:.2f} step/s eta={eta}"
+            )
+            last_log_time = now
+            last_log_step = step
 
         if distributed_context.is_main_process and save_every > 0 and step % save_every == 0:
             saved_path: Path | None = None
@@ -1514,8 +1574,41 @@ def run_native_diffusion_training(
                     ema_model=ema_model,
                 )
 
+        should_sample_now = bool(sample_enabled and sample_interval > 0 and step % sample_interval == 0)
         if distributed_context.is_main_process:
             try:
+                moved_for_sample = False
+                conductor = memory_strategy.conductor if memory_strategy is not None else None
+                if should_sample_now and train_device.type == "cuda":
+                    # Free as much CUDA memory as possible before building a sample pipeline.
+                    with suppress(Exception):
+                        del batch
+                    with suppress(Exception):
+                        del loss
+                    with suppress(Exception):
+                        del scaled_loss
+
+                    if offload_active and conductor is not None:
+                        cpu_device = torch.device(str(config.get("temp_device", "cpu")))
+                        with suppress(Exception):
+                            conductor.to(cpu_device)
+                            _move_non_offloaded_tensors_to_device(
+                                train_module,
+                                conductor=conductor,
+                                train_device=cpu_device,
+                            )
+                            moved_for_sample = True
+                    elif not dispatched_train_module:
+                        with suppress(Exception):
+                            train_module.to("cpu")
+                            moved_for_sample = True
+
+                    with suppress(Exception):
+                        torch.cuda.synchronize()
+                    with suppress(Exception):
+                        torch.cuda.empty_cache()
+                        torch.cuda.ipc_collect()
+
                 _maybe_sample(
                     config,
                     model_type=model_type_enum,
@@ -1528,8 +1621,88 @@ def run_native_diffusion_training(
                     default_resolution=resolution,
                     default_video_frames=ltx_video_frame_count if allow_video_dataset else None,
                 )
+                if should_sample_now and moved_for_sample:
+                    if offload_active and conductor is not None:
+                        cpu_device = torch.device(str(config.get("temp_device", "cpu")))
+                        with suppress(Exception):
+                            conductor.to(cpu_device)
+                            _move_non_offloaded_tensors_to_device(
+                                train_module,
+                                conductor=conductor,
+                                train_device=train_device,
+                            )
+                    elif not dispatched_train_module:
+                        with suppress(Exception):
+                            train_module.to(train_device)
+                    with suppress(Exception):
+                        torch.cuda.empty_cache()
             except Exception as exc:
-                print(f"[native/diffusion] warning: sampling failed at step {step}: {exc}")
+                retried = False
+                retry_error: Exception | None = None
+                if train_device.type == "cuda" and _is_cuda_oom_error(exc):
+                    retried = True
+                    print(
+                        f"[native/diffusion] warning: sampling OOM at step {step}; "
+                        "retrying after releasing trainer CUDA memory"
+                    )
+                    moved_to_cpu = False
+                    conductor = memory_strategy.conductor if memory_strategy is not None else None
+                    try:
+                        if offload_active and conductor is not None:
+                            cpu_device = torch.device(str(config.get("temp_device", "cpu")))
+                            with suppress(Exception):
+                                conductor.to(cpu_device)
+                                _move_non_offloaded_tensors_to_device(
+                                    train_module,
+                                    conductor=conductor,
+                                    train_device=cpu_device,
+                                )
+                                moved_to_cpu = True
+                        elif not dispatched_train_module:
+                            with suppress(Exception):
+                                train_module.to("cpu")
+                                moved_to_cpu = True
+
+                        with suppress(Exception):
+                            torch.cuda.empty_cache()
+                            torch.cuda.ipc_collect()
+
+                        _maybe_sample(
+                            config,
+                            model_type=model_type_enum,
+                            model_path=resolved_model_path,
+                            output_dir=output_dir,
+                            step=step,
+                            train_device=train_device,
+                            train_dtype=train_dtype,
+                            live_adapter=adapter,
+                            default_resolution=resolution,
+                            default_video_frames=ltx_video_frame_count if allow_video_dataset else None,
+                        )
+                        print(f"[native/diffusion] sampling retry succeeded at step {step}")
+                    except Exception as retry_exc:
+                        retry_error = retry_exc
+                    finally:
+                        if moved_to_cpu:
+                            if offload_active and conductor is not None:
+                                cpu_device = torch.device(str(config.get("temp_device", "cpu")))
+                                with suppress(Exception):
+                                    conductor.to(cpu_device)
+                                    _move_non_offloaded_tensors_to_device(
+                                        train_module,
+                                        conductor=conductor,
+                                        train_device=train_device,
+                                    )
+                            elif not dispatched_train_module:
+                                with suppress(Exception):
+                                    train_module.to(train_device)
+                        with suppress(Exception):
+                            torch.cuda.empty_cache()
+
+                if retry_error is not None:
+                    print(f"[native/diffusion] warning: sampling retry failed at step {step}: {retry_error}")
+                elif not retried:
+                    print(f"[native/diffusion] warning: sampling failed at step {step}: {exc}")
 
     _distributed_barrier(distributed_context)
 

@@ -25,6 +25,7 @@ TAG_EPOCH_PROGRESS = "epoch_progress"
 TAG_TRAIN_BUTTON = "train_button"
 TAG_MODEL_TYPE = "top_model_type"
 TAG_TRAINING_METHOD = "top_training_method"
+TAG_CONFIG_PRESET = "config_preset"
 
 # Conditional tabs
 TAG_LORA_TAB = "lora_tab"
@@ -38,6 +39,7 @@ class SerenityApp:
         self.ui_state = UIState()
         self.training_thread: threading.Thread | None = None
         self._is_training = False
+        self._selected_preset_name = "(new)"
 
         # Lazy-imported tab builders
         self._tab_builders: dict[str, Any] = {}
@@ -68,11 +70,19 @@ class SerenityApp:
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        if dpg.does_item_exist(TAG_PRIMARY_WINDOW):
+            with dpg.group(parent=TAG_PRIMARY_WINDOW):
+                self._build_window_contents()
+            return
+
         with dpg.window(tag=TAG_PRIMARY_WINDOW):
-            self._build_top_bar()
-            dpg.add_spacer(height=6)
-            self._build_tab_area()
-            self._build_bottom_bar()
+            self._build_window_contents()
+
+    def _build_window_contents(self) -> None:
+        self._build_top_bar()
+        dpg.add_spacer(height=6)
+        self._build_tab_area()
+        self._build_bottom_bar()
 
     def _build_top_bar(self) -> None:
         """Header with branding, model/method selectors, and train button."""
@@ -135,10 +145,17 @@ class SerenityApp:
 
             # Config preset
             dpg.add_text("Config:", color=(160, 160, 175))
+            preset_items = self._list_presets()
+            selected_preset = (
+                self._selected_preset_name
+                if self._selected_preset_name in preset_items
+                else "(new)"
+            )
+            self._selected_preset_name = selected_preset
             dpg.add_combo(
-                tag="config_preset",
-                items=self._list_presets(),
-                default_value="(new)",
+                tag=TAG_CONFIG_PRESET,
+                items=preset_items,
+                default_value=selected_preset,
                 width=scaled(145),
                 callback=self._on_preset_selected,
             )
@@ -250,25 +267,28 @@ class SerenityApp:
     def _on_training_method_changed(self, sender: Any, app_data: str, user_data: Any = None) -> None:
         method = self._method_map.get(app_data)
         if method:
+            self.ui_state.sync_to_config()
             self.ui_state.config.training_method = method
+            self._refresh_ui_from_config(selected_preset=self._safe_get_preset_name())
 
     def _on_preset_selected(self, sender: Any, app_data: str, user_data: Any = None) -> None:
         if app_data == "(new)":
+            self._selected_preset_name = "(new)"
             self.ui_state.new_config()
+            self._refresh_ui_from_config(selected_preset="(new)")
             return
-        preset_path = Path("training_presets") / f"{app_data}.json"
-        if preset_path.exists():
-            self.ui_state.load_config_file(preset_path)
-            mt = self.ui_state.config.model_type.value
-            if mt in self._model_type_rev:
-                dpg.set_value(TAG_MODEL_TYPE, self._model_type_rev[mt])
-            tm = self.ui_state.config.training_method
-            if tm in self._method_rev:
-                dpg.set_value(TAG_TRAINING_METHOD, self._method_rev[tm])
+
+        self._selected_preset_name = app_data
+        preset_path = self._resolve_preset_path(app_data)
+        if preset_path is None:
+            self._set_status(f"Preset not found: {app_data}")
+            return
+
+        self._load_config_path(preset_path, selected_preset=app_data)
 
     def _save_config(self, sender: Any = None, app_data: Any = None, user_data: Any = None) -> None:
         self.ui_state.sync_to_config()
-        preset_name = dpg.get_value("config_preset")
+        preset_name = dpg.get_value(TAG_CONFIG_PRESET)
         if preset_name == "(new)":
             self._save_config_as()
             return
@@ -291,17 +311,7 @@ class SerenityApp:
         def _do_open(_s: Any, data: dict) -> None:
             path = data.get("file_path_name", "")
             if path:
-                try:
-                    self.ui_state.load_config_file(path)
-                    self._set_status(f"Loaded: {path}")
-                    mt = self.ui_state.config.model_type.value
-                    if mt in self._model_type_rev:
-                        dpg.set_value(TAG_MODEL_TYPE, self._model_type_rev[mt])
-                    tm = self.ui_state.config.training_method
-                    if tm in self._method_rev:
-                        dpg.set_value(TAG_TRAINING_METHOD, self._method_rev[tm])
-                except Exception as exc:
-                    self._set_status(f"Error: {exc}")
+                self._load_config_path(Path(path), selected_preset="(new)")
 
         with dpg.file_dialog(callback=_do_open, width=700, height=400):
             dpg.add_file_extension(".json")
@@ -375,6 +385,40 @@ class SerenityApp:
             dpg.set_value(TAG_STATUS_LABEL, text)
         except SystemError:
             pass
+
+    def _safe_get_preset_name(self) -> str:
+        try:
+            value = dpg.get_value(TAG_CONFIG_PRESET)
+        except SystemError:
+            return self._selected_preset_name
+        return str(value) if value else self._selected_preset_name
+
+    def _resolve_preset_path(self, preset_name: str) -> Path | None:
+        built_in_prefix = "[built-in] "
+        if preset_name.startswith(built_in_prefix):
+            built_in_name = preset_name[len(built_in_prefix):]
+            candidate = Path(__file__).parent.parent / "presets" / f"{built_in_name}.json"
+        else:
+            candidate = Path("training_presets") / f"{preset_name}.json"
+        return candidate if candidate.exists() else None
+
+    def _load_config_path(self, path: str | Path, selected_preset: str = "(new)") -> None:
+        try:
+            self.ui_state.load_config_file(path)
+            self._refresh_ui_from_config(selected_preset=selected_preset)
+            self._set_status(f"Loaded: {path}")
+        except Exception as exc:
+            self._set_status(f"Error: {exc}")
+
+    def _refresh_ui_from_config(self, selected_preset: str = "(new)") -> None:
+        valid_presets = self._list_presets()
+        if selected_preset in valid_presets:
+            self._selected_preset_name = selected_preset
+        else:
+            self._selected_preset_name = "(new)"
+        if dpg.does_item_exist(TAG_PRIMARY_WINDOW):
+            dpg.delete_item(TAG_PRIMARY_WINDOW, children_only=True)
+        self._build_ui()
 
     def _list_presets(self) -> list[str]:
         presets = ["(new)"]
