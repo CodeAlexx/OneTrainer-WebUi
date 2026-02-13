@@ -13,6 +13,7 @@ from serenity.models.qwen import QwenModel, QwenImageEditModel
 from serenity.models.ltx2 import LTX2Model
 from serenity.models.chroma import ChromaModel
 from serenity.models.hunyuan_video import HunyuanVideoModel
+from serenity.models.wan import WanModel
 
 __all__ = [
     "Flux1Model",
@@ -30,4 +31,5 @@ __all__ = [
     "LTX2Model",
     "ChromaModel",
     "HunyuanVideoModel",
+    "WanModel",
 ]

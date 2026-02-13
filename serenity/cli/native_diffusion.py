@@ -8,6 +8,7 @@ Supports native adapter/full training for:
 - Stable Diffusion 1.5
 - Stable Diffusion XL
 - Stable Diffusion 3 / 3.5
+- WAN 2.1 / 2.2 (14B)
 """
 
 from __future__ import annotations
@@ -77,7 +78,8 @@ from serenity.cli.flux2_optimizer import (
     _resolve_optimizer_steps,
 )
 from serenity.core.interfaces import ModelType
-from serenity.memory.strategy import LayerOffloadStrategy, MemoryConfig
+from serenity.memory.stagehand_strategy import StagehandStrategy, StagehandStrategyConfig
+from serenity.memory.strategy import LayerOffloadStrategy, MemoryConfig, MemoryStrategy
 from serenity.models.flux1 import Flux1Model
 from serenity.models.flux2 import Flux2Model
 from serenity.models.flux_schnell import FluxSchnellModel
@@ -86,6 +88,7 @@ from serenity.models.qwen import QwenBaseModel, QwenImageEditModel, QwenModel
 from serenity.models.sd3 import SD3Model, SD35Model
 from serenity.models.sd15 import SD15Model
 from serenity.models.sdxl import SDXLModel
+from serenity.models.wan import WanModel
 from serenity.models.zimage import ZImageModel
 from serenity.sampling.sampler import create_sampler
 from serenity.training.ema import EMAMode, EMAModel
@@ -145,6 +148,21 @@ _LTX2_TYPES = {
     "ltx",
     "ltxvideo",
     "ltx_video",
+}
+
+_WAN_TYPES = {
+    "wan",
+    "wan21",
+    "wan22",
+    "wan_2_1",
+    "wan_2_2",
+    "wan22_14b",
+    "wan22_t2v_high",
+    "wan22_t2v_low",
+    "wan22_i2v_high",
+    "wan22_i2v_low",
+    "wan22_high",
+    "wan22_low",
 }
 
 _FULL_TRAINING_METHODS = {"full", "full_finetune", "full_fine_tune", "fine_tune", "finetune", "fine_tune_vae"}
@@ -317,6 +335,7 @@ def is_native_diffusion_model_type(model_type: str | None) -> bool:
         | _ZIMAGE_TYPES
         | _QWEN_TYPES
         | _LTX2_TYPES
+        | _WAN_TYPES
     )
 
 
@@ -337,6 +356,8 @@ def _resolve_family(model_type: str) -> str:
         return "qwen"
     if model_type in _LTX2_TYPES:
         return "ltx2"
+    if model_type in _WAN_TYPES:
+        return "wan"
     raise ValueError(f"Unsupported native diffusion model type: {model_type}")
 
 
@@ -365,6 +386,8 @@ def _create_native_model(model_type: str):
         return QwenModel()
     if model_type in _LTX2_TYPES:
         return LTX2Model()
+    if model_type in _WAN_TYPES:
+        return WanModel()
     raise ValueError(f"Unsupported native diffusion model type: {model_type}")
 
 
@@ -385,6 +408,8 @@ def _create_native_model_for_family(family: str):
         return QwenModel()
     if family == "ltx2":
         return LTX2Model()
+    if family == "wan":
+        return WanModel()
     raise ValueError(f"Unsupported family: {family}")
 
 
@@ -411,6 +436,8 @@ def _resolve_sampler_model_type(model_type: str) -> ModelType:
         return ModelType.QWEN
     if model_type in _LTX2_TYPES:
         return ModelType.LTX2
+    if model_type in _WAN_TYPES:
+        return ModelType.WAN
     raise ValueError(f"Unsupported sampler model type: {model_type}")
 
 
@@ -508,7 +535,7 @@ def _collect_ltx_component_paths(
 def _resolution_multiple_for_family(family: str) -> int:
     if family in {"sd15", "sdxl"}:
         return 8
-    if family == "sd3":
+    if family in {"sd3", "wan"}:
         return 16
     if family == "ltx2":
         return 32
@@ -574,6 +601,23 @@ def _resolve_ltx_video_frame_count(config: dict[str, Any], data_block: dict[str,
         or 9
     )
     return max(1, int(LTX2Model.adjust_video_frames(requested)))
+
+
+def _resolve_wan_video_frame_count(config: dict[str, Any], data_block: dict[str, Any]) -> int:
+    """Resolve WAN video frame count satisfying (frames - 1) % 4 == 0."""
+    requested = int(
+        data_block.get("frames")
+        or data_block.get("video_frames")
+        or data_block.get("num_frames")
+        or config.get("frames")
+        or config.get("video_frames")
+        or config.get("num_frames")
+        or 17
+    )
+    if (requested - 1) % 4 != 0:
+        adjusted = ((requested - 1) // 4) * 4 + 1
+        return max(1, adjusted)
+    return max(1, requested)
 
 
 def _encode_latents(pipeline: Any, family: str, pixel_values: torch.Tensor) -> torch.Tensor:
@@ -743,12 +787,92 @@ def _get_train_module(pipeline: Any, family: str) -> torch.nn.Module:
     return model_impl.get_train_module(pipeline)
 
 
+def _move_non_block_submodules_to_device(
+    train_module: torch.nn.Module,
+    train_device: torch.device,
+) -> None:
+    """Move non-block submodules to GPU for Stagehand training.
+
+    Stagehand manages the transformer blocks via hooks, so they stay on CPU.
+    Everything else (patch embedding, condition embedder, norms, projections)
+    must live on GPU for the forward pass to work.
+    """
+    block_attrs = {"transformer_blocks", "single_transformer_blocks", "blocks", "layers"}
+    block_module_ids: set[int] = set()
+
+    for attr in block_attrs:
+        block_container = getattr(train_module, attr, None)
+        if block_container is None:
+            continue
+        for block in block_container:
+            block_module_ids.add(id(block))
+            for param in block.parameters(recurse=True):
+                block_module_ids.add(id(param))
+            for buf in block.buffers(recurse=True):
+                block_module_ids.add(id(buf))
+
+    with torch.no_grad():
+        for name, child in train_module.named_children():
+            if name in block_attrs:
+                continue
+            child.to(train_device)
+
+        # Move any top-level parameters/buffers that aren't in blocks.
+        for param in train_module.parameters(recurse=False):
+            if id(param) not in block_module_ids and param.device != train_device:
+                param.data = param.data.to(device=train_device, non_blocking=True)
+        for buf_name, buf in train_module.named_buffers(recurse=False):
+            if id(buf) not in block_module_ids and buf.device != train_device:
+                train_module._buffers[buf_name] = buf.to(device=train_device, non_blocking=True)
+
+
 def _setup_memory_strategy(
     train_module: torch.nn.Module,
     family: str,
     memory_block: dict[str, Any],
     config: dict[str, Any],
-) -> LayerOffloadStrategy | None:
+) -> MemoryStrategy | None:
+    # Check for Stagehand strategy first.
+    strategy_name = str(memory_block.get("strategy", config.get("memory_strategy", ""))).strip().lower()
+    stagehand_enabled = _as_bool(config.get("stagehand_enabled", False), False)
+    stagehand_block = memory_block.get("stagehand", {}) if isinstance(memory_block.get("stagehand"), dict) else {}
+
+    if strategy_name == "stagehand" or stagehand_enabled or stagehand_block:
+        gradient_checkpointing = str(
+            memory_block.get("gradient_checkpointing") or config.get("gradient_checkpointing") or "off"
+        )
+        if gradient_checkpointing.lower() != "off" and hasattr(train_module, "enable_gradient_checkpointing"):
+            with suppress(Exception):
+                train_module.enable_gradient_checkpointing()
+                print("[native/diffusion] enabled gradient checkpointing before Stagehand setup")
+
+        stagehand_config = StagehandStrategyConfig(
+            family=family,
+            block_pattern=stagehand_block.get("block_pattern"),
+            pinned_pool_mb=int(stagehand_block.get("pinned_pool_mb", 8192)),
+            pinned_slab_mb=int(stagehand_block.get("pinned_slab_mb", 512)),
+            vram_high_watermark_mb=int(stagehand_block.get("vram_high_watermark_mb", 20000)),
+            vram_low_watermark_mb=int(stagehand_block.get("vram_low_watermark_mb", 16000)),
+            prefetch_window_blocks=int(stagehand_block.get("prefetch_window_blocks", 2)),
+            max_inflight_transfers=int(stagehand_block.get("max_inflight_transfers", 2)),
+            telemetry_enabled=_as_bool(stagehand_block.get("telemetry_enabled", True), True),
+            telemetry_file=str(stagehand_block.get("telemetry_file", "stagehand_telemetry.jsonl")),
+            gradient_checkpointing=gradient_checkpointing,
+            dtype=str(config.get("train_dtype") or "bfloat16"),
+        )
+
+        strategy = StagehandStrategy(stagehand_config)
+        try:
+            strategy.setup(SimpleNamespace(transformer=train_module))
+            print(
+                f"[native/diffusion] stagehand strategy active "
+                f"(pool={stagehand_config.pinned_pool_mb}MB, "
+                f"vram={stagehand_config.vram_low_watermark_mb}-{stagehand_config.vram_high_watermark_mb}MB)"
+            )
+            return strategy
+        except (ImportError, RuntimeError) as exc:
+            print(f"[native/diffusion] warning: stagehand setup failed, falling back to layer offload ({exc})")
+
     activation_offloading = _as_bool(
         memory_block.get("enable_activation_offloading", config.get("enable_activation_offloading", False))
     )
@@ -1095,6 +1219,16 @@ def run_native_diffusion_training(
     native_model = _create_native_model(normalized_model_type)
     model_type_enum = _resolve_sampler_model_type(normalized_model_type)
 
+    if family == "wan":
+        wan_stage = config.get("wan_stage") or model_block.get("stage")
+        if wan_stage is None:
+            if "high" in normalized_model_type:
+                wan_stage = "high"
+            elif "low" in normalized_model_type:
+                wan_stage = "low"
+        if wan_stage:
+            print(f"[native/diffusion] WAN 2.2 stage: {wan_stage}")
+
     model_path_raw = (
         model_block.get("path")
         or config.get("base_model")
@@ -1167,9 +1301,33 @@ def run_native_diffusion_training(
         )
 
     pairs = _build_training_pairs(config)
-    allow_video_dataset = family == "ltx2"
+    allow_video_dataset = family in {"ltx2", "wan"}
+    video_frame_count = 1
     ltx_video_frame_count = 1
-    if allow_video_dataset:
+    if family == "wan" and allow_video_dataset:
+        wan_video_frame_count = _resolve_wan_video_frame_count(config, data_block)
+        requested_frames = int(
+            data_block.get("frames")
+            or data_block.get("video_frames")
+            or data_block.get("num_frames")
+            or config.get("frames")
+            or config.get("video_frames")
+            or config.get("num_frames")
+            or wan_video_frame_count
+        )
+        if wan_video_frame_count != requested_frames:
+            print(
+                "[native/diffusion] adjusted WAN frame count "
+                f"from {requested_frames} to {wan_video_frame_count} (must satisfy (frames-1) % 4 == 0)"
+            )
+        else:
+            print(f"[native/diffusion] using WAN frame count {wan_video_frame_count}")
+
+        pairs.extend(_build_video_training_pairs(config))
+        deduped: dict[Path, str] = dict(pairs)
+        pairs = list(deduped.items())
+        video_frame_count = wan_video_frame_count
+    elif family == "ltx2" and allow_video_dataset:
         ltx_video_frame_count = _resolve_ltx_video_frame_count(config, data_block)
         requested_frames = int(
             data_block.get("frames")
@@ -1191,6 +1349,7 @@ def run_native_diffusion_training(
         pairs.extend(_build_video_training_pairs(config))
         deduped: dict[Path, str] = dict(pairs)
         pairs = list(deduped.items())
+        video_frame_count = ltx_video_frame_count
 
     if not pairs:
         if allow_video_dataset:
@@ -1218,6 +1377,7 @@ def run_native_diffusion_training(
         resolved_model_path,
         train_dtype,
         train_device=train_device,
+        model_block=model_block,
         quantization_mode=quantization_mode,
         requested_gpu_budget_gib=requested_gpu_budget_gib,
         ltx_component_paths=ltx_component_paths,
@@ -1307,7 +1467,7 @@ def run_native_diffusion_training(
         train_device,
         train_dtype,
         allow_video=allow_video_dataset,
-        video_frame_count=ltx_video_frame_count,
+        video_frame_count=video_frame_count,
         cache_text_embeddings=cache_text_embeddings,
         keep_text_encoder_on_device=text_encoder_training_active,
     )
@@ -1365,8 +1525,18 @@ def run_native_diffusion_training(
                 train_module.enable_gradient_checkpointing()
                 print("[native/diffusion] enabled native gradient checkpointing on dispatched transformer")
 
+    stagehand_active = isinstance(memory_strategy, StagehandStrategy)
     placed_on_device = False
-    if memory_strategy is not None and memory_strategy.conductor is not None:
+    if stagehand_active:
+        # Stagehand manages block placement via hooks.  Move only non-block
+        # submodules (embeddings, norms, projections) to GPU.
+        _move_non_block_submodules_to_device(train_module, train_device)
+        placed_on_device = True
+        print(
+            "[native/diffusion] stagehand active — non-block submodules moved to GPU, "
+            "blocks managed by StagehandRuntime"
+        )
+    elif memory_strategy is not None and memory_strategy.conductor is not None:
         conductor = memory_strategy.conductor
         if conductor.offload_activated():
             temp_device = torch.device(str(config.get("temp_device", "cpu")))
@@ -1387,9 +1557,12 @@ def run_native_diffusion_training(
             train_module.to(train_device)
 
     offload_active = bool(
-        memory_strategy is not None
-        and memory_strategy.conductor is not None
-        and memory_strategy.conductor.offload_activated()
+        stagehand_active
+        or (
+            memory_strategy is not None
+            and memory_strategy.conductor is not None
+            and memory_strategy.conductor.offload_activated()
+        )
     )
     if adapter is not None and hasattr(adapter, "to") and not dispatched_train_module and not offload_active:
         adapter.to(train_device, dtype=train_dtype)
@@ -1619,7 +1792,7 @@ def run_native_diffusion_training(
                     train_dtype=train_dtype,
                     live_adapter=adapter,
                     default_resolution=resolution,
-                    default_video_frames=ltx_video_frame_count if allow_video_dataset else None,
+                    default_video_frames=video_frame_count if allow_video_dataset else None,
                 )
                 if should_sample_now and moved_for_sample:
                     if offload_active and conductor is not None:
@@ -1677,7 +1850,7 @@ def run_native_diffusion_training(
                             train_dtype=train_dtype,
                             live_adapter=adapter,
                             default_resolution=resolution,
-                            default_video_frames=ltx_video_frame_count if allow_video_dataset else None,
+                            default_video_frames=video_frame_count if allow_video_dataset else None,
                         )
                         print(f"[native/diffusion] sampling retry succeeded at step {step}")
                     except Exception as retry_exc:

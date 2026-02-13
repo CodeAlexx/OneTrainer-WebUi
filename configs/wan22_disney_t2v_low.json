@@ -1,0 +1,37 @@
+{
+    "model_type": "wan22_t2v_low",
+    "wan_stage": "low",
+    "model": {
+        "path": "/home/alex/EriDiffusion/Models/diffusion_models/wan2.2_t2v_low_noise_14B_fp16.safetensors",
+        "dtype": "bfloat16",
+        "text_encoder_path": "/home/alex/EriDiffusion/Models/clip/umt5_xxl_fp16.safetensors"
+    },
+    "memory": {
+        "strategy": "stagehand",
+        "gradient_checkpointing": "on",
+        "stagehand": {
+            "pinned_pool_mb": 8192,
+            "pinned_slab_mb": 512,
+            "vram_high_watermark_mb": 20000,
+            "vram_low_watermark_mb": 16000,
+            "prefetch_window_blocks": 2
+        }
+    },
+    "data": {
+        "resolution": 384,
+        "batch_size": 1,
+        "frames": 17,
+        "concepts": [{"path": "/home/alex/disney/videos/"}]
+    },
+    "training_method": "lora",
+    "adapter": {"rank": 16, "alpha": 16},
+    "timestep_shift": 5.0,
+    "max_steps": 500,
+    "learning_rate": 1e-4,
+    "gradient_accumulation_steps": 4,
+    "save_every": 100,
+    "output_dir": "output/wan22_disney_t2v_low",
+    "seed": 42,
+    "train_device": "cuda",
+    "train_dtype": "bfloat16"
+}

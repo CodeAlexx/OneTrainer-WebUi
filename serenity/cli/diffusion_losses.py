@@ -27,7 +27,7 @@ __all__ = [
     "_is_qwen_edit_type",
 ]
 
-_FLOW_FAMILIES = {"sd3", "zimage", "qwen", "flux", "flux2", "ltx2"}
+_FLOW_FAMILIES = {"sd3", "zimage", "qwen", "flux", "flux2", "ltx2", "wan"}
 
 
 def _is_qwen_edit_type(model_type: ModelType) -> bool:
@@ -238,6 +238,18 @@ def _compute_loss(
                 patch_size=patch_size,
                 patch_size_t=patch_size_t,
             )
+            return F.mse_loss(predicted_flow.float(), flow_target.float(), reduction="mean")
+
+        if family == "wan":
+            # WAN uses 5D latents (B, C, T, H, W) but for image training T=1.
+            # The transformer expects (B, C, T, H, W) hidden_states and scalar timestep.
+            forward_kwargs: dict[str, Any] = {
+                "hidden_states": noisy_latents.to(dtype=train_dtype),
+                "encoder_hidden_states": batch.prompt_embeds.to(dtype=train_dtype),
+                "timestep": timesteps.to(dtype=train_dtype) / 1000.0,
+                "return_dict": True,
+            }
+            predicted_flow = train_module(**forward_kwargs).sample
             return F.mse_loss(predicted_flow.float(), flow_target.float(), reduction="mean")
 
         if family == "qwen":

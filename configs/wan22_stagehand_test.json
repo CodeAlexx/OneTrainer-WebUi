@@ -1,0 +1,39 @@
+{
+    "model_type": "wan22",
+    "model": {
+        "path": "/home/alex/SwarmUI/Models/diffusion_models/wan2.2_t2v_low_noise_14B_fp16.safetensors",
+        "dtype": "bfloat16",
+        "vae_path": null,
+        "text_encoder_path": "/home/alex/SwarmUI/Models/clip/umt5_xxl_fp16.safetensors"
+    },
+    "memory": {
+        "strategy": "stagehand",
+        "gradient_checkpointing": "on",
+        "stagehand": {
+            "pinned_pool_mb": 8192,
+            "pinned_slab_mb": 512,
+            "vram_high_watermark_mb": 20000,
+            "vram_low_watermark_mb": 16000,
+            "prefetch_window_blocks": 2,
+            "telemetry_file": "stagehand_telemetry.jsonl"
+        }
+    },
+    "data": {
+        "resolution": 512,
+        "batch_size": 1,
+        "concepts": [
+            {"path": "/home/alex/eri2/"}
+        ]
+    },
+    "training_method": "lora",
+    "adapter": {
+        "rank": 16,
+        "alpha": 16
+    },
+    "max_steps": 10,
+    "learning_rate": 1e-4,
+    "output_dir": "output/wan22_stagehand_test",
+    "seed": 42,
+    "train_device": "cuda",
+    "train_dtype": "bfloat16"
+}

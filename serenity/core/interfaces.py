@@ -50,6 +50,9 @@ class ModelType(str, Enum):
     HI_DREAM_FULL = "hi_dream_full"
     CHROMA_1 = "chroma_1"
 
+    # WAN
+    WAN = "wan"
+
     # Z-Image / video
     ZIMAGE = "zimage"
     Z_IMAGE = "z_image"  # alias for compatibility
@@ -172,6 +175,10 @@ class ModelType(str, Enum):
         """True for Z-Image models."""
         return self in (ModelType.ZIMAGE, ModelType.Z_IMAGE)
 
+    def is_wan(self) -> bool:
+        """True for WAN models."""
+        return self == ModelType.WAN
+
     def is_ltx(self) -> bool:
         """True for LTX video models."""
         return self == ModelType.LTX2
@@ -221,6 +228,7 @@ class ModelType(str, Enum):
             or self.is_sana()
             or self.is_hunyuan_video()
             or self.is_hi_dream()
+            or self.is_wan()
         )
 
 
