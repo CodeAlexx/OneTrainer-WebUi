@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -26,6 +27,7 @@ from serenity.core.enums import (
     TimestepDistribution,
 )
 from serenity.core.concept_config import ConceptConfig
+from serenity.core.sample_config import SampleConfig
 
 
 class TrainingMethod(str, Enum):
@@ -49,10 +51,13 @@ def _coerce_model_type(value: ModelType | str) -> ModelType:
         "z_image": ModelType.ZIMAGE,
         "zimage": ModelType.ZIMAGE,
         "z-image": ModelType.ZIMAGE,
+        "flux_dev_1": ModelType.FLUX_DEV,
         "sd_15": ModelType.SD15,
+        "stable_diffusion_15": ModelType.SD15,
         "sd15_inpaint": ModelType.SD15_INPAINTING,
         "sd_15_inpainting": ModelType.SD15_INPAINTING,
         "sd15_inpainting": ModelType.SD15_INPAINTING,
+        "stable_diffusion_15_inpainting": ModelType.SD15_INPAINTING,
         "sd_20": ModelType.SD20,
         "sd2": ModelType.SD20,
         "sd2_0": ModelType.SD20,
@@ -60,16 +65,20 @@ def _coerce_model_type(value: ModelType | str) -> ModelType:
         "sd20_base": ModelType.SD20_BASE,
         "sd_20_inpainting": ModelType.SD20_INPAINTING,
         "sd20_inpainting": ModelType.SD20_INPAINTING,
+        "stable_diffusion_20_inpainting": ModelType.SD20_INPAINTING,
         "sd_20_depth": ModelType.SD20_DEPTH,
         "sd20_depth": ModelType.SD20_DEPTH,
         "sd_21": ModelType.SD21,
         "sd21": ModelType.SD21,
+        "stable_diffusion_21": ModelType.SD21,
         "sd_21_base": ModelType.SD21_BASE,
         "sd21_base": ModelType.SD21_BASE,
         "sdxl_base": ModelType.SDXL_10_BASE,
+        "stable_diffusion_xl_10_base": ModelType.SDXL_10_BASE,
         "sdxl_10_base_inpainting": ModelType.SDXL_INPAINTING,
         "sdxl_inpainting": ModelType.SDXL_INPAINTING,
         "sdxl_inpaint": ModelType.SDXL_INPAINTING,
+        "stable_diffusion_xl_10_base_inpainting": ModelType.SDXL_INPAINTING,
         "sd3": ModelType.SD3,
         "sd_3": ModelType.SD3,
         "sd35": ModelType.SD35,
@@ -101,6 +110,7 @@ def _coerce_model_type(value: ModelType | str) -> ModelType:
         "chroma": ModelType.CHROMA_1,
         "chroma_1": ModelType.CHROMA_1,
         "ltx2": ModelType.LTX2,
+        "ltx_2": ModelType.LTX2,
         "ltx": ModelType.LTX2,
         "ltx_video": ModelType.LTX2,
         "ltxvideo": ModelType.LTX2,
@@ -580,6 +590,26 @@ class TrainConfig:
         if isinstance(self.optimizer, dict):
             self.optimizer = TrainOptimizerConfig(**self.optimizer)
 
+        # Coerce sample dicts to SampleConfig and normalize legacy keys.
+        if self.samples is not None:
+            sample_field_names = {f.name for f in dataclasses.fields(SampleConfig)}
+            coerced_samples: list[Any] = []
+            for sample in self.samples:
+                if isinstance(sample, SampleConfig):
+                    coerced_samples.append(sample)
+                    continue
+                if isinstance(sample, dict):
+                    payload = dict(sample)
+                    if "num_inference_steps" not in payload and "diffusion_steps" in payload:
+                        payload["num_inference_steps"] = payload.get("diffusion_steps")
+                    if "guidance_scale" not in payload and "cfg_scale" in payload:
+                        payload["guidance_scale"] = payload.get("cfg_scale")
+                    filtered = {k: v for k, v in payload.items() if k in sample_field_names}
+                    coerced_samples.append(SampleConfig(**filtered))
+                    continue
+                coerced_samples.append(sample)
+            self.samples = coerced_samples
+
         # Coerce concept dicts
         if self.concepts:
             coerced = []
@@ -629,6 +659,26 @@ def load_config(path: str | Path) -> TrainConfig:
     # Apply config migrations if needed
     if needs_migration(data):
         data = migrate_config(data)
+
+    # Legacy presets often omit required fields from the modern TrainConfig.
+    # Normalize them before dataclass construction so UI preset loading does
+    # not fail on old files.
+    if not data.get("transformer_path"):
+        base_name = str(data.get("base_model_name", "") or "").strip()
+        if base_name:
+            data["transformer_path"] = base_name
+
+    if not data.get("output_dir"):
+        output_dest = str(data.get("output_model_destination", "") or "").strip()
+        if output_dest:
+            data["output_dir"] = str(Path(output_dest).expanduser().parent)
+        else:
+            data["output_dir"] = str(default_output_dir())
+
+    if data.get("concepts") is None:
+        data["concepts"] = []
+    elif "concepts" not in data:
+        data["concepts"] = []
 
     # Filter to only fields the dataclass accepts
     import dataclasses

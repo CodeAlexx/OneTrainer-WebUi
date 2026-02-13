@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from serenity.core.enums import NoiseScheduler
+
 
 @dataclass
 class SampleConfig:
@@ -29,6 +31,7 @@ class SampleConfig:
     random_seed: bool = False
     num_inference_steps: int = 20
     guidance_scale: float = 7.0
+    noise_scheduler: NoiseScheduler | str = NoiseScheduler.EULER
 
     # Video-specific
     frames: int = 1
@@ -50,6 +53,21 @@ class SampleConfig:
     sample_inpainting: bool = False
     base_image_path: str = ""
     mask_image_path: str = ""
+
+    def __post_init__(self) -> None:
+        """Normalize enum-ish sample fields."""
+        if not isinstance(self.noise_scheduler, NoiseScheduler):
+            raw = str(self.noise_scheduler)
+            try:
+                self.noise_scheduler = NoiseScheduler(raw)
+            except ValueError:
+                upper = raw.upper()
+                for member in NoiseScheduler:
+                    if member.value.upper() == upper:
+                        self.noise_scheduler = member
+                        break
+                else:
+                    self.noise_scheduler = NoiseScheduler.EULER
 
     def should_sample_at_step(self, global_step: int) -> bool:
         """Check if a sample should be generated at this step."""

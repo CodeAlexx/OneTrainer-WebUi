@@ -8,16 +8,19 @@ from __future__ import annotations
 
 import dearpygui.dearpygui as dpg
 
+from serenity.core.enums import NoiseScheduler
 from serenity.core.sample_config import SampleConfig
 from serenity.ui.state import UIState
 from serenity.ui.widgets import (
     labeled_checkbox,
     labeled_combo,
     labeled_float,
+    labeled_input,
     labeled_int,
     section,
     time_entry,
     tooltip,
+    enum_values,
 )
 
 __all__ = ["build_sampling_tab"]
@@ -27,6 +30,7 @@ SAMPLE_LIST_TAG = "sample_list"
 
 # Supported output formats for sample images.
 SAMPLE_IMAGE_FORMATS = ["PNG", "JPG"]
+SAMPLE_OUTPUT_FORMATS = ["png", "jpg", "webp"]
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +166,7 @@ def _rebuild_sample_list(ui_state: UIState) -> None:
 def _build_sample_item(ui_state: UIState, index: int, sample: SampleConfig) -> None:
     """Render a single collapsible sample entry."""
     # Build a short header from the first line of the prompt.
-    prompt_preview = (sample.prompt or "").split("\n", 1)[0][:60]
+    prompt_preview = str(_sample_get(sample, "prompt", "") or "").split("\n", 1)[0][:60]
     header_label = prompt_preview if prompt_preview else f"Sample {index}"
     with dpg.collapsing_header(
         label=header_label,
@@ -172,7 +176,7 @@ def _build_sample_item(ui_state: UIState, index: int, sample: SampleConfig) -> N
         # -- Enabled --
         labeled_checkbox(
             "Enabled",
-            default_value=sample.enabled,
+            default_value=bool(_sample_get(sample, "enabled", True)),
             callback=lambda _s, val: _set_sample_field(
                 ui_state, index, "enabled", val,
             ),
@@ -182,7 +186,7 @@ def _build_sample_item(ui_state: UIState, index: int, sample: SampleConfig) -> N
         # -- Prompt (multiline) --
         dpg.add_text("Prompt")
         dpg.add_input_text(
-            default_value=sample.prompt,
+            default_value=str(_sample_get(sample, "prompt", "") or ""),
             multiline=True,
             height=80,
             width=-1,
@@ -195,7 +199,7 @@ def _build_sample_item(ui_state: UIState, index: int, sample: SampleConfig) -> N
         # -- Negative prompt (multiline) --
         dpg.add_text("Negative Prompt")
         dpg.add_input_text(
-            default_value=sample.negative_prompt,
+            default_value=str(_sample_get(sample, "negative_prompt", "") or ""),
             multiline=True,
             height=60,
             width=-1,
@@ -211,7 +215,7 @@ def _build_sample_item(ui_state: UIState, index: int, sample: SampleConfig) -> N
         with dpg.group(horizontal=True):
             labeled_int(
                 "Width",
-                default_value=sample.width,
+                default_value=int(_sample_get(sample, "width", 512) or 512),
                 callback=lambda _s, val: _set_sample_field(
                     ui_state, index, "width", int(val),
                 ),
@@ -222,7 +226,7 @@ def _build_sample_item(ui_state: UIState, index: int, sample: SampleConfig) -> N
         with dpg.group(horizontal=True):
             labeled_int(
                 "Height",
-                default_value=sample.height,
+                default_value=int(_sample_get(sample, "height", 512) or 512),
                 callback=lambda _s, val: _set_sample_field(
                     ui_state, index, "height", int(val),
                 ),
@@ -234,7 +238,7 @@ def _build_sample_item(ui_state: UIState, index: int, sample: SampleConfig) -> N
         # -- Seed --
         labeled_int(
             "Seed",
-            default_value=sample.seed,
+            default_value=int(_sample_get(sample, "seed", 42) or 42),
             callback=lambda _s, val: _set_sample_field(
                 ui_state, index, "seed", int(val),
             ),
@@ -242,7 +246,7 @@ def _build_sample_item(ui_state: UIState, index: int, sample: SampleConfig) -> N
         )
         labeled_checkbox(
             "Random Seed",
-            default_value=sample.random_seed,
+            default_value=bool(_sample_get(sample, "random_seed", False)),
             callback=lambda _s, val: _set_sample_field(
                 ui_state, index, "random_seed", val,
             ),
@@ -252,7 +256,11 @@ def _build_sample_item(ui_state: UIState, index: int, sample: SampleConfig) -> N
         # -- Inference parameters --
         labeled_int(
             "Inference Steps",
-            default_value=sample.num_inference_steps,
+            default_value=int(
+                _sample_get(
+                    sample, "num_inference_steps", _sample_get(sample, "diffusion_steps", 20)
+                ) or 20
+            ),
             callback=lambda _s, val: _set_sample_field(
                 ui_state, index, "num_inference_steps", int(val),
             ),
@@ -262,7 +270,11 @@ def _build_sample_item(ui_state: UIState, index: int, sample: SampleConfig) -> N
         )
         labeled_float(
             "Guidance Scale",
-            default_value=sample.guidance_scale,
+            default_value=float(
+                _sample_get(
+                    sample, "guidance_scale", _sample_get(sample, "cfg_scale", 7.0)
+                ) or 7.0
+            ),
             callback=lambda _s, val: _set_sample_field(
                 ui_state, index, "guidance_scale", float(val),
             ),
@@ -270,6 +282,76 @@ def _build_sample_item(ui_state: UIState, index: int, sample: SampleConfig) -> N
             max_value=100.0,
             format_str="%.1f",
             tip="Classifier-free guidance strength",
+        )
+        labeled_combo(
+            "Noise Scheduler",
+            enum_values(NoiseScheduler),
+            default_value=_enum_string(
+                _sample_get(sample, "noise_scheduler", NoiseScheduler.EULER),
+                NoiseScheduler.EULER.value,
+            ),
+            callback=lambda _s, val: _set_sample_field(
+                ui_state, index, "noise_scheduler", val,
+            ),
+            tip="Sampler/scheduler algorithm for this sample",
+        )
+        labeled_combo(
+            "Output Format",
+            SAMPLE_OUTPUT_FORMATS,
+            default_value=str(_sample_get(sample, "output_format", "png") or "png").lower(),
+            callback=lambda _s, val: _set_sample_field(
+                ui_state, index, "output_format", str(val).lower(),
+            ),
+            tip="Image file type for this sample",
+        )
+        labeled_input(
+            "Output Dir",
+            default_value=str(_sample_get(sample, "output_dir", "") or ""),
+            callback=lambda _s, val: _set_sample_field(
+                ui_state, index, "output_dir", val,
+            ),
+            tip="Optional per-sample output directory override",
+        )
+        labeled_int(
+            "Frames",
+            default_value=int(_sample_get(sample, "frames", 1) or 1),
+            callback=lambda _s, val: _set_sample_field(
+                ui_state, index, "frames", int(val),
+            ),
+            min_value=1,
+            max_value=4096,
+            tip="Video frame count (video models only)",
+        )
+        labeled_float(
+            "Length (sec)",
+            default_value=float(_sample_get(sample, "length", 10.0) or 10.0),
+            callback=lambda _s, val: _set_sample_field(
+                ui_state, index, "length", float(val),
+            ),
+            min_value=0.1,
+            max_value=600.0,
+            format_str="%.1f",
+            tip="Video duration in seconds (video/audio models only)",
+        )
+        labeled_int(
+            "Every N Steps",
+            default_value=int(_sample_get(sample, "sample_every_n_steps", 0) or 0),
+            callback=lambda _s, val: _set_sample_field(
+                ui_state, index, "sample_every_n_steps", int(val),
+            ),
+            min_value=0,
+            max_value=1_000_000,
+            tip="Optional per-sample cadence override by steps",
+        )
+        labeled_int(
+            "Every N Epochs",
+            default_value=int(_sample_get(sample, "sample_every_n_epochs", 0) or 0),
+            callback=lambda _s, val: _set_sample_field(
+                ui_state, index, "sample_every_n_epochs", int(val),
+            ),
+            min_value=0,
+            max_value=100_000,
+            tip="Optional per-sample cadence override by epochs",
         )
 
         dpg.add_spacer(height=4)
@@ -292,7 +374,45 @@ def _set_sample_field(
         sample = samples[index]
     except IndexError:
         return
-    setattr(sample, field, value)
+    _sample_set(sample, field, value)
+
+    # Keep legacy keys in sync when present.
+    if field == "num_inference_steps" and _sample_has(sample, "diffusion_steps"):
+        _sample_set(sample, "diffusion_steps", int(value))
+    if field == "guidance_scale" and _sample_has(sample, "cfg_scale"):
+        _sample_set(sample, "cfg_scale", float(value))
+
     # Rebuild when prompt changes so the header preview stays current.
     if field == "prompt":
         _rebuild_sample_list(ui_state)
+
+
+def _sample_get(sample: object, field: str, default: object) -> object:
+    """Read a sample field from dataclass or dict payload."""
+    if isinstance(sample, dict):
+        return sample.get(field, default)
+    return getattr(sample, field, default)
+
+
+def _sample_set(sample: object, field: str, value: object) -> None:
+    """Write a sample field into dataclass or dict payload."""
+    if isinstance(sample, dict):
+        sample[field] = value
+        return
+    setattr(sample, field, value)
+
+
+def _sample_has(sample: object, field: str) -> bool:
+    """True when *sample* has a concrete slot for *field*."""
+    if isinstance(sample, dict):
+        return field in sample
+    return hasattr(sample, field)
+
+
+def _enum_string(value: object, fallback: str) -> str:
+    """Return enum `.value` when available, else a safe string fallback."""
+    if value is None:
+        return fallback
+    if hasattr(value, "value"):
+        return str(value.value)
+    return str(value)

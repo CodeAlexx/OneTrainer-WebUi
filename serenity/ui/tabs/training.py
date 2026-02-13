@@ -8,11 +8,17 @@ filtering.
 
 from __future__ import annotations
 
+import dataclasses
+from typing import Any, get_args, get_origin
+
 import dearpygui.dearpygui as dpg
 
+from serenity.core.config import TrainOptimizerConfig
 from serenity.ui.state import UIState
 from serenity.ui.theme import scaled
 from serenity.ui.widgets import (
+    LABEL_WIDTH,
+    INPUT_WIDTH,
     enum_values,
     labeled_checkbox,
     labeled_combo,
@@ -21,6 +27,7 @@ from serenity.ui.widgets import (
     labeled_int,
     section,
     time_entry,
+    tooltip,
 )
 from serenity.core.enums import (
     DataType,
@@ -39,6 +46,47 @@ __all__ = ["build_training_tab"]
 
 # Column width for the 2-column layout -- auto-scaled
 _COL_W = scaled(560)
+_OPTIMIZER_STATUS_TAG = "training_optimizer_status"
+_OPTIMIZER_WINDOW_TAG = "training_optimizer_window"
+_OPTIMIZER_WINDOW_LIST_TAG = "training_optimizer_window_list"
+_OPTIMIZER_WINDOW_STATUS_TAG = "training_optimizer_window_status"
+_SCHEDULER_ADV_BUTTON_TAG = "training_scheduler_adv_button"
+_SCHEDULER_WINDOW_TAG = "training_scheduler_window"
+_SCHEDULER_WINDOW_CONTENT_TAG = "training_scheduler_window_content"
+_SCHEDULER_PARAMS_LIST_TAG = "training_scheduler_params_list"
+_SCHEDULER_CUSTOM_CLASS_TAG = "training_scheduler_custom_class"
+_OFFLOADING_WINDOW_TAG = "training_offloading_window"
+_OFFLOAD_GC_TAG = "training_offload_gc"
+_OFFLOAD_ASYNC_TAG = "training_offload_async"
+_OFFLOAD_ACTIVATION_TAG = "training_offload_activation"
+_OFFLOAD_LAYER_FRAC_TAG = "training_offload_layer_frac"
+_TIMESTEP_WINDOW_TAG = "training_timestep_window"
+_TIMESTEP_DIST_TAG = "training_timestep_dist"
+_TIMESTEP_MIN_TAG = "training_timestep_min"
+_TIMESTEP_MAX_TAG = "training_timestep_max"
+_TIMESTEP_WEIGHT_TAG = "training_timestep_weight"
+_TIMESTEP_BIAS_TAG = "training_timestep_bias"
+_TIMESTEP_SHIFT_TAG = "training_timestep_shift"
+_TIMESTEP_DYNAMIC_TAG = "training_timestep_dynamic"
+
+_OPTIMIZER_HIDDEN_FIELDS = {"optimizer", "muon_adam_config"}
+_OPTIMIZER_COMMON_FIELDS = (
+    "weight_decay",
+    "beta1",
+    "beta2",
+    "eps",
+    "momentum",
+    "dampening",
+    "clip_threshold",
+    "decay_rate",
+    "fused",
+    "fused_back_pass",
+    "foreach",
+    "relative_step",
+    "scale_parameter",
+    "stochastic_rounding",
+    "warmup_init",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +115,602 @@ def _reg(ui: UIState, tag: str) -> None:
     ui.register(tag)
 
 
+def _set_nested_attr(obj: object, path: str, value: object) -> None:
+    """Set a dotted config path on a dataclass-style object."""
+    parts = path.split(".")
+    parent = obj
+    for part in parts[:-1]:
+        parent = getattr(parent, part)
+    setattr(parent, parts[-1], value)
+
+
+def _safe_set_item_value(tag: str, value: object) -> None:
+    """Set a DPG item value if it exists."""
+    if not dpg.does_item_exist(tag):
+        return
+    try:
+        dpg.set_value(tag, value)
+    except SystemError:
+        pass
+
+
+def _is_custom_scheduler(cfg: object) -> bool:
+    """True when the selected LR scheduler is CUSTOM."""
+    scheduler = _nested(cfg, "learning_rate_scheduler")
+    if scheduler is None:
+        return False
+    if hasattr(scheduler, "value"):
+        return str(scheduler.value).upper() == LearningRateScheduler.CUSTOM.value
+    return str(scheduler).upper() == LearningRateScheduler.CUSTOM.value
+
+
+def _update_scheduler_adv_button_state(ui: UIState) -> None:
+    """Enable scheduler `...` only for CUSTOM scheduler, matching OneTrainer."""
+    if not dpg.does_item_exist(_SCHEDULER_ADV_BUTTON_TAG):
+        return
+    enabled = _is_custom_scheduler(ui.config)
+    dpg.configure_item(_SCHEDULER_ADV_BUTTON_TAG, enabled=enabled)
+
+
+def _on_scheduler_changed(ui: UIState) -> None:
+    """Persist scheduler and refresh related advanced UI state."""
+    ui.widget_to_config("learning_rate_scheduler")
+    _update_scheduler_adv_button_state(ui)
+    if dpg.does_item_exist(_SCHEDULER_WINDOW_TAG):
+        _refresh_scheduler_window(ui)
+
+
+def _ensure_scheduler_params(cfg: object) -> list[dict[str, str]]:
+    """Normalize scheduler_params to a mutable list[dict[str, str]]."""
+    params = getattr(cfg, "scheduler_params", None)
+    if not isinstance(params, list):
+        params = []
+        setattr(cfg, "scheduler_params", params)
+
+    normalized: list[dict[str, str]] = []
+    for entry in params:
+        if isinstance(entry, dict):
+            normalized.append(
+                {
+                    "key": str(entry.get("key", "")),
+                    "value": str(entry.get("value", "")),
+                }
+            )
+    setattr(cfg, "scheduler_params", normalized)
+    return normalized
+
+
+def _update_scheduler_param(ui: UIState, index: int, field: str, value: object) -> None:
+    """Update one scheduler key/value row."""
+    params = _ensure_scheduler_params(ui.config)
+    if index < 0 or index >= len(params):
+        return
+    params[index][field] = str(value)
+
+
+def _remove_scheduler_param(ui: UIState, index: int) -> None:
+    """Delete one scheduler key/value row."""
+    params = _ensure_scheduler_params(ui.config)
+    if 0 <= index < len(params):
+        params.pop(index)
+        _rebuild_scheduler_params_list(ui)
+
+
+def _add_scheduler_param(ui: UIState) -> None:
+    """Append a scheduler key/value row."""
+    params = _ensure_scheduler_params(ui.config)
+    params.append({"key": "", "value": ""})
+    _rebuild_scheduler_params_list(ui)
+
+
+def _rebuild_scheduler_params_list(ui: UIState) -> None:
+    """Rebuild scheduler key/value editor rows."""
+    if not dpg.does_item_exist(_SCHEDULER_PARAMS_LIST_TAG):
+        return
+
+    dpg.delete_item(_SCHEDULER_PARAMS_LIST_TAG, children_only=True)
+    params = _ensure_scheduler_params(ui.config)
+    for idx, entry in enumerate(params):
+        with dpg.group(horizontal=True, parent=_SCHEDULER_PARAMS_LIST_TAG):
+            dpg.add_button(
+                label="X",
+                width=scaled(26),
+                callback=lambda _s, _a, i=idx: _remove_scheduler_param(ui, i),
+            )
+            dpg.add_input_text(
+                default_value=entry.get("key", ""),
+                width=scaled(180),
+                hint="key",
+                callback=lambda _s, v, i=idx: _update_scheduler_param(ui, i, "key", v),
+            )
+            dpg.add_input_text(
+                default_value=entry.get("value", ""),
+                width=scaled(300),
+                hint="value",
+                callback=lambda _s, v, i=idx: _update_scheduler_param(ui, i, "value", v),
+            )
+
+
+def _refresh_scheduler_window(ui: UIState) -> None:
+    """Refresh scheduler popup content to match current scheduler selection."""
+    if not dpg.does_item_exist(_SCHEDULER_WINDOW_CONTENT_TAG):
+        return
+
+    dpg.delete_item(_SCHEDULER_WINDOW_CONTENT_TAG, children_only=True)
+    cfg = ui.config
+    if _is_custom_scheduler(cfg):
+        ui.register(
+            _SCHEDULER_CUSTOM_CLASS_TAG,
+            field_path="custom_learning_rate_scheduler",
+            type_hint=str,
+        )
+        labeled_input(
+            "Class Name",
+            tag=_SCHEDULER_CUSTOM_CLASS_TAG,
+            default_value=str(cfg.custom_learning_rate_scheduler or ""),
+            callback=ui.make_callback(_SCHEDULER_CUSTOM_CLASS_TAG),
+            parent=_SCHEDULER_WINDOW_CONTENT_TAG,
+            tip="Python import path for custom scheduler class",
+        )
+        dpg.add_spacer(height=6, parent=_SCHEDULER_WINDOW_CONTENT_TAG)
+
+    with dpg.group(horizontal=True, parent=_SCHEDULER_WINDOW_CONTENT_TAG):
+        dpg.add_button(
+            label="Add Parameter",
+            callback=lambda _s, _a, _u: _add_scheduler_param(ui),
+        )
+
+    dpg.add_child_window(
+        tag=_SCHEDULER_PARAMS_LIST_TAG,
+        autosize_x=True,
+        height=scaled(300),
+        border=False,
+        parent=_SCHEDULER_WINDOW_CONTENT_TAG,
+    )
+    _rebuild_scheduler_params_list(ui)
+
+
+def _open_scheduler_window(ui: UIState) -> None:
+    """Open (or focus) scheduler advanced settings popup."""
+    if dpg.does_item_exist(_SCHEDULER_WINDOW_TAG):
+        dpg.show_item(_SCHEDULER_WINDOW_TAG)
+        dpg.focus_item(_SCHEDULER_WINDOW_TAG)
+        _refresh_scheduler_window(ui)
+        return
+
+    with dpg.window(
+        tag=_SCHEDULER_WINDOW_TAG,
+        label="Learning Rate Scheduler Settings",
+        width=scaled(760),
+        height=scaled(520),
+    ):
+        dpg.add_child_window(
+            tag=_SCHEDULER_WINDOW_CONTENT_TAG,
+            autosize_x=True,
+            height=-1,
+            border=False,
+        )
+    _refresh_scheduler_window(ui)
+
+
+def _offloading_apply(
+    ui: UIState,
+    popup_tag: str,
+    path: str,
+    value: object,
+    main_tag: str | None = None,
+) -> None:
+    """Apply offloading popup edits to config and mirror into main control."""
+    if path == "gradient_checkpointing" and not isinstance(value, GradientCheckpointingMethod):
+        try:
+            value = GradientCheckpointingMethod(str(value))
+        except ValueError:
+            value = GradientCheckpointingMethod.OFF
+    _set_nested_attr(ui.config, path, value)
+    if main_tag is not None:
+        shown = value.value if hasattr(value, "value") else value
+        _safe_set_item_value(main_tag, shown)
+
+
+def _sync_offloading_popup(ui: UIState) -> None:
+    """Sync offloading popup controls from current config."""
+    cfg = ui.config
+    _safe_set_item_value(_OFFLOAD_GC_TAG, _enum_default(cfg, "gradient_checkpointing"))
+    _safe_set_item_value(_OFFLOAD_ASYNC_TAG, bool(cfg.enable_async_offloading))
+    _safe_set_item_value(_OFFLOAD_ACTIVATION_TAG, bool(cfg.enable_activation_offloading))
+    _safe_set_item_value(_OFFLOAD_LAYER_FRAC_TAG, float(cfg.layer_offload_fraction))
+
+
+def _open_offloading_window(ui: UIState) -> None:
+    """Open (or focus) offloading popup."""
+    if dpg.does_item_exist(_OFFLOADING_WINDOW_TAG):
+        dpg.show_item(_OFFLOADING_WINDOW_TAG)
+        dpg.focus_item(_OFFLOADING_WINDOW_TAG)
+        _sync_offloading_popup(ui)
+        return
+
+    cfg = ui.config
+    with dpg.window(
+        tag=_OFFLOADING_WINDOW_TAG,
+        label="Offloading",
+        width=scaled(760),
+        height=scaled(460),
+    ):
+        labeled_combo(
+            "Gradient Checkpointing",
+            enum_values(GradientCheckpointingMethod),
+            tag=_OFFLOAD_GC_TAG,
+            default_value=_enum_default(cfg, "gradient_checkpointing"),
+            callback=lambda _s, v: _offloading_apply(
+                ui, _OFFLOAD_GC_TAG, "gradient_checkpointing", v, "gradient_checkpointing"
+            ),
+            tip="Checkpointing strategy for memory/speed tradeoff",
+        )
+        labeled_checkbox(
+            "Async Offloading",
+            tag=_OFFLOAD_ASYNC_TAG,
+            default_value=cfg.enable_async_offloading,
+            callback=lambda _s, v: _offloading_apply(
+                ui, _OFFLOAD_ASYNC_TAG, "enable_async_offloading", bool(v)
+            ),
+        )
+        labeled_checkbox(
+            "Offload Activations",
+            tag=_OFFLOAD_ACTIVATION_TAG,
+            default_value=cfg.enable_activation_offloading,
+            callback=lambda _s, v: _offloading_apply(
+                ui, _OFFLOAD_ACTIVATION_TAG, "enable_activation_offloading", bool(v)
+            ),
+        )
+        labeled_float(
+            "Layer Offload Fraction",
+            tag=_OFFLOAD_LAYER_FRAC_TAG,
+            default_value=cfg.layer_offload_fraction,
+            callback=lambda _s, v: _offloading_apply(
+                ui, _OFFLOAD_LAYER_FRAC_TAG, "layer_offload_fraction", float(v), "layer_offload_fraction"
+            ),
+            min_value=0.0,
+            max_value=1.0,
+        )
+
+
+def _timestep_apply(
+    ui: UIState,
+    path: str,
+    value: object,
+    main_tag: str | None = None,
+) -> None:
+    """Apply timestep popup value to config and mirror to main control."""
+    if path == "timestep_distribution" and not isinstance(value, TimestepDistribution):
+        try:
+            value = TimestepDistribution(str(value))
+        except ValueError:
+            value = TimestepDistribution.UNIFORM
+    _set_nested_attr(ui.config, path, value)
+    if main_tag is not None:
+        shown = value.value if hasattr(value, "value") else value
+        _safe_set_item_value(main_tag, shown)
+
+
+def _sync_timestep_popup(ui: UIState) -> None:
+    """Sync timestep popup controls from current config."""
+    cfg = ui.config
+    _safe_set_item_value(_TIMESTEP_DIST_TAG, _enum_default(cfg, "timestep_distribution"))
+    _safe_set_item_value(_TIMESTEP_MIN_TAG, float(cfg.min_noising_strength))
+    _safe_set_item_value(_TIMESTEP_MAX_TAG, float(cfg.max_noising_strength))
+    _safe_set_item_value(_TIMESTEP_WEIGHT_TAG, float(cfg.noising_weight))
+    _safe_set_item_value(_TIMESTEP_BIAS_TAG, float(cfg.noising_bias))
+    _safe_set_item_value(_TIMESTEP_SHIFT_TAG, float(cfg.timestep_shift))
+    _safe_set_item_value(_TIMESTEP_DYNAMIC_TAG, bool(cfg.dynamic_timestep_shifting))
+
+
+def _open_timestep_window(ui: UIState) -> None:
+    """Open (or focus) timestep distribution popup."""
+    if dpg.does_item_exist(_TIMESTEP_WINDOW_TAG):
+        dpg.show_item(_TIMESTEP_WINDOW_TAG)
+        dpg.focus_item(_TIMESTEP_WINDOW_TAG)
+        _sync_timestep_popup(ui)
+        return
+
+    cfg = ui.config
+    with dpg.window(
+        tag=_TIMESTEP_WINDOW_TAG,
+        label="Timestep Distribution",
+        width=scaled(780),
+        height=scaled(560),
+    ):
+        labeled_combo(
+            "Timestep Distribution",
+            enum_values(TimestepDistribution),
+            tag=_TIMESTEP_DIST_TAG,
+            default_value=_enum_default(cfg, "timestep_distribution"),
+            callback=lambda _s, v: _timestep_apply(
+                ui, "timestep_distribution", v, "timestep_distribution"
+            ),
+        )
+        labeled_float(
+            "Min Noising Strength",
+            tag=_TIMESTEP_MIN_TAG,
+            default_value=cfg.min_noising_strength,
+            callback=lambda _s, v: _timestep_apply(
+                ui, "min_noising_strength", float(v), "min_noising_strength"
+            ),
+            min_value=0.0,
+            max_value=1.0,
+        )
+        labeled_float(
+            "Max Noising Strength",
+            tag=_TIMESTEP_MAX_TAG,
+            default_value=cfg.max_noising_strength,
+            callback=lambda _s, v: _timestep_apply(
+                ui, "max_noising_strength", float(v), "max_noising_strength"
+            ),
+            min_value=0.0,
+            max_value=1.0,
+        )
+        labeled_float(
+            "Noising Weight",
+            tag=_TIMESTEP_WEIGHT_TAG,
+            default_value=cfg.noising_weight,
+            callback=lambda _s, v: _timestep_apply(
+                ui, "noising_weight", float(v), "noising_weight"
+            ),
+        )
+        labeled_float(
+            "Noising Bias",
+            tag=_TIMESTEP_BIAS_TAG,
+            default_value=cfg.noising_bias,
+            callback=lambda _s, v: _timestep_apply(
+                ui, "noising_bias", float(v), "noising_bias"
+            ),
+        )
+        labeled_float(
+            "Timestep Shift",
+            tag=_TIMESTEP_SHIFT_TAG,
+            default_value=cfg.timestep_shift,
+            callback=lambda _s, v: _timestep_apply(
+                ui, "timestep_shift", float(v), "timestep_shift"
+            ),
+        )
+        labeled_checkbox(
+            "Dynamic Timestep Shifting",
+            tag=_TIMESTEP_DYNAMIC_TAG,
+            default_value=cfg.dynamic_timestep_shifting,
+            callback=lambda _s, v: _timestep_apply(
+                ui, "dynamic_timestep_shifting", bool(v), "dynamic_timestep_shifting"
+            ),
+        )
+
+
+def _optimizer_name(cfg: object) -> str:
+    """Return the selected optimizer name as a string value."""
+    value = _nested(cfg, "optimizer", "optimizer")
+    if value is None:
+        return ""
+    return value.value if hasattr(value, "value") else str(value)
+
+
+def _selected_optimizer_defaults(cfg: object) -> dict[str, Any]:
+    """Get defaults for the currently selected optimizer, if present."""
+    opt_name = _optimizer_name(cfg)
+    defaults = getattr(cfg, "optimizer_defaults", {})
+    if not isinstance(defaults, dict) or not opt_name:
+        return {}
+
+    for key, value in defaults.items():
+        if isinstance(key, str) and key.upper() == opt_name.upper() and isinstance(value, dict):
+            return value
+    return {}
+
+
+def _optimizer_label(name: str) -> str:
+    """Human-friendly labels for optimizer parameter keys."""
+    aliases = {
+        "beta1": "Beta1",
+        "beta2": "Beta2",
+        "beta3": "Beta3",
+        "eps": "Epsilon",
+        "eps2": "Epsilon 2",
+        "lr_decay": "LR Decay",
+        "min_8bit_size": "Min 8-bit Size",
+        "fused_back_pass": "Fused Back Pass",
+        "muon_te1_adam_lr": "Muon TE1 Adam LR",
+        "muon_te2_adam_lr": "Muon TE2 Adam LR",
+        "muon_adam_lr": "Muon Adam LR",
+    }
+    return aliases.get(name, name.replace("_", " ").title())
+
+
+def _optimizer_type_hint(annotation: object, current_value: object) -> type:
+    """Best-effort type hint for dynamic optimizer widgets."""
+    origin = get_origin(annotation)
+    if origin is not None:
+        args = [a for a in get_args(annotation) if a is not type(None)]
+        if args:
+            return _optimizer_type_hint(args[0], current_value)
+
+    if annotation in (bool, int, float, str):
+        return annotation
+
+    if isinstance(current_value, bool):
+        return bool
+    if isinstance(current_value, int) and not isinstance(current_value, bool):
+        return int
+    if isinstance(current_value, float):
+        return float
+    return str
+
+
+def _optimizer_fields_to_show(cfg: object) -> list[str]:
+    """Pick optimizer fields to expose: defaults + changed + common."""
+    field_defs = {f.name: f for f in dataclasses.fields(TrainOptimizerConfig)}
+    names: list[str] = []
+
+    selected_defaults = _selected_optimizer_defaults(cfg)
+    for key in selected_defaults.keys():
+        if key in field_defs and key not in _OPTIMIZER_HIDDEN_FIELDS and key not in names:
+            names.append(key)
+
+    baseline = TrainOptimizerConfig(optimizer=_nested(cfg, "optimizer", "optimizer") or Optimizer.ADAMW)
+    for field_def in dataclasses.fields(TrainOptimizerConfig):
+        key = field_def.name
+        if key in _OPTIMIZER_HIDDEN_FIELDS:
+            continue
+        current = _nested(cfg, "optimizer", key)
+        default = getattr(baseline, key, None)
+        if current != default and key not in names:
+            names.append(key)
+
+    for key in _OPTIMIZER_COMMON_FIELDS:
+        if key in field_defs and key not in names:
+            names.append(key)
+
+    return names
+
+
+def _set_optimizer_status(text: str) -> None:
+    """Update optimizer status text if the widget exists."""
+    for tag in (_OPTIMIZER_STATUS_TAG, _OPTIMIZER_WINDOW_STATUS_TAG):
+        if dpg.does_item_exist(tag):
+            dpg.set_value(tag, text)
+
+
+def _rebuild_optimizer_param_list(
+    ui: UIState,
+    container_tag: str = _OPTIMIZER_WINDOW_LIST_TAG,
+) -> None:
+    """Render dynamic optimizer parameter controls for the selected optimizer."""
+    if not dpg.does_item_exist(container_tag):
+        return
+
+    dpg.delete_item(container_tag, children_only=True)
+    cfg = ui.config
+    field_defs = {f.name: f for f in dataclasses.fields(TrainOptimizerConfig)}
+    names = _optimizer_fields_to_show(cfg)
+    if not names:
+        dpg.add_text("No optimizer parameters available.", parent=container_tag)
+        return
+
+    dpg.add_text(
+        f"Selected: {_optimizer_name(cfg)}",
+        parent=container_tag,
+        color=(130, 130, 145),
+    )
+    dpg.add_spacer(height=4, parent=container_tag)
+
+    for key in names:
+        field_def = field_defs.get(key)
+        if field_def is None:
+            continue
+
+        current_value = _nested(cfg, "optimizer", key)
+        type_hint = _optimizer_type_hint(field_def.type, current_value)
+        tag = f"optimizer.{key}"
+        ui.register(tag, type_hint=type_hint)
+        callback = ui.make_callback(tag)
+
+        if type_hint is bool:
+            labeled_checkbox(
+                _optimizer_label(key),
+                tag=tag,
+                default_value=bool(current_value),
+                callback=callback,
+                parent=container_tag,
+            )
+        elif type_hint is int:
+            labeled_int(
+                _optimizer_label(key),
+                tag=tag,
+                default_value=int(current_value) if current_value is not None else 0,
+                callback=callback,
+                parent=container_tag,
+            )
+        elif type_hint is float:
+            labeled_float(
+                _optimizer_label(key),
+                tag=tag,
+                default_value=float(current_value) if current_value is not None else 0.0,
+                callback=callback,
+                parent=container_tag,
+            )
+        else:
+            labeled_input(
+                _optimizer_label(key),
+                tag=tag,
+                default_value="" if current_value is None else str(current_value),
+                callback=callback,
+                parent=container_tag,
+            )
+
+
+def _open_optimizer_window(ui: UIState) -> None:
+    """Open (or focus) the advanced optimizer settings popup."""
+    if dpg.does_item_exist(_OPTIMIZER_WINDOW_TAG):
+        dpg.show_item(_OPTIMIZER_WINDOW_TAG)
+        dpg.focus_item(_OPTIMIZER_WINDOW_TAG)
+        _rebuild_optimizer_param_list(ui, _OPTIMIZER_WINDOW_LIST_TAG)
+        return
+
+    with dpg.window(
+        tag=_OPTIMIZER_WINDOW_TAG,
+        label="Optimizer Settings",
+        width=scaled(760),
+        height=scaled(620),
+        no_collapse=False,
+    ):
+        with dpg.group(horizontal=True):
+            dpg.add_button(
+                label="Load Defaults",
+                callback=lambda _s, _a, _u: _load_optimizer_defaults(ui),
+            )
+        dpg.add_text(
+            "",
+            tag=_OPTIMIZER_WINDOW_STATUS_TAG,
+            color=(130, 130, 145),
+        )
+        dpg.add_child_window(
+            tag=_OPTIMIZER_WINDOW_LIST_TAG,
+            autosize_x=True,
+            height=-1,
+            border=False,
+        )
+
+    _rebuild_optimizer_param_list(ui, _OPTIMIZER_WINDOW_LIST_TAG)
+
+
+def _on_optimizer_changed(ui: UIState) -> None:
+    """Persist optimizer selection and refresh dynamic parameter controls."""
+    ui.widget_to_config("optimizer.optimizer")
+    _set_optimizer_status("")
+    _rebuild_optimizer_param_list(ui, _OPTIMIZER_WINDOW_LIST_TAG)
+
+
+def _load_optimizer_defaults(ui: UIState) -> None:
+    """Load per-optimizer defaults from config; fallback to dataclass defaults."""
+    cfg = ui.config
+    selected_defaults = _selected_optimizer_defaults(cfg)
+    opt_name = _optimizer_name(cfg) or "optimizer"
+
+    if selected_defaults:
+        for key, value in selected_defaults.items():
+            if key in _OPTIMIZER_HIDDEN_FIELDS:
+                continue
+            if hasattr(cfg.optimizer, key):
+                setattr(cfg.optimizer, key, value)
+        _set_optimizer_status(f"Loaded preset defaults for {opt_name}.")
+    else:
+        baseline = TrainOptimizerConfig(optimizer=_nested(cfg, "optimizer", "optimizer") or Optimizer.ADAMW)
+        for field_def in dataclasses.fields(TrainOptimizerConfig):
+            key = field_def.name
+            if key in _OPTIMIZER_HIDDEN_FIELDS:
+                continue
+            setattr(cfg.optimizer, key, getattr(baseline, key))
+        _set_optimizer_status(f"No preset defaults for {opt_name}; reset to built-in defaults.")
+
+    ui.sync_from_config()
+    _rebuild_optimizer_param_list(ui, _OPTIMIZER_WINDOW_LIST_TAG)
+
+
 # ---------------------------------------------------------------------------
 # Column builders
 # ---------------------------------------------------------------------------
@@ -77,18 +721,40 @@ def _build_left(parent: int | str, ui: UIState) -> None:
 
     # ---- Optimizer & LR section ----
     with section("Optimizer & LR", parent=parent):
-        labeled_combo(
-            "Optimizer", enum_values(Optimizer),
-            tag="optimizer.optimizer",
-            default_value=_enum_default(cfg.optimizer, "optimizer"),
-            callback=ui.make_callback("optimizer.optimizer"),
-        )
-        labeled_combo(
-            "LR Scheduler", enum_values(LearningRateScheduler),
-            tag="learning_rate_scheduler",
-            default_value=_enum_default(cfg, "learning_rate_scheduler"),
-            callback=ui.make_callback("learning_rate_scheduler"),
-        )
+        with dpg.group(horizontal=True):
+            lbl = dpg.add_text("Optimizer", wrap=LABEL_WIDTH)
+            tooltip(lbl, "The type of optimizer")
+            dpg.add_combo(
+                items=enum_values(Optimizer),
+                tag="optimizer.optimizer",
+                default_value=_enum_default(cfg.optimizer, "optimizer"),
+                callback=lambda _s, _a, _u: _on_optimizer_changed(ui),
+                width=INPUT_WIDTH - scaled(44),
+            )
+            opt_btn = dpg.add_button(
+                label="...",
+                width=scaled(34),
+                callback=lambda _s, _a, _u: _open_optimizer_window(ui),
+            )
+            tooltip(opt_btn, "Advanced optimizer parameters")
+        with dpg.group(horizontal=True):
+            lbl = dpg.add_text("LR Scheduler", wrap=LABEL_WIDTH)
+            tooltip(lbl, "Learning rate scheduler used during training")
+            dpg.add_combo(
+                items=enum_values(LearningRateScheduler),
+                tag="learning_rate_scheduler",
+                default_value=_enum_default(cfg, "learning_rate_scheduler"),
+                callback=lambda _s, _a, _u: _on_scheduler_changed(ui),
+                width=INPUT_WIDTH - scaled(44),
+            )
+            sched_btn = dpg.add_button(
+                tag=_SCHEDULER_ADV_BUTTON_TAG,
+                label="...",
+                width=scaled(34),
+                callback=lambda _s, _a, _u: _open_scheduler_window(ui),
+            )
+            tooltip(sched_btn, "Scheduler advanced parameters")
+            _update_scheduler_adv_button_state(ui)
         labeled_float(
             "Learning Rate",
             tag="learning_rate",
@@ -228,12 +894,22 @@ def _build_right(parent: int | str, ui: UIState) -> None:
 
     # ---- Precision & Memory section ----
     with section("Precision & Memory", parent=parent):
-        labeled_combo(
-            "Gradient Checkpointing", enum_values(GradientCheckpointingMethod),
-            tag="gradient_checkpointing",
-            default_value=_enum_default(cfg, "gradient_checkpointing"),
-            callback=ui.make_callback("gradient_checkpointing"),
-        )
+        with dpg.group(horizontal=True):
+            lbl = dpg.add_text("Gradient Checkpointing", wrap=LABEL_WIDTH)
+            tooltip(lbl, "Gradient checkpointing strategy")
+            dpg.add_combo(
+                items=enum_values(GradientCheckpointingMethod),
+                tag="gradient_checkpointing",
+                default_value=_enum_default(cfg, "gradient_checkpointing"),
+                callback=ui.make_callback("gradient_checkpointing"),
+                width=INPUT_WIDTH - scaled(44),
+            )
+            gc_btn = dpg.add_button(
+                label="...",
+                width=scaled(34),
+                callback=lambda _s, _a, _u: _open_offloading_window(ui),
+            )
+            tooltip(gc_btn, "Offloading settings")
         labeled_float(
             "Layer Offload Fraction",
             tag="layer_offload_fraction",
@@ -318,12 +994,22 @@ def _build_right(parent: int | str, ui: UIState) -> None:
             default_value=cfg.perturbation_noise_weight,
             callback=ui.make_callback("perturbation_noise_weight"),
         )
-        labeled_combo(
-            "Timestep Distribution", enum_values(TimestepDistribution),
-            tag="timestep_distribution",
-            default_value=_enum_default(cfg, "timestep_distribution"),
-            callback=ui.make_callback("timestep_distribution"),
-        )
+        with dpg.group(horizontal=True):
+            lbl = dpg.add_text("Timestep Distribution", wrap=LABEL_WIDTH)
+            tooltip(lbl, "Timestep sampling function")
+            dpg.add_combo(
+                items=enum_values(TimestepDistribution),
+                tag="timestep_distribution",
+                default_value=_enum_default(cfg, "timestep_distribution"),
+                callback=ui.make_callback("timestep_distribution"),
+                width=INPUT_WIDTH - scaled(44),
+            )
+            ts_btn = dpg.add_button(
+                label="...",
+                width=scaled(34),
+                callback=lambda _s, _a, _u: _open_timestep_window(ui),
+            )
+            tooltip(ts_btn, "Open timestep distribution advanced settings")
         labeled_float(
             "Min Noising Strength",
             tag="min_noising_strength",
