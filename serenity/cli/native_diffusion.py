@@ -17,6 +17,7 @@ import inspect
 import os
 import random
 import time
+from collections import deque
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -98,6 +99,7 @@ from serenity.training.ema import EMAMode, EMAModel
 
 import torch
 from torch.nn.parallel import DistributedDataParallel
+from tqdm.auto import tqdm
 
 _SD15_TYPES = {
     "sd15",
@@ -296,6 +298,76 @@ def _format_eta(seconds: float) -> str:
     if hours > 0:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (float, int)):
+        return float(value)
+    if torch.is_tensor(value):
+        if value.numel() == 0:
+            return None
+        with suppress(Exception):
+            return float(value.detach().float().cpu().item())
+        return None
+    with suppress(Exception):
+        return float(value)
+    return None
+
+
+def _resolve_progress_desc(config: dict[str, Any], default: str) -> str:
+    candidates = (
+        config.get("tracker_run_name"),
+        config.get("run_name"),
+        config.get("job_name"),
+        config.get("name"),
+        Path(str(config.get("output_dir", "") or "")).name,
+    )
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return default
+
+
+def _create_train_progress(
+    config: dict[str, Any],
+    *,
+    start_step: int,
+    max_steps: int,
+    default_desc: str,
+) -> tqdm | None:
+    if not _as_bool(config.get("progress_bar"), True):
+        return None
+    desc = _resolve_progress_desc(config, default_desc)
+    initial_step = max(0, min(max_steps, int(start_step) - 1))
+    return tqdm(total=max_steps, initial=initial_step, desc=desc, dynamic_ncols=True, leave=True)
+
+
+def _progress_write(progress: tqdm | None, message: str) -> None:
+    if progress is not None:
+        progress.write(message)
+        return
+    print(message)
+
+
+def _current_vram_mb(device: torch.device | None = None) -> tuple[float, float] | None:
+    if not torch.cuda.is_available():
+        return None
+    device_index: int | None = None
+    if device is not None and device.type == "cuda":
+        device_index = int(device.index) if device.index is not None else None
+    if device_index is None:
+        with suppress(Exception):
+            device_index = int(torch.cuda.current_device())
+    if device_index is None:
+        return None
+    with suppress(Exception):
+        allocated_mb = float(torch.cuda.memory_allocated(device_index) / 1024**2)
+        reserved_mb = float(torch.cuda.memory_reserved(device_index) / 1024**2)
+        return allocated_mb, reserved_mb
+    return None
 
 
 def _maybe_wrap_distributed_module(
@@ -852,10 +924,12 @@ def _setup_memory_strategy(
                 train_module.enable_gradient_checkpointing()
                 print("[native/diffusion] enabled gradient checkpointing before Stagehand setup")
 
+        stagehand_source_suffixes = (".safetensors", ".fpk", ".slab")
         stagehand_checkpoint_path = (
-            checkpoint_path
+            stagehand_block.get("source_path")
             or stagehand_block.get("checkpoint_path")
             or config.get("stagehand_checkpoint_path")
+            or checkpoint_path
             or config.get("model_path")
         )
         file_backed_default = family == "wan"
@@ -866,7 +940,7 @@ def _setup_memory_strategy(
             ),
             file_backed_default,
         )
-        if stagehand_checkpoint_path and not str(stagehand_checkpoint_path).lower().endswith(".safetensors"):
+        if stagehand_checkpoint_path and not str(stagehand_checkpoint_path).lower().endswith(stagehand_source_suffixes):
             file_backed_weights = False
 
         stagehand_config = StagehandStrategyConfig(
@@ -1245,6 +1319,18 @@ def _run_sd15_vae_finetune(
 
     optimizer.zero_grad(set_to_none=True)
     autocast_enabled = train_device.type == "cuda" and train_dtype in {torch.bfloat16, torch.float16}
+    log_every_steps = max(1, int(config.get("log_every_steps", 1) or 1))
+    loss_window = deque(maxlen=max(1, int(config.get("loss_avg_window", 20) or 20)))
+    train_start_time = time.perf_counter()
+    last_log_time = train_start_time
+    last_log_step = max(start_step - 1, 0)
+    last_grad_norm: float | None = None
+    progress = _create_train_progress(
+        config,
+        start_step=start_step,
+        max_steps=max_steps,
+        default_desc="native_vae",
+    )
 
     for step in range(start_step, max_steps + 1):
         selected = random.choices(pairs, k=max(1, batch_size))
@@ -1266,7 +1352,8 @@ def _run_sd15_vae_finetune(
         should_step = (step % max(grad_accum, 1) == 0) or (step == max_steps)
         if should_step:
             if max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+                last_grad_norm = _to_float(grad_norm)
             optimizer.step()
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -1274,14 +1361,63 @@ def _run_sd15_vae_finetune(
                 ema_model.update()
             optimizer.zero_grad(set_to_none=True)
 
-        if step == start_step or step % 10 == 0 or step == max_steps:
-            print(f"[native/diffusion/vae] step {step}/{max_steps} loss={float(loss.detach().cpu()):.6f}")
+        if progress is not None:
+            progress.update(1)
+
+        loss_value = float(loss.detach().cpu())
+        loss_window.append(loss_value)
+        should_log = step == start_step or step % log_every_steps == 0 or step == max_steps
+        if should_log:
+            now = time.perf_counter()
+            steps_since_log = max(step - last_log_step, 1)
+            elapsed_since_log = max(now - last_log_time, 1e-6)
+            steps_per_second = steps_since_log / elapsed_since_log
+            sec_per_step = 1.0 / max(steps_per_second, 1e-6)
+            steps_remaining = max(max_steps - step, 0)
+            elapsed_total = max(now - train_start_time, 1e-6)
+            steps_done = max(step - start_step + 1, 1)
+            avg_steps_per_second = steps_done / elapsed_total
+            eta = _format_eta(float(steps_remaining) / max(avg_steps_per_second, 1e-6))
+            elapsed = _format_eta(elapsed_total)
+            avg_loss = sum(loss_window) / max(len(loss_window), 1)
+            current_lr = (
+                float(optimizer.param_groups[0].get("lr", learning_rate))
+                if getattr(optimizer, "param_groups", None)
+                else float(learning_rate)
+            )
+            grad_norm_text = f"{last_grad_norm:.3f}" if last_grad_norm is not None else "n/a"
+            vram_stats = _current_vram_mb(train_device)
+            vram_text = (
+                f"{vram_stats[0] / 1024.0:.2f}/{vram_stats[1] / 1024.0:.2f}G"
+                if vram_stats is not None
+                else "n/a"
+            )
+            if progress is not None:
+                postfix = {
+                    "loss": f"{loss_value:.6f}",
+                    "avg_loss": f"{avg_loss:.6f}",
+                    "lr": f"{current_lr:.2e}",
+                    "s/it": f"{sec_per_step:.2f}",
+                    "eta": eta,
+                    "vram": vram_text,
+                    "gn": grad_norm_text,
+                }
+                progress.set_postfix(postfix, refresh=True)
+            else:
+                print(
+                    f"[native/diffusion/vae] step {step}/{max_steps} "
+                    f"loss={loss_value:.6f} avg_loss={avg_loss:.6f} "
+                    f"lr={current_lr:.2e} speed={steps_per_second:.2f} step/s ({sec_per_step:.2f}s/step) "
+                    f"elapsed={elapsed} eta={eta} vram={vram_text} grad_norm={grad_norm_text}"
+                )
+            last_log_time = now
+            last_log_step = step
 
         checkpoint_path: Path | None = None
         if save_every > 0 and step % save_every == 0:
             checkpoint_path = output_dir / f"vae_step_{step:06d}.safetensors"
             saved_path = _save_module_state(vae, checkpoint_path, save_dtype=save_dtype)
-            print(f"[native/diffusion/vae] saved VAE checkpoint to {saved_path}")
+            _progress_write(progress, f"[native/diffusion/vae] saved VAE checkpoint to {saved_path}")
             state_path = output_dir / f"state_step_{step:06d}.pt"
             _save_training_state(
                 state_path,
@@ -1291,6 +1427,9 @@ def _run_sd15_vae_finetune(
                 lr_scheduler=lr_scheduler,
                 ema_model=ema_model,
             )
+
+    if progress is not None:
+        progress.close()
 
     final_path = output_dir / "vae_last.safetensors"
     saved_path = _save_module_state(vae, final_path, save_dtype=save_dtype)
@@ -1481,6 +1620,40 @@ def _run_wan_dual_stage_training(
         file_backed_weights=stagehand_file_backed,
         checkpoint_path=None,
     )
+    stagehand_source_suffixes = (".safetensors", ".fpk", ".slab")
+
+    def _resolve_stagehand_source_path(stage_name: str, model_path: str) -> str:
+        """Resolve stage-specific file-backed source path.
+
+        Falls back to the stage's model_path when no explicit source is provided.
+        """
+        direct = (
+            stagehand_block.get(f"{stage_name}_source_path")
+            or stagehand_block.get(f"{stage_name}_checkpoint_path")
+        )
+        if direct:
+            return str(direct)
+
+        source_paths = stagehand_block.get("source_paths")
+        if isinstance(source_paths, dict):
+            by_stage = source_paths.get(stage_name)
+            if by_stage:
+                return str(by_stage)
+
+        checkpoint_paths = stagehand_block.get("checkpoint_paths")
+        if isinstance(checkpoint_paths, dict):
+            by_stage = checkpoint_paths.get(stage_name)
+            if by_stage:
+                return str(by_stage)
+
+        shared = (
+            stagehand_block.get("source_path")
+            or stagehand_block.get("checkpoint_path")
+            or config.get("stagehand_checkpoint_path")
+        )
+        if shared:
+            return str(shared)
+        return str(model_path)
 
     # --- Helper: set up one stage ---
     def _setup_stage(
@@ -1539,9 +1712,14 @@ def _run_wan_dual_stage_training(
         adapter.inject(transformer)
 
         # Set up Stagehand
+        stage_source_path = _resolve_stagehand_source_path(stage_name, model_path)
+        stage_file_backed = stagehand_cfg.file_backed_weights
+        if stage_source_path and not str(stage_source_path).lower().endswith(stagehand_source_suffixes):
+            stage_file_backed = False
         stage_cfg = replace(
             stagehand_cfg,
-            checkpoint_path=model_path,
+            file_backed_weights=stage_file_backed,
+            checkpoint_path=stage_source_path,
         )
         strategy = StagehandStrategy(stage_cfg)
         if existing_pool is not None:
@@ -1683,9 +1861,18 @@ def _run_wan_dual_stage_training(
         checkpoint_block.get("save_every") or config.get("save_every") or config.get("save_every_n_steps") or 0
     )
     autocast_enabled = train_device.type == "cuda" and train_dtype in {torch.bfloat16, torch.float16}
-    log_every_steps = max(1, int(config.get("log_every_steps", 5) or 5))
-    last_log_time = time.perf_counter()
+    log_every_steps = max(1, int(config.get("log_every_steps", 1) or 1))
+    loss_window = deque(maxlen=max(1, int(config.get("loss_avg_window", 20) or 20)))
+    train_start_time = time.perf_counter()
+    last_log_time = train_start_time
     last_log_step = max(start_step - 1, 0)
+    last_grad_norm: float | None = None
+    progress = _create_train_progress(
+        config,
+        start_step=start_step,
+        max_steps=max_steps,
+        default_desc="wan_dual_stage",
+    )
 
     print(
         f"[native/diffusion/dual] training loop start step={start_step}/{max_steps} "
@@ -1701,8 +1888,9 @@ def _run_wan_dual_stage_training(
             next_cfg = stage_config[next_stage]
             next_dir = high_output_dir if next_stage == "high" else low_output_dir
 
-            print(
-                f"\n[native/diffusion/dual] === SWAPPING {cur_stage} → {next_stage} at step {step} ==="
+            _progress_write(
+                progress,
+                f"[native/diffusion/dual] === SWAPPING {cur_stage} → {next_stage} at step {step} ===",
             )
             swap_t0 = time.perf_counter()
 
@@ -1720,22 +1908,26 @@ def _run_wan_dual_stage_training(
 
             # Restore saved weights if this stage was trained before
             if saved_lora_paths[next_stage] is not None:
-                print(f"[native/diffusion/dual] restoring {next_stage} LoRA from {saved_lora_paths[next_stage]}")
+                _progress_write(progress, f"[native/diffusion/dual] restoring {next_stage} LoRA from {saved_lora_paths[next_stage]}")
                 adapter.load(str(saved_lora_paths[next_stage]))
             if saved_opt_paths[next_stage] is not None:
-                print(f"[native/diffusion/dual] restoring {next_stage} optimizer from {saved_opt_paths[next_stage]}")
+                _progress_write(
+                    progress,
+                    f"[native/diffusion/dual] restoring {next_stage} optimizer from {saved_opt_paths[next_stage]}",
+                )
                 try:
                     opt_state = torch.load(str(saved_opt_paths[next_stage]), map_location="cpu", weights_only=False)
                     optimizer.load_state_dict(opt_state)
                 except Exception as exc:
-                    print(f"[native/diffusion/dual] warning: failed to restore optimizer ({exc})")
+                    _progress_write(progress, f"[native/diffusion/dual] warning: failed to restore optimizer ({exc})")
 
             cur_stage = next_stage
             cur_cfg = next_cfg
             cur_dir = next_dir
 
             swap_elapsed = time.perf_counter() - swap_t0
-            print(
+            _progress_write(
+                progress,
                 f"[native/diffusion/dual] swap complete in {swap_elapsed:.1f}s, "
                 f"now training {cur_stage} stage "
                 f"timestep_range=[{cur_cfg['t_min']}, {cur_cfg['t_max']})"
@@ -1766,12 +1958,18 @@ def _run_wan_dual_stage_training(
         should_step = (step % max(grad_accum, 1) == 0) or (step == max_steps)
         if should_step:
             if max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+                last_grad_norm = _to_float(grad_norm)
             optimizer.step()
             if lr_scheduler is not None:
                 lr_scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
+        if progress is not None:
+            progress.update(1)
+
+        loss_value = float(loss.detach().cpu())
+        loss_window.append(loss_value)
         # --- Logging ---
         should_log = step == start_step or step % log_every_steps == 0 or step == max_steps
         if should_log:
@@ -1779,19 +1977,46 @@ def _run_wan_dual_stage_training(
             steps_since_log = max(step - last_log_step, 1)
             elapsed_since_log = max(now - last_log_time, 1e-6)
             steps_per_second = steps_since_log / elapsed_since_log
+            sec_per_step = 1.0 / max(steps_per_second, 1e-6)
             steps_remaining = max(max_steps - step, 0)
-            eta = _format_eta(float(steps_remaining) / max(steps_per_second, 1e-6))
+            elapsed_total = max(now - train_start_time, 1e-6)
+            steps_done = max(step - start_step + 1, 1)
+            avg_steps_per_second = steps_done / elapsed_total
+            eta = _format_eta(float(steps_remaining) / max(avg_steps_per_second, 1e-6))
+            elapsed = _format_eta(elapsed_total)
+            avg_loss = sum(loss_window) / max(len(loss_window), 1)
             current_lr = (
                 float(optimizer.param_groups[0].get("lr", learning_rate))
                 if getattr(optimizer, "param_groups", None)
                 else float(learning_rate)
             )
-            print(
-                f"[native/diffusion/dual] step {step}/{max_steps} "
-                f"stage={cur_stage} "
-                f"loss={float(loss.detach().cpu()):.6f} "
-                f"lr={current_lr:.2e} speed={steps_per_second:.2f} step/s eta={eta}"
+            grad_norm_text = f"{last_grad_norm:.3f}" if last_grad_norm is not None else "n/a"
+            vram_stats = _current_vram_mb(train_device)
+            vram_text = (
+                f"{vram_stats[0] / 1024.0:.2f}/{vram_stats[1] / 1024.0:.2f}G"
+                if vram_stats is not None
+                else "n/a"
             )
+            if progress is not None:
+                postfix = {
+                    "stage": cur_stage,
+                    "loss": f"{loss_value:.6f}",
+                    "avg_loss": f"{avg_loss:.6f}",
+                    "lr": f"{current_lr:.2e}",
+                    "s/it": f"{sec_per_step:.2f}",
+                    "eta": eta,
+                    "vram": vram_text,
+                    "gn": grad_norm_text,
+                }
+                progress.set_postfix(postfix, refresh=True)
+            else:
+                print(
+                    f"[native/diffusion/dual] step {step}/{max_steps} "
+                    f"stage={cur_stage} "
+                    f"loss={loss_value:.6f} avg_loss={avg_loss:.6f} "
+                    f"lr={current_lr:.2e} speed={steps_per_second:.2f} step/s ({sec_per_step:.2f}s/step) "
+                    f"elapsed={elapsed} eta={eta} vram={vram_text} grad_norm={grad_norm_text}"
+                )
             last_log_time = now
             last_log_step = step
 
@@ -1814,7 +2039,10 @@ def _run_wan_dual_stage_training(
                 high_optimizer_path=saved_opt_paths["high"],
                 low_optimizer_path=saved_opt_paths["low"],
             )
-            print(f"[native/diffusion/dual] checkpoint saved at step {step} (stage={cur_stage})")
+            _progress_write(progress, f"[native/diffusion/dual] checkpoint saved at step {step} (stage={cur_stage})")
+
+    if progress is not None:
+        progress.close()
 
     # --- Final save ---
     # Clean up timestep bounds
@@ -2342,9 +2570,18 @@ def run_native_diffusion_training(
 
     optimizer.zero_grad(set_to_none=True)
     autocast_enabled = train_device.type == "cuda" and train_dtype in {torch.bfloat16, torch.float16}
-    log_every_steps = max(1, int(config.get("log_every_steps", 5) or 5))
-    last_log_time = time.perf_counter()
+    log_every_steps = max(1, int(config.get("log_every_steps", 1) or 1))
+    loss_window = deque(maxlen=max(1, int(config.get("loss_avg_window", 20) or 20)))
+    train_start_time = time.perf_counter()
+    last_log_time = train_start_time
     last_log_step = max(start_step - 1, 0)
+    last_grad_norm: float | None = None
+    progress = _create_train_progress(
+        config,
+        start_step=start_step,
+        max_steps=max_steps,
+        default_desc="native_diffusion",
+    )
     sample_block = config.get("sample", {}) if isinstance(config.get("sample"), dict) else {}
     sample_enabled = _as_bool(sample_block.get("enabled"), False)
     sample_interval = int(sample_block.get("interval", 0) or 0)
@@ -2390,7 +2627,8 @@ def run_native_diffusion_training(
         should_step = (step % max(grad_accum, 1) == 0) or (step == max_steps)
         if should_step:
             if max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+                last_grad_norm = _to_float(grad_norm)
             optimizer.step()
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -2398,24 +2636,55 @@ def run_native_diffusion_training(
                 ema_model.update()
             optimizer.zero_grad(set_to_none=True)
 
+        if progress is not None:
+            progress.update(1)
+
+        loss_value = float(loss.detach().cpu())
+        loss_window.append(loss_value)
         should_log = step == start_step or step % log_every_steps == 0 or step == max_steps
         if should_log:
             now = time.perf_counter()
             steps_since_log = max(step - last_log_step, 1)
             elapsed_since_log = max(now - last_log_time, 1e-6)
             steps_per_second = steps_since_log / elapsed_since_log
+            sec_per_step = 1.0 / max(steps_per_second, 1e-6)
             steps_remaining = max(max_steps - step, 0)
-            eta = _format_eta(float(steps_remaining) / max(steps_per_second, 1e-6))
+            elapsed_total = max(now - train_start_time, 1e-6)
+            steps_done = max(step - start_step + 1, 1)
+            avg_steps_per_second = steps_done / elapsed_total
+            eta = _format_eta(float(steps_remaining) / max(avg_steps_per_second, 1e-6))
+            elapsed = _format_eta(elapsed_total)
+            avg_loss = sum(loss_window) / max(len(loss_window), 1)
             current_lr = (
                 float(optimizer.param_groups[0].get("lr", learning_rate))
                 if getattr(optimizer, "param_groups", None)
                 else float(learning_rate)
             )
-            print(
-                f"[native/diffusion] step {step}/{max_steps} "
-                f"loss={float(loss.detach().cpu()):.6f} "
-                f"lr={current_lr:.2e} speed={steps_per_second:.2f} step/s eta={eta}"
+            grad_norm_text = f"{last_grad_norm:.3f}" if last_grad_norm is not None else "n/a"
+            vram_stats = _current_vram_mb(train_device)
+            vram_text = (
+                f"{vram_stats[0] / 1024.0:.2f}/{vram_stats[1] / 1024.0:.2f}G"
+                if vram_stats is not None
+                else "n/a"
             )
+            if progress is not None:
+                postfix = {
+                    "loss": f"{loss_value:.6f}",
+                    "avg_loss": f"{avg_loss:.6f}",
+                    "lr": f"{current_lr:.2e}",
+                    "s/it": f"{sec_per_step:.2f}",
+                    "eta": eta,
+                    "vram": vram_text,
+                    "gn": grad_norm_text,
+                }
+                progress.set_postfix(postfix, refresh=True)
+            else:
+                print(
+                    f"[native/diffusion] step {step}/{max_steps} "
+                    f"loss={loss_value:.6f} avg_loss={avg_loss:.6f} "
+                    f"lr={current_lr:.2e} speed={steps_per_second:.2f} step/s ({sec_per_step:.2f}s/step) "
+                    f"elapsed={elapsed} eta={eta} vram={vram_text} grad_norm={grad_norm_text}"
+                )
             last_log_time = now
             last_log_step = step
 
@@ -2429,7 +2698,7 @@ def run_native_diffusion_training(
                 stem = "unet" if family in {"sd15", "sdxl"} else "transformer"
                 ckpt_path = output_dir / f"{stem}_step_{step:06d}.safetensors"
                 saved_path = _save_module_state(train_module, ckpt_path, save_dtype=save_dtype)
-                print(f"[native/diffusion] saved full checkpoint to {saved_path}")
+                _progress_write(progress, f"[native/diffusion] saved full checkpoint to {saved_path}")
             if saved_path is not None:
                 state_path = output_dir / f"state_step_{step:06d}.pt"
                 _save_training_state(
@@ -2567,9 +2836,12 @@ def run_native_diffusion_training(
                             torch.cuda.empty_cache()
 
                 if retry_error is not None:
-                    print(f"[native/diffusion] warning: sampling retry failed at step {step}: {retry_error}")
+                    _progress_write(progress, f"[native/diffusion] warning: sampling retry failed at step {step}: {retry_error}")
                 elif not retried:
-                    print(f"[native/diffusion] warning: sampling failed at step {step}: {exc}")
+                    _progress_write(progress, f"[native/diffusion] warning: sampling failed at step {step}: {exc}")
+
+    if progress is not None:
+        progress.close()
 
     _distributed_barrier(distributed_context)
 

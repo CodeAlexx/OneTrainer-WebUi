@@ -13,7 +13,7 @@ import mmap
 import logging
 from pathlib import Path
 import time
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
 from torch import nn
@@ -23,7 +23,7 @@ from serenity.stagehand.residency import BlockState
 if TYPE_CHECKING:
     from serenity.stagehand.config import StagehandConfig
     from serenity.stagehand.pool import PinnedPool, PinnedSlab
-    from serenity.stagehand.registry import BlockEntry, BlockRegistry, FileParamSpec
+    from serenity.stagehand.registry import BlockEntry, BlockRegistry, FileParamSpec, SquareQParamSpec
     from serenity.stagehand.residency import ResidencyEntry, ResidencyMap
     from serenity.stagehand.telemetry import StagehandTelemetry
     from serenity.stagehand.transfer import AsyncTransferEngine, TransferHandle
@@ -217,6 +217,75 @@ def _copy_file_backed_params_into_buffer(
         dst_region.zero_()
 
 
+def _copy_squareq_backed_params_into_buffer(
+    module: nn.Module | None,
+    buffer: torch.Tensor,
+    layout: list[tuple[str, tuple[int, ...], torch.dtype, int, int]],
+    squareq_specs: dict[str, SquareQParamSpec],
+    module_param_names: set[str],
+    squareq_layers: dict[str, Any],
+) -> None:
+    """Populate slab buffer from a SquareQ BP8 slab + mutable module params."""
+    params = dict(module.named_parameters()) if module is not None else {}
+
+    for name, shape, dtype, offset_bytes, numel in layout:
+        elem_size = dtype.itemsize
+        dst_nbytes = numel * elem_size
+        dst_region = buffer[offset_bytes : offset_bytes + dst_nbytes]
+
+        spec = squareq_specs.get(name)
+        if spec is not None:
+            layer = squareq_layers.get(spec.layer_name)
+            if isinstance(layer, dict):
+                if spec.kind == "weight":
+                    qweight = layer.get("qweight")
+                    scale = layer.get("scale")
+                    zero_point = layer.get("zero_point")
+                    if zero_point is None:
+                        zero_point = layer.get("zero")
+                    if (
+                        isinstance(qweight, torch.Tensor)
+                        and isinstance(scale, torch.Tensor)
+                        and isinstance(zero_point, torch.Tensor)
+                    ):
+                        if len(shape) == 0:
+                            dst_region.zero_()
+                            continue
+                        out_dim = int(shape[0])
+                        in_flat = int(numel // max(out_dim, 1))
+                        if out_dim <= 0 or in_flat <= 0:
+                            dst_region.zero_()
+                            continue
+
+                        q2d = qweight.reshape(int(qweight.shape[0]), -1)
+                        q2d = q2d[:out_dim, :in_flat]
+
+                        scale_vec = scale.reshape(-1).to(dtype=torch.float32)[:out_dim]
+                        zero_vec = zero_point.reshape(-1).to(dtype=torch.float32)[:out_dim]
+                        if scale_vec.numel() != out_dim or zero_vec.numel() != out_dim:
+                            dst_region.zero_()
+                            continue
+
+                        dequant = (q2d.to(torch.float32) - zero_vec.unsqueeze(1)) * scale_vec.unsqueeze(1)
+                        dst_region.copy_(dequant.to(dtype=dtype).reshape(shape).view(torch.uint8).reshape(-1))
+                        continue
+                elif spec.kind == "bias":
+                    bias = layer.get("bias")
+                    if isinstance(bias, torch.Tensor):
+                        dst_region.view(dtype).copy_(bias.to(dtype=dtype).reshape(-1))
+                        continue
+                    dst_region.zero_()
+                    continue
+
+        if name in module_param_names and name in params:
+            param = params[name]
+            dst_region.view(dtype).copy_(param.data.to(dtype).reshape(-1))
+            continue
+
+        # Fallback for missing params: zero fill to keep layout deterministic.
+        dst_region.zero_()
+
+
 def _restore_params_from_tensor(
     module: nn.Module,
     flat_tensor: torch.Tensor,
@@ -335,6 +404,8 @@ class StagehandScheduler:
         self._pending_handles: dict[str, TransferHandle] = {}
         # Opened safetensors mmaps keyed by absolute path.
         self._file_maps: dict[str, tuple[object, mmap.mmap, memoryview]] = {}
+        # Loaded SquareQ slab layer dictionaries keyed by absolute path.
+        self._squareq_layers: dict[str, dict[str, Any]] = {}
 
     # ── step lifecycle ────────────────────────────────────────────────
 
@@ -389,6 +460,34 @@ class StagehandScheduler:
         self._file_maps[key] = (handle, mm, view)
         return view
 
+    def _get_squareq_layers(self, source_path: str) -> dict[str, Any]:
+        key = str(Path(source_path).expanduser())
+        cached = self._squareq_layers.get(key)
+        if cached is not None:
+            return cached
+
+        payload = None
+        for kwargs in (
+            {"weights_only": True, "mmap": True},
+            {"weights_only": True},
+        ):
+            try:
+                payload = torch.load(key, map_location="cpu", **kwargs)
+                break
+            except TypeError:
+                continue
+        if payload is None:
+            payload = torch.load(key, map_location="cpu")
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid SquareQ slab payload at {key}")
+        layers = payload.get("layers")
+        if not isinstance(layers, dict):
+            raise ValueError(f"SquareQ slab missing 'layers' map at {key}")
+
+        self._squareq_layers[key] = layers
+        return layers
+
     def close(self) -> None:
         """Release open file-backed mmap resources."""
         for handle, mm, view in self._file_maps.values():
@@ -405,6 +504,7 @@ class StagehandScheduler:
             except Exception:
                 pass
         self._file_maps.clear()
+        self._squareq_layers.clear()
 
     # ── per-block hooks ───────────────────────────────────────────────
 
@@ -562,7 +662,22 @@ class StagehandScheduler:
         # Resolve the module from the weak reference.
         module = block_entry.module_ref()
         if module is not None:
-            if block_entry.file_backed:
+            if block_entry.squareq_backed:
+                layout = list(block_entry.param_layout)
+                res_entry.param_layout = layout
+                if not isinstance(slab, list):
+                    squareq_specs = {spec.param_name: spec for spec in block_entry.squareq_param_specs}
+                    module_param_names = set(block_entry.module_param_names)
+                    squareq_layers = self._get_squareq_layers(str(block_entry.source_path))
+                    _copy_squareq_backed_params_into_buffer(
+                        module=module,
+                        buffer=slab.buffer,
+                        layout=layout,
+                        squareq_specs=squareq_specs,
+                        module_param_names=module_param_names,
+                        squareq_layers=squareq_layers,
+                    )
+            elif block_entry.file_backed:
                 layout = list(block_entry.param_layout)
                 res_entry.param_layout = layout
                 if not isinstance(slab, list):

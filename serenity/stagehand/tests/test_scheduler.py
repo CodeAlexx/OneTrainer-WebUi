@@ -1,6 +1,7 @@
 """Phase 4 acceptance tests — StaticLookaheadPolicy + StagehandScheduler."""
 from __future__ import annotations
 
+from pathlib import Path
 import weakref
 from dataclasses import dataclass, field
 from unittest.mock import MagicMock
@@ -284,6 +285,90 @@ class TestSchedulerPrefetch:
         )
 
         scheduler.end_step()
+
+
+class TestSchedulerSquareQ:
+    def test_stage_block_to_host_dequantizes_squareq_weights(self, tmp_path: Path) -> None:
+        model = nn.Module()
+        model.add_module("block_0", nn.Linear(8, 8, bias=True))
+        for param in model.parameters():
+            param.requires_grad_(False)
+
+        registry = BlockRegistry()
+        registry.build_from_model(
+            model, block_pattern=r"block_\d+", group="test", dtype=torch.float32
+        )
+        registry.validate(pool_capacity_bytes=10 * 1024 * 1024)
+
+        qweight = (torch.arange(64, dtype=torch.int8).reshape(8, 8) - 32).contiguous()
+        bias = torch.arange(8, dtype=torch.float32).contiguous()
+        squareq_path = tmp_path / "tiny_squareq.fpk"
+        torch.save(
+            {
+                "manifest": {
+                    "model_name": "tiny",
+                    "quant_version": "test",
+                    "layout": "rowwise_sym_int8",
+                    "pack_k": 1,
+                    "layers": [
+                        {
+                            "name": "block_0",
+                            "out": 8,
+                            "inp": 8,
+                            "padded_in": 8,
+                            "has_bias": True,
+                        }
+                    ],
+                },
+                "layers": {
+                    "block_0": {
+                        "qweight": qweight,
+                        "scale": torch.ones(8, dtype=torch.float32),
+                        "zero_point": torch.zeros(8, dtype=torch.float32),
+                        "bias": bias,
+                    }
+                },
+            },
+            squareq_path,
+        )
+        converted = registry.convert_to_file_backed(str(squareq_path))
+        assert converted == 2
+        entry = registry.get("block_0")
+        assert entry.squareq_backed
+
+        residency = ResidencyMap(registry)
+        pool = MockPinnedPool(slab_bytes=32 * 1024)
+        engine = AsyncTransferEngine(pool=pool, max_inflight=2)
+        budget = MockBudget(above=False)
+        policy = StaticLookaheadPolicy(prefetch_window=0, eviction_cooldown_steps=0)
+        telemetry = StagehandTelemetry(enabled=False)
+        scheduler = StagehandScheduler(
+            registry=registry,
+            residency=residency,
+            transfer_engine=engine,
+            budget=budget,
+            policy=policy,
+            guards=None,
+            telemetry=telemetry,
+            config=StagehandConfig(),
+        )
+
+        res_entry = residency.get_entry("block_0")
+        slab = scheduler._stage_block_to_host(entry, res_entry)
+        assert res_entry.param_layout is not None
+
+        params = {name: (shape, dtype, offset, numel) for name, shape, dtype, offset, numel in res_entry.param_layout}
+        w_shape, w_dtype, w_offset, w_numel = params["weight"]
+        w_bytes = slab.buffer[w_offset : w_offset + (w_numel * w_dtype.itemsize)]
+        restored_weight = w_bytes.view(w_dtype).reshape(w_shape)
+        assert torch.allclose(restored_weight, qweight.to(dtype=w_dtype))
+
+        b_shape, b_dtype, b_offset, b_numel = params["bias"]
+        b_bytes = slab.buffer[b_offset : b_offset + (b_numel * b_dtype.itemsize)]
+        restored_bias = b_bytes.view(b_dtype).reshape(b_shape)
+        assert torch.allclose(restored_bias, bias.to(dtype=b_dtype))
+
+        scheduler.close()
 
 
 class TestSchedulerStall:

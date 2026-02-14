@@ -31,6 +31,7 @@ __all__ = [
     "BlockEntry",
     "BlockRegistry",
     "FileParamSpec",
+    "SquareQParamSpec",
     "ParamLayoutEntry",
 ]
 
@@ -47,6 +48,18 @@ class FileParamSpec:
     source_nbytes: int
     source_dtype: torch.dtype
     source_shape: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class SquareQParamSpec:
+    """Descriptor for a parameter sourced from a SquareQ BP8 slab."""
+
+    param_name: str
+    layer_name: str
+    kind: str  # "weight" or "bias"
+    out_features: int
+    in_features: int
+    padded_in_features: int
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -82,13 +95,21 @@ class BlockEntry:
     quant_meta_bytes: int = 0
     # File-backed mode metadata. Empty for module-backed blocks.
     source_path: str | None = None
+    source_format: str | None = None
     param_layout: tuple[ParamLayoutEntry, ...] = field(default_factory=tuple)
     file_param_specs: tuple[FileParamSpec, ...] = field(default_factory=tuple)
+    squareq_param_specs: tuple[SquareQParamSpec, ...] = field(default_factory=tuple)
     module_param_names: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def file_backed(self) -> bool:
-        return self.source_path is not None and len(self.file_param_specs) > 0
+        return self.source_path is not None and (
+            len(self.file_param_specs) > 0 or len(self.squareq_param_specs) > 0
+        )
+
+    @property
+    def squareq_backed(self) -> bool:
+        return self.source_format == "squareq_bp8" and len(self.squareq_param_specs) > 0
 
 
 # ── registry ─────────────────────────────────────────────────────────────
@@ -232,6 +253,70 @@ class BlockRegistry:
 
         return tuple(f"{block_id}.{name}" for name in names)
 
+    @staticmethod
+    def _candidate_squareq_layer_keys(block_id: str, param_name: str) -> tuple[str, ...]:
+        """Return likely SquareQ layer names for a module parameter."""
+        base_name = param_name
+        if base_name.endswith(".weight"):
+            base_name = base_name[:-7]
+        elif base_name.endswith(".bias"):
+            base_name = base_name[:-5]
+        elif base_name in {"weight", "bias"}:
+            base_name = ""
+        if not base_name:
+            return (block_id,)
+        return BlockRegistry._candidate_tensor_keys(block_id, base_name)
+
+    @staticmethod
+    def _load_squareq_manifest(
+        squareq_path: Path,
+    ) -> dict[str, tuple[int, int, int, bool]]:
+        """Load SquareQ slab manifest metadata.
+
+        Returns a mapping:
+            layer_name -> (out_features, in_features, padded_in_features, has_bias)
+        """
+        payload = None
+        for kwargs in (
+            {"weights_only": True, "mmap": True},
+            {"weights_only": True},
+        ):
+            try:
+                payload = torch.load(squareq_path, map_location="cpu", **kwargs)
+                break
+            except TypeError:
+                continue
+
+        if payload is None:
+            payload = torch.load(squareq_path, map_location="cpu")
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid SquareQ slab payload in {squareq_path}")
+        manifest = payload.get("manifest")
+        if not isinstance(manifest, dict):
+            raise ValueError(f"SquareQ slab missing manifest in {squareq_path}")
+
+        layers = manifest.get("layers")
+        if not isinstance(layers, list):
+            raise ValueError(f"SquareQ manifest missing layers list in {squareq_path}")
+
+        result: dict[str, tuple[int, int, int, bool]] = {}
+        for layer in layers:
+            if not isinstance(layer, dict):
+                continue
+            name = layer.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            out_features = int(layer.get("out", 0))
+            in_features = int(layer.get("inp", 0))
+            padded_in = int(layer.get("padded_in", in_features))
+            has_bias = bool(layer.get("has_bias", False))
+            if out_features <= 0 or in_features <= 0:
+                continue
+            result[name] = (out_features, in_features, padded_in, has_bias)
+
+        return result
+
     # ── construction ─────────────────────────────────────────────────
 
     def build_from_model(
@@ -302,7 +387,7 @@ class BlockRegistry:
 
     def convert_to_file_backed(
         self,
-        safetensors_path: str | Path,
+        source_path: str | Path,
         *,
         drop_module_tensors: bool = True,
     ) -> int:
@@ -319,9 +404,12 @@ class BlockRegistry:
         if not self._frozen:
             raise RuntimeError("convert_to_file_backed requires a validated (frozen) registry")
 
-        path = Path(safetensors_path).expanduser()
+        path = Path(source_path).expanduser()
         if not path.exists():
-            raise FileNotFoundError(f"safetensors file not found: {path}")
+            raise FileNotFoundError(f"file-backed source not found: {path}")
+
+        if path.suffix.lower() in {".fpk", ".slab"}:
+            return self.convert_to_squareq_backed(path, drop_module_tensors=drop_module_tensors)
 
         tensor_index = self._parse_safetensors_index(path)
         converted_params = 0
@@ -384,8 +472,126 @@ class BlockRegistry:
                 new_entry = replace(
                     entry,
                     source_path=str(path),
+                    source_format="safetensors",
                     param_layout=tuple(layout),
                     file_param_specs=tuple(file_specs),
+                    squareq_param_specs=tuple(),
+                    module_param_names=tuple(module_param_names),
+                )
+                new_entries[block_id] = new_entry
+            else:
+                new_entries[block_id] = entry
+
+        self._entries = new_entries
+        return converted_params
+
+    def convert_to_squareq_backed(
+        self,
+        squareq_path: str | Path,
+        *,
+        drop_module_tensors: bool = True,
+    ) -> int:
+        """Convert eligible block params to SquareQ BP8-backed descriptors."""
+        if not self._frozen:
+            raise RuntimeError("convert_to_squareq_backed requires a validated (frozen) registry")
+
+        path = Path(squareq_path).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"SquareQ slab file not found: {path}")
+
+        layer_meta = self._load_squareq_manifest(path)
+        converted_params = 0
+        new_entries: OrderedDict[str, BlockEntry] = OrderedDict()
+
+        for block_id, entry in self._entries.items():
+            module = entry.module_ref()
+            if module is None:
+                new_entries[block_id] = entry
+                continue
+
+            layout: list[ParamLayoutEntry] = []
+            squareq_specs: list[SquareQParamSpec] = []
+            module_param_names: list[str] = []
+            offset = 0
+
+            for param_name, param in module.named_parameters():
+                shape = tuple(int(dim) for dim in param.shape)
+                numel = int(param.numel())
+                nbytes = numel * entry.dtype.itemsize
+                layout.append((param_name, shape, entry.dtype, offset, numel))
+                offset += nbytes
+
+                if param.requires_grad:
+                    module_param_names.append(param_name)
+                    continue
+
+                kind: str | None = None
+                if param_name.endswith(".weight") or param_name == "weight":
+                    kind = "weight"
+                elif param_name.endswith(".bias") or param_name == "bias":
+                    kind = "bias"
+                if kind is None:
+                    module_param_names.append(param_name)
+                    continue
+
+                matched_layer: str | None = None
+                matched_meta: tuple[int, int, int, bool] | None = None
+                for layer_name in self._candidate_squareq_layer_keys(block_id, param_name):
+                    meta = layer_meta.get(layer_name)
+                    if meta is not None:
+                        matched_layer = layer_name
+                        matched_meta = meta
+                        break
+                if matched_layer is None or matched_meta is None:
+                    module_param_names.append(param_name)
+                    continue
+
+                out_features, in_features, padded_in_features, has_bias = matched_meta
+                if kind == "weight":
+                    if len(shape) == 0:
+                        module_param_names.append(param_name)
+                        continue
+                    out_dim = int(shape[0])
+                    in_flat = int(numel // max(out_dim, 1))
+                    if (
+                        out_dim != out_features
+                        or in_flat != in_features
+                        or out_dim <= 0
+                        or in_flat <= 0
+                    ):
+                        module_param_names.append(param_name)
+                        continue
+                else:
+                    if not has_bias or numel != out_features:
+                        module_param_names.append(param_name)
+                        continue
+
+                squareq_specs.append(
+                    SquareQParamSpec(
+                        param_name=param_name,
+                        layer_name=matched_layer,
+                        kind=kind,
+                        out_features=out_features,
+                        in_features=in_features,
+                        padded_in_features=padded_in_features,
+                    )
+                )
+                converted_params += 1
+
+                if drop_module_tensors:
+                    with torch.no_grad():
+                        param.data = torch.empty(0, dtype=param.dtype, device="cpu")
+                        if param.grad is not None:
+                            param.grad = None
+
+            if squareq_specs:
+                new_entry = replace(
+                    entry,
+                    source_path=str(path),
+                    source_format="squareq_bp8",
+                    param_layout=tuple(layout),
+                    file_param_specs=tuple(),
+                    squareq_param_specs=tuple(squareq_specs),
                     module_param_names=tuple(module_param_names),
                 )
                 new_entries[block_id] = new_entry

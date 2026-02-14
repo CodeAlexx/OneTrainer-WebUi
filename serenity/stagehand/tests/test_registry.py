@@ -194,6 +194,57 @@ class TestBlockRegistry:
         assert block0 is not None
         assert block0.to_q.orig.weight.numel() == 0
 
+    def test_convert_to_file_backed_accepts_squareq_slab(self, tmp_path: Path) -> None:
+        """SquareQ slab sources should convert frozen params to file-backed specs."""
+        squareq_path = tmp_path / "tiny_squareq.fpk"
+        payload = {
+            "manifest": {
+                "model_name": "tiny",
+                "quant_version": "test",
+                "layout": "rowwise_sym_int8",
+                "pack_k": 1,
+                "layers": [
+                    {
+                        "name": "block.0",
+                        "out": 8,
+                        "inp": 8,
+                        "padded_in": 8,
+                        "has_bias": True,
+                    }
+                ],
+            },
+            "layers": {
+                "block.0": {
+                    "qweight": torch.randint(-127, 128, (8, 8), dtype=torch.int8),
+                    "scale": torch.ones(8, dtype=torch.float32),
+                    "zero_point": torch.zeros(8, dtype=torch.float32),
+                    "bias": torch.zeros(8, dtype=torch.float32),
+                }
+            },
+        }
+        torch.save(payload, squareq_path)
+
+        model = _make_mock_model(num_blocks=1, in_features=8, out_features=8).cpu()
+        for param in model.parameters():
+            param.requires_grad_(False)
+        reg = BlockRegistry()
+        reg.build_from_model(model, block_pattern=r"^block\.\d+$", group="wan", dtype=torch.float32)
+        reg.validate(pool_capacity_bytes=1024 * 1024 * 1024)
+
+        converted = reg.convert_to_file_backed(str(squareq_path))
+        assert converted == 2  # weight + bias
+
+        entry = reg.get("block.0")
+        assert entry.file_backed
+        assert entry.squareq_backed
+        assert entry.source_format == "squareq_bp8"
+        assert len(entry.squareq_param_specs) == 2
+
+        block = entry.module_ref()
+        assert block is not None
+        assert block.weight.numel() == 0
+        assert block.bias is not None and block.bias.numel() == 0
+
     def test_candidate_tensor_keys_maps_wan_aliases(self) -> None:
         """WAN module names normalize to checkpoint key naming."""
         keys = BlockRegistry._candidate_tensor_keys("blocks.0", "attn1.to_q.orig.weight")

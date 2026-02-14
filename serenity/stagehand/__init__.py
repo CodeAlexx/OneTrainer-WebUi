@@ -23,7 +23,7 @@ from serenity.stagehand.errors import (
 )
 from serenity.stagehand.guards import NumericGuard
 from serenity.stagehand.pool import PinnedPool, PinnedSlab
-from serenity.stagehand.registry import BlockEntry, BlockRegistry
+from serenity.stagehand.registry import BlockEntry, BlockRegistry, SquareQParamSpec
 from serenity.stagehand.residency import BlockState, ResidencyEntry, ResidencyMap
 from serenity.stagehand.scheduler import StaticLookaheadPolicy, StagehandScheduler
 from serenity.stagehand.telemetry import StagehandTelemetry, StepMetrics
@@ -44,6 +44,7 @@ __all__ = [
     # registry
     "BlockEntry",
     "BlockRegistry",
+    "SquareQParamSpec",
     # residency
     "BlockState",
     "ResidencyEntry",
@@ -195,14 +196,14 @@ class StagehandRuntime:
         )
         self._scheduler.end_step()
 
-    def convert_registry_to_file_backed(self, safetensors_path: str) -> int:
-        """Convert registered blocks to file-backed mode from *safetensors_path*."""
-        converted = self._registry.convert_to_file_backed(safetensors_path)
+    def convert_registry_to_file_backed(self, source_path: str) -> int:
+        """Convert registered blocks to file-backed mode from *source_path*."""
+        converted = self._registry.convert_to_file_backed(source_path)
         self._scheduler.refresh_registry_snapshot()
         log.info(
             "StagehandRuntime: converted %d params to file-backed source (%s)",
             converted,
-            safetensors_path,
+            source_path,
         )
         return converted
 
