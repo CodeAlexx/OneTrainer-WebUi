@@ -40,6 +40,18 @@ MODEL_ALIASES: dict[str, str] = {
     "flux_fill": "flux_fill_dev",
     "hidream": "hi_dream_full",
     "chroma": "chroma_1",
+    "wan21": "wan",
+    "wan22": "wan",
+    "wan_2_1": "wan",
+    "wan_2_2": "wan",
+    "wan22_14b": "wan",
+    "wan22_t2v_high": "wan",
+    "wan22_t2v_low": "wan",
+    "wan22_i2v_high": "wan",
+    "wan22_i2v_low": "wan",
+    "wan22_high": "wan",
+    "wan22_low": "wan",
+    "wan21_vace": "wan",
 }
 
 

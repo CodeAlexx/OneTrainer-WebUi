@@ -9,7 +9,9 @@ implementation — prefetch a fixed window ahead and evict by distance * size.
 """
 from __future__ import annotations
 
+import mmap
 import logging
+from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Protocol
 
@@ -21,7 +23,7 @@ from serenity.stagehand.residency import BlockState
 if TYPE_CHECKING:
     from serenity.stagehand.config import StagehandConfig
     from serenity.stagehand.pool import PinnedPool, PinnedSlab
-    from serenity.stagehand.registry import BlockEntry, BlockRegistry
+    from serenity.stagehand.registry import BlockEntry, BlockRegistry, FileParamSpec
     from serenity.stagehand.residency import ResidencyEntry, ResidencyMap
     from serenity.stagehand.telemetry import StagehandTelemetry
     from serenity.stagehand.transfer import AsyncTransferEngine, TransferHandle
@@ -174,6 +176,47 @@ def _flatten_params_into_buffer(
         region.copy_(param.data.to(dtype).reshape(-1))
 
 
+def _copy_file_backed_params_into_buffer(
+    module: nn.Module | None,
+    buffer: torch.Tensor,
+    layout: list[tuple[str, tuple[int, ...], torch.dtype, int, int]],
+    file_specs: dict[str, FileParamSpec],
+    module_param_names: set[str],
+    file_view: memoryview,
+) -> None:
+    """Populate slab buffer from a hybrid file/module parameter source."""
+    params = dict(module.named_parameters()) if module is not None else {}
+
+    for name, shape, dtype, offset_bytes, numel in layout:
+        elem_size = dtype.itemsize
+        dst_nbytes = numel * elem_size
+        dst_region = buffer[offset_bytes : offset_bytes + dst_nbytes]
+
+        spec = file_specs.get(name)
+        if spec is not None:
+            src_begin = int(spec.file_offset)
+            src_end = src_begin + int(spec.source_nbytes)
+            src_view = file_view[src_begin:src_end]
+            if spec.source_dtype == dtype:
+                src_bytes = torch.frombuffer(src_view, dtype=torch.uint8)
+                dst_region.copy_(src_bytes)
+            else:
+                # Source dtype differs from runtime block dtype (e.g. F16 file
+                # with BF16 runtime). Decode + cast per parameter.
+                src_typed = torch.frombuffer(src_view, dtype=spec.source_dtype).reshape(spec.source_shape)
+                cast = src_typed.to(dtype=dtype)
+                dst_region.copy_(cast.view(torch.uint8).reshape(-1))
+            continue
+
+        if name in module_param_names and name in params:
+            param = params[name]
+            dst_region.view(dtype).copy_(param.data.to(dtype).reshape(-1))
+            continue
+
+        # Fallback for missing params: zero fill to keep layout deterministic.
+        dst_region.zero_()
+
+
 def _restore_params_from_tensor(
     module: nn.Module,
     flat_tensor: torch.Tensor,
@@ -193,6 +236,15 @@ def _restore_params_from_tensor(
         view = flat_tensor[offset_bytes : offset_bytes + nbytes].view(dtype).reshape(shape)
         # Navigate to the parameter and replace its .data.
         _set_param_data(module, name, view)
+
+
+def _get_param_data(module: nn.Module, dotted_name: str) -> torch.Tensor:
+    """Return ``module.<dotted_name>.data`` following dot-separated path."""
+    parts = dotted_name.split(".")
+    current = module
+    for part in parts[:-1]:
+        current = getattr(current, part)
+    return getattr(current, parts[-1]).data
 
 
 def _set_param_data(module: nn.Module, dotted_name: str, data: torch.Tensor) -> None:
@@ -274,18 +326,25 @@ class StagehandScheduler:
         self._cursor: int = 0
 
         # Ordered list of block entries for exec_order lookup.
-        self._ordered_blocks: list[BlockEntry] = registry.blocks_in_order()
-        self._total_blocks: int = len(self._ordered_blocks)
-
-        # Map exec_order -> block_id for fast lookup.
-        self._order_to_id: dict[int, str] = {
-            entry.exec_order: entry.block_id for entry in self._ordered_blocks
-        }
+        self._ordered_blocks: list[BlockEntry] = []
+        self._total_blocks: int = 0
+        self._order_to_id: dict[int, str] = {}
+        self.refresh_registry_snapshot()
 
         # Track pending transfer handles per block.
         self._pending_handles: dict[str, TransferHandle] = {}
+        # Opened safetensors mmaps keyed by absolute path.
+        self._file_maps: dict[str, tuple[object, mmap.mmap, memoryview]] = {}
 
     # ── step lifecycle ────────────────────────────────────────────────
+
+    def refresh_registry_snapshot(self) -> None:
+        """Refresh cached block-order metadata from the registry."""
+        self._ordered_blocks = self._registry.blocks_in_order()
+        self._total_blocks = len(self._ordered_blocks)
+        self._order_to_id = {
+            entry.exec_order: entry.block_id for entry in self._ordered_blocks
+        }
 
     def begin_step(self, step: int) -> None:
         """Initialize state for a new training step."""
@@ -296,7 +355,56 @@ class StagehandScheduler:
     def end_step(self) -> None:
         """Finalize the current step — reap transfers, update telemetry."""
         self._engine.reap()
+        self._reconcile_file_backed_grads()
         self._telemetry.end_step()
+
+    def _reconcile_file_backed_grads(self) -> None:
+        """Ensure CPU-resident mutable params have CPU grads at step boundary."""
+        for entry in self._ordered_blocks:
+            if not entry.file_backed:
+                continue
+            module = entry.module_ref()
+            if module is None:
+                continue
+            mutable_names = set(entry.module_param_names)
+            if not mutable_names:
+                continue
+            for name, param in module.named_parameters():
+                if name not in mutable_names:
+                    continue
+                if param.device.type != "cpu":
+                    continue
+                if param.grad is not None and param.grad.device.type != "cpu":
+                    param.grad = param.grad.to("cpu", non_blocking=True)
+
+    def _get_file_view(self, source_path: str) -> memoryview:
+        key = str(Path(source_path).expanduser())
+        cached = self._file_maps.get(key)
+        if cached is not None:
+            return cached[2]
+
+        handle = Path(key).open("rb")
+        mm = mmap.mmap(handle.fileno(), length=0, access=mmap.ACCESS_READ)
+        view = memoryview(mm)
+        self._file_maps[key] = (handle, mm, view)
+        return view
+
+    def close(self) -> None:
+        """Release open file-backed mmap resources."""
+        for handle, mm, view in self._file_maps.values():
+            try:
+                view.release()
+            except Exception:
+                pass
+            try:
+                mm.close()
+            except Exception:
+                pass
+            try:
+                handle.close()
+            except Exception:
+                pass
+        self._file_maps.clear()
 
     # ── per-block hooks ───────────────────────────────────────────────
 
@@ -342,15 +450,19 @@ class StagehandScheduler:
         # Advance cursor.
         self._cursor += 1
 
+        # Eviction pass BEFORE prefetching — free VRAM for upcoming blocks.
+        if self._budget.above_high_watermark():
+            self._run_eviction(ignore_cooldown=True)
+
         # Issue prefetches for lookahead window.
         self._prefetch_ahead()
 
-        # Eviction pass if above high watermark.
+        # Second eviction pass after prefetching in case we're still over budget.
         if self._budget.above_high_watermark():
-            self._run_eviction()
+            self._run_eviction(ignore_cooldown=True)
 
     def after_block(self, block_id: str, output: torch.Tensor | None = None) -> None:
-        """Called after a block computes.  Releases refcount."""
+        """Called after a block computes.  Releases refcount and runs eviction."""
         self._residency.decrement_ref(block_id)
         entry = self._residency.get_entry(block_id)
         entry.last_used_step = self._current_step
@@ -362,6 +474,14 @@ class StagehandScheduler:
             )
             if nan_count > 0 or inf_count > 0:
                 self._telemetry.record_nan_inf(nan_count, inf_count)
+
+        # Evict old blocks eagerly after each block completes.  This keeps
+        # VRAM usage bounded to roughly (prefetch_window + 1) blocks instead
+        # of accumulating all blocks on GPU until the watermark is hit.
+        # ignore_cooldown=True: within a step, completed blocks (refcount 0)
+        # should be evictable immediately — cooldown is for cross-step thrashing.
+        if self._budget.above_high_watermark():
+            self._run_eviction(ignore_cooldown=True)
 
     # ── prefetch logic ────────────────────────────────────────────────
 
@@ -441,11 +561,32 @@ class StagehandScheduler:
 
         # Resolve the module from the weak reference.
         module = block_entry.module_ref()
-        if module is not None and any(True for _ in module.parameters()):
-            layout = _build_param_layout(module, block_entry.dtype)
-            res_entry.param_layout = layout
-            if not isinstance(slab, list):
-                _flatten_params_into_buffer(module, slab.buffer, layout)
+        if module is not None:
+            if block_entry.file_backed:
+                layout = list(block_entry.param_layout)
+                res_entry.param_layout = layout
+                if not isinstance(slab, list):
+                    file_specs = {spec.param_name: spec for spec in block_entry.file_param_specs}
+                    module_param_names = set(block_entry.module_param_names)
+                    file_view = self._get_file_view(str(block_entry.source_path))
+                    _copy_file_backed_params_into_buffer(
+                        module=module,
+                        buffer=slab.buffer,
+                        layout=layout,
+                        file_specs=file_specs,
+                        module_param_names=module_param_names,
+                        file_view=file_view,
+                    )
+            elif any(True for _ in module.parameters()):
+                layout = _build_param_layout(module, block_entry.dtype)
+                res_entry.param_layout = layout
+                if not isinstance(slab, list):
+                    _flatten_params_into_buffer(module, slab.buffer, layout)
+            else:
+                # Module has no parameters.
+                res_entry.param_layout = None
+                if not isinstance(slab, list):
+                    slab.buffer[:] = 0
         else:
             # Module has been garbage-collected or has no parameters.
             # Zero-fill as a fallback.
@@ -477,6 +618,14 @@ class StagehandScheduler:
                 gpu_bytes = res_entry.gpu_tensor.view(torch.uint8)
                 _restore_params_from_tensor(module, gpu_bytes, res_entry.param_layout)
 
+                # Move accumulated .grad tensors to GPU so gradient accumulation
+                # (step N+1 backward adding to step N grads) doesn't hit a
+                # device mismatch between GPU activations and CPU .grad.
+                gpu_device = res_entry.gpu_tensor.device
+                for param in module.parameters():
+                    if param.grad is not None and param.grad.device != gpu_device:
+                        param.grad = param.grad.to(gpu_device, non_blocking=True)
+
         # Release the host slab — data is now on GPU.  A fresh slab will be
         # acquired if we later need to evict with save-back (D2H).
         if res_entry.host_slab is not None:
@@ -485,18 +634,26 @@ class StagehandScheduler:
 
     # ── eviction logic ────────────────────────────────────────────────
 
-    def _run_eviction(self) -> None:
+    def _run_eviction(self, ignore_cooldown: bool = False) -> None:
         """Evict blocks until VRAM is below the low watermark.
 
         Spec rules enforced:
         - Never evict a block with refcount > 0 (handled by eviction_candidates).
         - Never evict a block within the prefetch window.
         - Evict in descending score order until below vram_low_watermark.
-        - Eviction cooldown respected (handled by eviction_candidates).
+        - Eviction cooldown respected unless *ignore_cooldown* is True.
+
+        Within a single training step, blocks that completed their forward
+        pass have refcount 0 and should be evictable immediately.  The
+        cooldown (designed to prevent cross-step thrashing) would block
+        this because ``last_used_step == current_step``.  Callers from
+        ``after_block`` pass ``ignore_cooldown=True`` to allow immediate
+        eviction of completed blocks.
         """
+        cooldown = 0 if ignore_cooldown else self._policy.eviction_cooldown_steps
         candidates = self._residency.eviction_candidates(
             current_step=self._current_step,
-            cooldown_steps=self._policy.eviction_cooldown_steps,
+            cooldown_steps=cooldown,
         )
 
         # Build the set of block_ids within the prefetch window -- these are
@@ -548,13 +705,40 @@ class StagehandScheduler:
         module = block_entry.module_ref()
 
         if save_back:
-            # D2H: GPU_READY -> EVICTING -> HOST_STAGED.
-            # Acquire a fresh slab for the D2H destination (the original slab
-            # was released after H2D in _finalize_gpu_load).
+            # File-backed blocks keep frozen base params on disk. On eviction,
+            # only mutable params (e.g. LoRA) need CPU save-back.
+            if block_entry.file_backed:
+                self._residency.transition(block_id, BlockState.EVICTING)
+
+                mutable_names = set(block_entry.module_param_names)
+                if module is not None and res_entry.param_layout is not None:
+                    for name, _shape, dtype, _offset, _numel in res_entry.param_layout:
+                        if name in mutable_names:
+                            cpu_copy = _get_param_data(module, name).to("cpu", non_blocking=True).clone()
+                            _set_param_data(module, name, cpu_copy)
+                        else:
+                            _set_param_data(module, name, torch.empty(0, dtype=dtype))
+
+                    for name, param in module.named_parameters():
+                        if name in mutable_names and param.grad is not None and param.grad.device.type != "cpu":
+                            param.grad = param.grad.to("cpu", non_blocking=True)
+
+                res_entry.gpu_tensor = None
+                if res_entry.host_slab is not None:
+                    self._engine._pool.release(res_entry.host_slab)
+                    res_entry.host_slab = None
+                res_entry.param_layout = None
+                self._residency.transition(block_id, BlockState.UNLOADED)
+                return
+
+            # D2H: GPU_READY -> EVICTING -> HOST_STAGED -> (release slab) -> UNLOADED.
+            # We acquire a temporary slab for the DMA transfer, copy back into
+            # regular CPU tensors, then release the slab immediately.  This
+            # prevents slab exhaustion when many blocks are evicted in a single
+            # forward pass (40 blocks but only 8 slabs).
             self._residency.transition(block_id, BlockState.EVICTING)
             if res_entry.gpu_tensor is not None:
                 slab = self._engine._pool.acquire(block_entry.size_bytes)
-                res_entry.host_slab = slab
                 handle = self._engine.submit_d2h(
                     block_id=block_id,
                     gpu_src=res_entry.gpu_tensor,
@@ -564,20 +748,41 @@ class StagehandScheduler:
                 self._telemetry.record_d2h(
                     res_entry.gpu_tensor.numel() * res_entry.gpu_tensor.element_size()
                 )
-            # Free GPU tensor — data is now safely on host slab.
-            res_entry.gpu_tensor = None
-            self._residency.transition(block_id, BlockState.HOST_STAGED)
 
-            # Restore module parameters to reference host slab views so the
-            # module remains usable (albeit slow) if accidentally accessed.
-            if (
-                module is not None
-                and res_entry.param_layout is not None
-                and res_entry.host_slab is not None
-            ):
-                _restore_params_from_tensor(
-                    module, res_entry.host_slab.buffer, res_entry.param_layout,
-                )
+                # Restore module parameters from the slab into CPU views.
+                if (
+                    module is not None
+                    and res_entry.param_layout is not None
+                ):
+                    _restore_params_from_tensor(
+                        module, slab.buffer, res_entry.param_layout,
+                    )
+                    # Detach params from the slab: copy each param.data to a
+                    # standalone CPU tensor so the slab can be freed.
+                    for name, _shape, _dtype, _offset, _numel in res_entry.param_layout:
+                        _set_param_data(
+                            module, name,
+                            _get_param_data(module, name).clone(),
+                        )
+
+                # Release the slab back to the pool immediately.
+                self._engine._pool.release(slab)
+                res_entry.host_slab = None
+
+            # Move any .grad tensors from GPU to CPU.  During backward,
+            # autograd creates .grad tensors on the same device as the
+            # parameter (GPU while loaded).  The optimizer needs them on
+            # the same device as param.data (CPU after eviction).
+            if module is not None:
+                for param in module.parameters():
+                    if param.grad is not None and param.grad.device.type != "cpu":
+                        param.grad = param.grad.to("cpu", non_blocking=True)
+
+            # Free GPU tensor — data is now safely in CPU params.
+            res_entry.gpu_tensor = None
+            # Transition to UNLOADED (not HOST_STAGED) since no slab is held.
+            # _load_block_to_gpu will re-stage from the CPU params next time.
+            self._residency.transition(block_id, BlockState.UNLOADED)
         else:
             # No save-back: GPU_READY -> GPU_FREEING -> UNLOADED.
             self._residency.transition(block_id, BlockState.GPU_FREEING)

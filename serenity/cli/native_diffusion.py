@@ -18,7 +18,7 @@ import os
 import random
 import time
 from contextlib import nullcontext, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -65,10 +65,13 @@ from serenity.cli.diffusion_losses import (
     _qwen_pack_latents,
     _qwen_unpack_latents,
     _sample_flow_timesteps,
+    _sample_flow_timesteps_bounded,
 )
 from serenity.cli.diffusion_checkpoint import (
+    _load_dual_stage_state,
     _maybe_restore_training_state,
     _resolve_resume_state_path,
+    _save_dual_stage_state,
     _save_module_state,
     _save_training_state,
 )
@@ -163,6 +166,7 @@ _WAN_TYPES = {
     "wan22_i2v_low",
     "wan22_high",
     "wan22_low",
+    "wan22_dual",
 }
 
 _FULL_TRAINING_METHODS = {"full", "full_finetune", "full_fine_tune", "fine_tune", "finetune", "fine_tune_vae"}
@@ -831,6 +835,8 @@ def _setup_memory_strategy(
     family: str,
     memory_block: dict[str, Any],
     config: dict[str, Any],
+    *,
+    checkpoint_path: str | None = None,
 ) -> MemoryStrategy | None:
     # Check for Stagehand strategy first.
     strategy_name = str(memory_block.get("strategy", config.get("memory_strategy", ""))).strip().lower()
@@ -846,6 +852,23 @@ def _setup_memory_strategy(
                 train_module.enable_gradient_checkpointing()
                 print("[native/diffusion] enabled gradient checkpointing before Stagehand setup")
 
+        stagehand_checkpoint_path = (
+            checkpoint_path
+            or stagehand_block.get("checkpoint_path")
+            or config.get("stagehand_checkpoint_path")
+            or config.get("model_path")
+        )
+        file_backed_default = family == "wan"
+        file_backed_weights = _as_bool(
+            stagehand_block.get(
+                "file_backed_weights",
+                config.get("stagehand_file_backed", file_backed_default),
+            ),
+            file_backed_default,
+        )
+        if stagehand_checkpoint_path and not str(stagehand_checkpoint_path).lower().endswith(".safetensors"):
+            file_backed_weights = False
+
         stagehand_config = StagehandStrategyConfig(
             family=family,
             block_pattern=stagehand_block.get("block_pattern"),
@@ -859,6 +882,8 @@ def _setup_memory_strategy(
             telemetry_file=str(stagehand_block.get("telemetry_file", "stagehand_telemetry.jsonl")),
             gradient_checkpointing=gradient_checkpointing,
             dtype=str(config.get("train_dtype") or "bfloat16"),
+            file_backed_weights=file_backed_weights,
+            checkpoint_path=str(stagehand_checkpoint_path) if stagehand_checkpoint_path else None,
         )
 
         strategy = StagehandStrategy(stagehand_config)
@@ -869,6 +894,19 @@ def _setup_memory_strategy(
                 f"(pool={stagehand_config.pinned_pool_mb}MB, "
                 f"vram={stagehand_config.vram_low_watermark_mb}-{stagehand_config.vram_high_watermark_mb}MB)"
             )
+            if stagehand_config.file_backed_weights and stagehand_config.checkpoint_path:
+                converted = int(getattr(strategy, "file_backed_converted_params", 0))
+                if converted > 0:
+                    print(
+                        "[native/diffusion] stagehand file-backed mode enabled "
+                        f"(source={stagehand_config.checkpoint_path}, converted_params={converted})"
+                    )
+                else:
+                    print(
+                        "[native/diffusion] warning: stagehand file-backed requested "
+                        f"but converted_params=0 (source={stagehand_config.checkpoint_path}); "
+                        "continuing module-backed"
+                    )
             return strategy
         except (ImportError, RuntimeError) as exc:
             print(f"[native/diffusion] warning: stagehand setup failed, falling back to layer offload ({exc})")
@@ -969,6 +1007,87 @@ def _call_with_filtered_kwargs(fn, *args: Any, **kwargs: Any):
         return fn(*args, **kwargs)
     filtered_kwargs = {key: value for key, value in kwargs.items() if key in params}
     return fn(*args, **filtered_kwargs)
+
+
+def _audit_gpu_memory(train_module: torch.nn.Module, pipeline: Any) -> None:
+    """Diagnostic: walk model tree and report all CUDA-resident tensors."""
+    if not torch.cuda.is_available():
+        return
+
+    alloc_mb = torch.cuda.memory_allocated() / 1024**2
+    reserved_mb = torch.cuda.memory_reserved() / 1024**2
+    free_mb = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved()) / 1024**2
+    print(f"\n[OOM-DIAG] === GPU Memory Audit ===")
+    print(f"[OOM-DIAG] allocated={alloc_mb:.1f}MB  reserved={reserved_mb:.1f}MB  free={free_mb:.1f}MB")
+
+    # Walk train_module (transformer) and group CUDA params by top-level child
+    child_gpu: dict[str, float] = {}
+    child_cpu: dict[str, float] = {}
+    for name, child in train_module.named_children():
+        gpu_bytes = 0
+        cpu_bytes = 0
+        for param in child.parameters():
+            nbytes = param.numel() * param.element_size()
+            if param.device.type == "cuda":
+                gpu_bytes += nbytes
+            else:
+                cpu_bytes += nbytes
+        for buf in child.buffers():
+            nbytes = buf.numel() * buf.element_size()
+            if buf.device.type == "cuda":
+                gpu_bytes += nbytes
+            else:
+                cpu_bytes += nbytes
+        if gpu_bytes > 0:
+            child_gpu[name] = gpu_bytes / 1024**2
+        if cpu_bytes > 0:
+            child_cpu[name] = cpu_bytes / 1024**2
+
+    if child_gpu:
+        print(f"[OOM-DIAG] Transformer children ON GPU:")
+        for name, mb in sorted(child_gpu.items(), key=lambda x: -x[1]):
+            print(f"[OOM-DIAG]   {name}: {mb:.1f} MB")
+        print(f"[OOM-DIAG]   TOTAL: {sum(child_gpu.values()):.1f} MB")
+    else:
+        print(f"[OOM-DIAG] No transformer children on GPU (good)")
+
+    if child_cpu:
+        total_cpu = sum(child_cpu.values())
+        print(f"[OOM-DIAG] Transformer children ON CPU: {total_cpu:.1f} MB total")
+
+    # Check pipeline components (VAE, text encoder)
+    for comp_name in ("vae", "text_encoder", "text_encoder_2", "text_encoder_3"):
+        comp = getattr(pipeline, comp_name, None)
+        if comp is None:
+            continue
+        gpu_bytes = sum(
+            p.numel() * p.element_size() for p in comp.parameters() if p.device.type == "cuda"
+        )
+        if gpu_bytes > 0:
+            print(f"[OOM-DIAG] WARNING: pipeline.{comp_name} has {gpu_bytes / 1024**2:.1f} MB ON GPU!")
+
+    # Check for mystery CUDA tensors (allocated but not in model tree)
+    model_gpu_total = sum(child_gpu.values()) if child_gpu else 0.0
+    pipeline_gpu = 0.0
+    for comp_name in ("vae", "text_encoder", "text_encoder_2"):
+        comp = getattr(pipeline, comp_name, None)
+        if comp is not None:
+            pipeline_gpu += sum(
+                p.numel() * p.element_size() for p in comp.parameters() if p.device.type == "cuda"
+            ) / 1024**2
+    accounted = model_gpu_total + pipeline_gpu
+    unaccounted = alloc_mb - accounted
+    if unaccounted > 100:
+        print(f"[OOM-DIAG] WARNING: {unaccounted:.1f} MB allocated but NOT in model/pipeline params!")
+        print(f"[OOM-DIAG]   (could be: cached activations, optimizer state, CUDA context, unreleased tensors)")
+
+    # Force empty cache and re-check
+    torch.cuda.empty_cache()
+    alloc_after = torch.cuda.memory_allocated() / 1024**2
+    reserved_after = torch.cuda.memory_reserved() / 1024**2
+    free_after = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved()) / 1024**2
+    print(f"[OOM-DIAG] After empty_cache: alloc={alloc_after:.1f}MB  reserved={reserved_after:.1f}MB  free={free_after:.1f}MB")
+    print(f"[OOM-DIAG] === End Audit ===\n")
 
 
 def _is_cuda_oom_error(exc: BaseException) -> bool:
@@ -1192,6 +1311,544 @@ def _run_sd15_vae_finetune(
     return 0
 
 
+def _run_wan_dual_stage_training(
+    config: dict[str, Any],
+    *,
+    source_path: Path,
+    steps_override: int | None = None,
+) -> int:
+    """Train WAN 2.2 dual-stage (high-noise + low-noise) with alternating model swaps.
+
+    Only one 14B transformer is loaded at a time; they swap every N steps,
+    reusing the same pinned memory pool.
+    """
+    import gc
+
+    model_block = config.get("model", {}) if isinstance(config.get("model"), dict) else {}
+    data_block = config.get("data", {}) if isinstance(config.get("data"), dict) else {}
+    memory_block = config.get("memory", {}) if isinstance(config.get("memory"), dict) else {}
+    checkpoint_block = config.get("checkpoint", {}) if isinstance(config.get("checkpoint"), dict) else {}
+    optimizer_block = config.get("optimizer", {}) if isinstance(config.get("optimizer"), dict) else {}
+    scheduler_block = config.get("scheduler", {}) if isinstance(config.get("scheduler"), dict) else {}
+
+    dual_block = config.get("dual_stage", {}) if isinstance(config.get("dual_stage"), dict) else {}
+
+    high_model_path = str(
+        dual_block.get("high_model_path")
+        or model_block.get("high_model_path")
+        or config.get("high_model_path")
+    )
+    low_model_path = str(
+        dual_block.get("low_model_path")
+        or model_block.get("low_model_path")
+        or config.get("low_model_path")
+    )
+    if not high_model_path or high_model_path == "None":
+        raise ValueError("Missing dual_stage.high_model_path for WAN 2.2 dual-stage training")
+    if not low_model_path or low_model_path == "None":
+        raise ValueError("Missing dual_stage.low_model_path for WAN 2.2 dual-stage training")
+    high_model_path = str(Path(high_model_path).expanduser())
+    low_model_path = str(Path(low_model_path).expanduser())
+
+    boundary_ratio = float(dual_block.get("boundary_ratio", 0.90))
+    swap_every_steps = int(dual_block.get("swap_every_steps", 250))
+    start_stage = str(dual_block.get("start_stage", "high")).strip().lower()
+    if start_stage not in ("high", "low"):
+        start_stage = "high"
+
+    num_train_timesteps = 1000
+    boundary_timestep = int(boundary_ratio * num_train_timesteps)
+
+    stage_config = {
+        "high": {"model_path": high_model_path, "t_min": boundary_timestep, "t_max": num_train_timesteps},
+        "low": {"model_path": low_model_path, "t_min": 0, "t_max": boundary_timestep},
+    }
+
+    print(
+        f"[native/diffusion/dual] WAN 2.2 dual-stage training\n"
+        f"  high model: {high_model_path}\n"
+        f"  low model:  {low_model_path}\n"
+        f"  boundary:   t={boundary_timestep} (ratio={boundary_ratio})\n"
+        f"  swap every: {swap_every_steps} steps\n"
+        f"  start:      {start_stage}"
+    )
+
+    # --- Common training params ---
+    train_dtype = _coerce_dtype(config.get("train_dtype") or model_block.get("dtype") or "bfloat16")
+    save_dtype = _coerce_dtype(config.get("output_dtype"), default=train_dtype)
+    train_device = torch.device(str(config.get("train_device", "cuda")))
+
+    seed = int(config.get("seed", 42))
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    learning_rate = float(config.get("learning_rate", 1e-4))
+    batch_size = int(data_block.get("batch_size") or config.get("batch_size") or 1)
+    grad_accum = int(config.get("gradient_accumulation_steps") or config.get("gradient_accumulation") or 1)
+    max_steps = int(
+        steps_override
+        if steps_override is not None and steps_override > 0
+        else (config.get("max_steps") or config.get("max_train_steps") or 4000)
+    )
+
+    native_model = WanModel()
+    raw_resolution = int(data_block.get("resolution") or config.get("resolution") or 384)
+    resolution_multiple = int(getattr(native_model, "resolution_multiple", 16))
+    resolution = _quantize_resolution(raw_resolution, resolution_multiple)
+
+    output_dir = Path(
+        checkpoint_block.get("output_dir") or config.get("output_dir") or (Path("output") / source_path.stem)
+    ).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    high_output_dir = output_dir / "high"
+    low_output_dir = output_dir / "low"
+    high_output_dir.mkdir(parents=True, exist_ok=True)
+    low_output_dir.mkdir(parents=True, exist_ok=True)
+
+    adapter_type, adapter_block = _extract_adapter_config(config)
+    rank = int(adapter_block.get("rank") or adapter_block.get("network_dim") or config.get("lora_rank") or 16)
+    alpha = float(adapter_block.get("alpha") or adapter_block.get("network_alpha") or config.get("lora_alpha") or rank)
+
+    # --- Build training pairs & cache data using first-stage model ---
+    pairs = _build_training_pairs(config)
+    wan_video_frame_count = _resolve_wan_video_frame_count(config, data_block)
+    pairs.extend(_build_video_training_pairs(config))
+    deduped: dict[Path, str] = dict(pairs)
+    pairs = list(deduped.items())
+    if not pairs:
+        raise ValueError("No training media/captions found for dual-stage training.")
+    pairs = _prepare_training_pairs(pairs, model_type=ModelType.WAN)
+    if not pairs:
+        raise ValueError("No training pairs remain after preprocessing.")
+
+    print(f"[native/diffusion/dual] loading initial model for data caching ({start_stage} stage)")
+    initial_model_path = stage_config[start_stage]["model_path"]
+    pipeline = native_model.load_pipeline(
+        initial_model_path,
+        train_dtype,
+        train_device=train_device,
+        model_block=model_block,
+    )
+
+    print(f"[native/diffusion/dual] caching latents+text for {len(pairs)} samples")
+    cached = _cache_training_data(
+        native_model,
+        pipeline,
+        "wan",
+        pairs,
+        ModelType.WAN,
+        None,
+        resolution,
+        train_device,
+        train_dtype,
+        allow_video=True,
+        video_frame_count=wan_video_frame_count,
+        cache_text_embeddings=True,
+        keep_text_encoder_on_device=False,
+    )
+    if not cached:
+        raise ValueError("No cached samples produced.")
+
+    # Offload VAE and text encoder to CPU — shared across both stages.
+    pipeline.vae.to("cpu")
+    native_model.offload_text_encoders(pipeline)
+    from serenity.memory.sync import torch_gc
+    torch_gc()
+
+    # --- Stagehand config (shared) ---
+    stagehand_block = memory_block.get("stagehand", {}) if isinstance(memory_block.get("stagehand"), dict) else {}
+    stagehand_file_backed = _as_bool(
+        stagehand_block.get("file_backed_weights", config.get("stagehand_file_backed", True)),
+        True,
+    )
+    stagehand_cfg = StagehandStrategyConfig(
+        family="wan",
+        block_pattern=stagehand_block.get("block_pattern"),
+        pinned_pool_mb=int(stagehand_block.get("pinned_pool_mb", 8192)),
+        pinned_slab_mb=int(stagehand_block.get("pinned_slab_mb", 512)),
+        vram_high_watermark_mb=int(stagehand_block.get("vram_high_watermark_mb", 20000)),
+        vram_low_watermark_mb=int(stagehand_block.get("vram_low_watermark_mb", 16000)),
+        prefetch_window_blocks=int(stagehand_block.get("prefetch_window_blocks", 2)),
+        max_inflight_transfers=int(stagehand_block.get("max_inflight_transfers", 2)),
+        telemetry_enabled=_as_bool(stagehand_block.get("telemetry_enabled", True), True),
+        telemetry_file=str(stagehand_block.get("telemetry_file", "stagehand_telemetry.jsonl")),
+        gradient_checkpointing=str(
+            memory_block.get("gradient_checkpointing") or config.get("gradient_checkpointing") or "on"
+        ),
+        dtype=str(config.get("train_dtype") or "bfloat16"),
+        file_backed_weights=stagehand_file_backed,
+        checkpoint_path=None,
+    )
+
+    # --- Helper: set up one stage ---
+    def _setup_stage(
+        stage_name: str,
+        model_path: str,
+        existing_pool=None,
+    ):
+        """Load transformer, inject LoRA, set up Stagehand, create optimizer.
+
+        Returns (train_module, adapter, strategy, optimizer, lr_scheduler, params).
+        """
+        from diffusers import WanTransformer3DModel
+        print(f"[native/diffusion/dual] loading {stage_name}-noise transformer from {model_path}")
+        transformer = WanTransformer3DModel.from_single_file(
+            model_path, torch_dtype=train_dtype,
+        )
+        transformer.to("cpu")
+        # Strip accelerate hooks
+        try:
+            from accelerate.hooks import remove_hook_from_module
+            for module in transformer.modules():
+                remove_hook_from_module(module)
+        except ImportError:
+            pass
+        if hasattr(transformer, "hf_device_map"):
+            del transformer.hf_device_map
+
+        pipeline.transformer = transformer
+
+        # Adapter training mode: freeze backbone parameters so Stagehand can
+        # convert frozen base weights to file-backed sources.
+        _set_module_train_state(transformer, False)
+
+        # Enable gradient checkpointing
+        if hasattr(transformer, "enable_gradient_checkpointing"):
+            with suppress(Exception):
+                transformer.enable_gradient_checkpointing()
+
+        # Inject LoRA adapter
+        adapter_backend = str(
+            adapter_block.get("backend")
+            or adapter_block.get("implementation")
+            or config.get("lora_backend")
+            or config.get("adapter_backend")
+            or "native"
+        ).strip().lower()
+        adapter = create_adapter(
+            adapter_type=adapter_type,
+            rank=rank,
+            alpha=alpha,
+            model_type=ModelType.WAN.value,
+            dropout=float(adapter_block.get("dropout", 0.0)),
+            backend=adapter_backend,
+            **_build_adapter_kwargs(adapter_block),
+        )
+        adapter.inject(transformer)
+
+        # Set up Stagehand
+        stage_cfg = replace(
+            stagehand_cfg,
+            checkpoint_path=model_path,
+        )
+        strategy = StagehandStrategy(stage_cfg)
+        if existing_pool is not None:
+            strategy.setup_with_pool(SimpleNamespace(transformer=transformer), existing_pool)
+        else:
+            strategy.setup(SimpleNamespace(transformer=transformer))
+        if stage_cfg.file_backed_weights and stage_cfg.checkpoint_path:
+            converted = int(getattr(strategy, "file_backed_converted_params", 0))
+            if converted > 0:
+                print(
+                    f"[native/diffusion/dual] stagehand file-backed enabled for {stage_name} "
+                    f"(source={stage_cfg.checkpoint_path}, converted_params={converted})"
+                )
+            else:
+                print(
+                    f"[native/diffusion/dual] warning: file-backed requested for {stage_name} "
+                    f"but converted_params=0 (source={stage_cfg.checkpoint_path}); "
+                    "continuing module-backed"
+                )
+
+        # Move non-block submodules to GPU
+        _move_non_block_submodules_to_device(transformer, train_device)
+
+        # Create optimizer
+        params = [p for p in adapter.get_trainable_params() if p.requires_grad]
+        if not params:
+            raise RuntimeError(f"No trainable parameters found for {stage_name} stage adapter")
+
+        optimizer, optimizer_name = _create_optimizer(
+            params,
+            config=config,
+            optimizer_block=optimizer_block,
+            learning_rate=learning_rate,
+        )
+        total_optimizer_steps = _resolve_optimizer_steps(max_steps, grad_accum)
+        lr_scheduler, scheduler_name = _create_lr_scheduler(
+            optimizer,
+            config=config,
+            scheduler_block=scheduler_block,
+            total_optimizer_steps=total_optimizer_steps,
+        )
+        optimizer.zero_grad(set_to_none=True)
+
+        print(
+            f"[native/diffusion/dual] {stage_name} stage ready "
+            f"optimizer={optimizer_name} lr_scheduler={scheduler_name} "
+            f"params={len(params)}"
+        )
+        return transformer, adapter, strategy, optimizer, lr_scheduler, params
+
+    # --- Helper: tear down current stage, return pool ---
+    def _teardown_stage(
+        stage_name: str,
+        transformer,
+        adapter,
+        strategy: StagehandStrategy,
+        optimizer,
+        stage_dir: Path,
+        step: int,
+    ):
+        """Save LoRA + optimizer, shut down Stagehand (keep pool), free transformer."""
+        # Save LoRA weights
+        lora_path = stage_dir / f"{adapter_type}_step_{step:06d}.safetensors"
+        adapter.save(str(lora_path))
+
+        # Save optimizer state
+        opt_path = stage_dir / f"optimizer_step_{step:06d}.pt"
+        torch.save(optimizer.state_dict(), opt_path)
+
+        print(f"[native/diffusion/dual] saved {stage_name} stage: lora={lora_path} optimizer={opt_path}")
+
+        # Shutdown Stagehand but keep the pool
+        pool = strategy.shutdown_keep_pool()
+
+        # Move non-block submodules to CPU before deleting
+        with suppress(Exception):
+            _move_non_block_submodules_to_device(transformer, torch.device("cpu"))
+
+        # Free transformer
+        pipeline.transformer = None
+        del transformer
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        return pool, lora_path, opt_path
+
+    # --- Check for resume state ---
+    dual_state_path = output_dir / "dual_state.pt"
+    resume_state = _load_dual_stage_state(dual_state_path)
+    start_step = 1
+    active_stage = start_stage
+    saved_lora_paths: dict[str, Path | None] = {"high": None, "low": None}
+    saved_opt_paths: dict[str, Path | None] = {"high": None, "low": None}
+
+    if resume_state is not None:
+        start_step = int(resume_state.get("step", 0)) + 1
+        active_stage = str(resume_state.get("active_stage", start_stage))
+        for stage_key in ("high", "low"):
+            lp = resume_state.get(f"{stage_key}_lora_path")
+            if lp and Path(lp).exists():
+                saved_lora_paths[stage_key] = Path(lp)
+            op = resume_state.get(f"{stage_key}_optimizer_path")
+            if op and Path(op).exists():
+                saved_opt_paths[stage_key] = Path(op)
+        print(
+            f"[native/diffusion/dual] resuming from step {start_step}, "
+            f"active_stage={active_stage}"
+        )
+
+    if start_step > max_steps:
+        print(f"[native/diffusion/dual] resume step exceeds max_steps ({start_step}>{max_steps}); nothing to do.")
+        return 0
+
+    # --- Initialize active stage ---
+    cur_stage = active_stage
+    cur_cfg = stage_config[cur_stage]
+    cur_dir = high_output_dir if cur_stage == "high" else low_output_dir
+
+    transformer, adapter, strategy, optimizer, lr_scheduler, params = _setup_stage(
+        cur_stage, cur_cfg["model_path"],
+    )
+
+    # Load saved LoRA weights if resuming
+    if saved_lora_paths[cur_stage] is not None:
+        print(f"[native/diffusion/dual] restoring {cur_stage} LoRA from {saved_lora_paths[cur_stage]}")
+        adapter.load(str(saved_lora_paths[cur_stage]))
+    if saved_opt_paths[cur_stage] is not None:
+        print(f"[native/diffusion/dual] restoring {cur_stage} optimizer from {saved_opt_paths[cur_stage]}")
+        try:
+            opt_state = torch.load(str(saved_opt_paths[cur_stage]), map_location="cpu", weights_only=False)
+            optimizer.load_state_dict(opt_state)
+        except Exception as exc:
+            print(f"[native/diffusion/dual] warning: failed to restore optimizer ({exc})")
+
+    # --- Training loop ---
+    max_grad_norm = float(config.get("max_grad_norm", 1.0))
+    save_every = int(
+        checkpoint_block.get("save_every") or config.get("save_every") or config.get("save_every_n_steps") or 0
+    )
+    autocast_enabled = train_device.type == "cuda" and train_dtype in {torch.bfloat16, torch.float16}
+    log_every_steps = max(1, int(config.get("log_every_steps", 5) or 5))
+    last_log_time = time.perf_counter()
+    last_log_step = max(start_step - 1, 0)
+
+    print(
+        f"[native/diffusion/dual] training loop start step={start_step}/{max_steps} "
+        f"active_stage={cur_stage} "
+        f"timestep_range=[{cur_cfg['t_min']}, {cur_cfg['t_max']})"
+    )
+
+    for step in range(start_step, max_steps + 1):
+        # --- Check if we need to swap stages ---
+        steps_into_current = step - start_step
+        if steps_into_current > 0 and steps_into_current % swap_every_steps == 0:
+            next_stage = "low" if cur_stage == "high" else "high"
+            next_cfg = stage_config[next_stage]
+            next_dir = high_output_dir if next_stage == "high" else low_output_dir
+
+            print(
+                f"\n[native/diffusion/dual] === SWAPPING {cur_stage} → {next_stage} at step {step} ==="
+            )
+            swap_t0 = time.perf_counter()
+
+            # Tear down current stage
+            pool, lora_path, opt_path = _teardown_stage(
+                cur_stage, transformer, adapter, strategy, optimizer, cur_dir, step,
+            )
+            saved_lora_paths[cur_stage] = lora_path
+            saved_opt_paths[cur_stage] = opt_path
+
+            # Set up new stage with reused pool
+            transformer, adapter, strategy, optimizer, lr_scheduler, params = _setup_stage(
+                next_stage, next_cfg["model_path"], existing_pool=pool,
+            )
+
+            # Restore saved weights if this stage was trained before
+            if saved_lora_paths[next_stage] is not None:
+                print(f"[native/diffusion/dual] restoring {next_stage} LoRA from {saved_lora_paths[next_stage]}")
+                adapter.load(str(saved_lora_paths[next_stage]))
+            if saved_opt_paths[next_stage] is not None:
+                print(f"[native/diffusion/dual] restoring {next_stage} optimizer from {saved_opt_paths[next_stage]}")
+                try:
+                    opt_state = torch.load(str(saved_opt_paths[next_stage]), map_location="cpu", weights_only=False)
+                    optimizer.load_state_dict(opt_state)
+                except Exception as exc:
+                    print(f"[native/diffusion/dual] warning: failed to restore optimizer ({exc})")
+
+            cur_stage = next_stage
+            cur_cfg = next_cfg
+            cur_dir = next_dir
+
+            swap_elapsed = time.perf_counter() - swap_t0
+            print(
+                f"[native/diffusion/dual] swap complete in {swap_elapsed:.1f}s, "
+                f"now training {cur_stage} stage "
+                f"timestep_range=[{cur_cfg['t_min']}, {cur_cfg['t_max']})"
+            )
+
+        # --- Forward/backward ---
+        batch = _pick_batch(cached, batch_size, train_device, train_dtype, "wan")
+
+        # Set timestep bounds for this stage
+        config["_timestep_bounds"] = (cur_cfg["t_min"], cur_cfg["t_max"])
+
+        forward_ctx = strategy.forward_context()
+        with forward_ctx:
+            with torch.autocast(device_type=train_device.type, dtype=train_dtype, enabled=autocast_enabled):
+                loss = _compute_loss(
+                    native_model,
+                    pipeline,
+                    "wan",
+                    batch,
+                    transformer,
+                    train_dtype,
+                    config,
+                )
+
+            scaled_loss = loss / float(max(grad_accum, 1))
+            scaled_loss.backward()
+
+        should_step = (step % max(grad_accum, 1) == 0) or (step == max_steps)
+        if should_step:
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+            optimizer.step()
+            if lr_scheduler is not None:
+                lr_scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+
+        # --- Logging ---
+        should_log = step == start_step or step % log_every_steps == 0 or step == max_steps
+        if should_log:
+            now = time.perf_counter()
+            steps_since_log = max(step - last_log_step, 1)
+            elapsed_since_log = max(now - last_log_time, 1e-6)
+            steps_per_second = steps_since_log / elapsed_since_log
+            steps_remaining = max(max_steps - step, 0)
+            eta = _format_eta(float(steps_remaining) / max(steps_per_second, 1e-6))
+            current_lr = (
+                float(optimizer.param_groups[0].get("lr", learning_rate))
+                if getattr(optimizer, "param_groups", None)
+                else float(learning_rate)
+            )
+            print(
+                f"[native/diffusion/dual] step {step}/{max_steps} "
+                f"stage={cur_stage} "
+                f"loss={float(loss.detach().cpu()):.6f} "
+                f"lr={current_lr:.2e} speed={steps_per_second:.2f} step/s eta={eta}"
+            )
+            last_log_time = now
+            last_log_step = step
+
+        # --- Periodic save ---
+        if save_every > 0 and step % save_every == 0:
+            ckpt_path = cur_dir / f"{adapter_type}_step_{step:06d}.safetensors"
+            adapter.save(str(ckpt_path))
+            saved_lora_paths[cur_stage] = ckpt_path
+
+            opt_path = cur_dir / f"optimizer_step_{step:06d}.pt"
+            torch.save(optimizer.state_dict(), opt_path)
+            saved_opt_paths[cur_stage] = opt_path
+
+            _save_dual_stage_state(
+                dual_state_path,
+                step=step,
+                active_stage=cur_stage,
+                high_lora_path=saved_lora_paths["high"],
+                low_lora_path=saved_lora_paths["low"],
+                high_optimizer_path=saved_opt_paths["high"],
+                low_optimizer_path=saved_opt_paths["low"],
+            )
+            print(f"[native/diffusion/dual] checkpoint saved at step {step} (stage={cur_stage})")
+
+    # --- Final save ---
+    # Clean up timestep bounds
+    config.pop("_timestep_bounds", None)
+
+    # Save current (final) stage
+    final_lora_path = cur_dir / f"{adapter_type}_last.safetensors"
+    adapter.save(str(final_lora_path))
+    saved_lora_paths[cur_stage] = final_lora_path
+    print(f"[native/diffusion/dual] saved final {cur_stage} LoRA to {final_lora_path}")
+
+    # Save dual state
+    _save_dual_stage_state(
+        dual_state_path,
+        step=max_steps,
+        active_stage=cur_stage,
+        high_lora_path=saved_lora_paths["high"],
+        low_lora_path=saved_lora_paths["low"],
+        high_optimizer_path=saved_opt_paths["high"],
+        low_optimizer_path=saved_opt_paths["low"],
+    )
+
+    # Cleanup Stagehand
+    strategy.cleanup()
+
+    print(
+        f"[native/diffusion/dual] training complete\n"
+        f"  high LoRA: {saved_lora_paths['high']}\n"
+        f"  low LoRA:  {saved_lora_paths['low']}\n"
+        f"  output:    {output_dir}"
+    )
+    return 0
+
+
 def run_native_diffusion_training(
     config: dict[str, Any],
     *,
@@ -1228,6 +1885,12 @@ def run_native_diffusion_training(
                 wan_stage = "low"
         if wan_stage:
             print(f"[native/diffusion] WAN 2.2 stage: {wan_stage}")
+
+        # Dual-stage routing: if model_type is wan22_dual or dual_stage block is present
+        dual_block = config.get("dual_stage", {}) if isinstance(config.get("dual_stage"), dict) else {}
+        is_dual = normalized_model_type == "wan22_dual" or _as_bool(dual_block.get("enabled", False), False)
+        if is_dual:
+            return _run_wan_dual_stage_training(config, source_path=source_path, steps_override=steps_override)
 
     model_path_raw = (
         model_block.get("path")
@@ -1474,6 +2137,17 @@ def run_native_diffusion_training(
     if not cached:
         raise ValueError("No cached samples were produced. Verify dataset paths and conditioning images.")
 
+    # Offload VAE and text encoders to CPU after caching to free VRAM for training.
+    pipeline.vae.to("cpu")
+    if cache_text_embeddings and not text_encoder_training_active:
+        native_model.offload_text_encoders(pipeline)
+    from serenity.memory.sync import torch_gc
+    torch_gc()
+    if torch.cuda.is_available():
+        alloc_mb = torch.cuda.memory_allocated() / 1024**2
+        reserved_mb = torch.cuda.memory_reserved() / 1024**2
+        print(f"[native/diffusion] GPU after offload: alloc={alloc_mb:.0f}MB reserved={reserved_mb:.0f}MB")
+
     runtime_prompt_device = native_model.cache_prompt_device(pipeline, train_device)
 
     if full_finetune and train_primary:
@@ -1509,9 +2183,19 @@ def run_native_diffusion_training(
             **_build_adapter_kwargs(adapter_block),
         )
         adapter.inject(train_module)
+        if torch.cuda.is_available():
+            print(f"[native/diffusion] GPU after adapter.inject: alloc={torch.cuda.memory_allocated()/1024**2:.0f}MB")
 
     memory_strategy = (
-        None if dispatched_train_module else _setup_memory_strategy(train_module, family, memory_block, config)
+        None
+        if dispatched_train_module
+        else _setup_memory_strategy(
+            train_module,
+            family,
+            memory_block,
+            config,
+            checkpoint_path=resolved_model_path,
+        )
     )
     if dispatched_train_module:
         print("[native/diffusion] detected dispatched transformer; skipping manual layer-offload placement")
@@ -1525,6 +2209,9 @@ def run_native_diffusion_training(
                 train_module.enable_gradient_checkpointing()
                 print("[native/diffusion] enabled native gradient checkpointing on dispatched transformer")
 
+    if torch.cuda.is_available():
+        print(f"[native/diffusion] GPU after memory_strategy setup: alloc={torch.cuda.memory_allocated()/1024**2:.0f}MB")
+
     stagehand_active = isinstance(memory_strategy, StagehandStrategy)
     placed_on_device = False
     if stagehand_active:
@@ -1532,6 +2219,8 @@ def run_native_diffusion_training(
         # submodules (embeddings, norms, projections) to GPU.
         _move_non_block_submodules_to_device(train_module, train_device)
         placed_on_device = True
+        if torch.cuda.is_available():
+            print(f"[native/diffusion] GPU after non-block move: alloc={torch.cuda.memory_allocated()/1024**2:.0f}MB")
         print(
             "[native/diffusion] stagehand active — non-block submodules moved to GPU, "
             "blocks managed by StagehandRuntime"
@@ -1616,6 +2305,8 @@ def run_native_diffusion_training(
         total_optimizer_steps=total_optimizer_steps,
     )
     print(f"[native/diffusion] optimizer={optimizer_name} lr_scheduler={scheduler_name}")
+    if torch.cuda.is_available():
+        print(f"[native/diffusion] GPU after optimizer creation: alloc={torch.cuda.memory_allocated()/1024**2:.0f}MB")
 
     max_grad_norm = float(config.get("max_grad_norm", 1.0))
     save_every = int(
@@ -1661,6 +2352,9 @@ def run_native_diffusion_training(
         f"[native/diffusion] training loop start step={start_step}/{max_steps} "
         f"log_every={log_every_steps} save_every={save_every}"
     )
+
+    if torch.cuda.is_available() and stagehand_active and _as_bool(config.get("debug_memory", False)):
+        _audit_gpu_memory(train_module, pipeline)
 
     for step in range(start_step, max_steps + 1):
         batch = _pick_batch(cached, batch_size, train_device, train_dtype, family)

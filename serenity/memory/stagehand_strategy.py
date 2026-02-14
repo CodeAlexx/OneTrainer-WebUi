@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
+import logging
 from typing import Any, Generator
 
 import torch
 import torch.nn as nn
 
 from serenity.memory.strategy import MemoryStrategy
+
+log = logging.getLogger(__name__)
 
 # Block pattern mapping per model family.
 BLOCK_PATTERNS: dict[str, str] = {
@@ -41,6 +44,8 @@ class StagehandStrategyConfig:
     telemetry_file: str = "stagehand_telemetry.jsonl"
     gradient_checkpointing: str = "on"
     dtype: str = "bfloat16"
+    file_backed_weights: bool = False
+    checkpoint_path: str | None = None
 
 
 class StagehandStrategy(MemoryStrategy):
@@ -62,6 +67,7 @@ class StagehandStrategy(MemoryStrategy):
 
         self._runtime: Any | None = None
         self._step: int = 0
+        self._file_backed_converted_params: int = 0
 
     def setup(self, model: Any) -> None:
         """Build StagehandRuntime from the model's transformer.
@@ -109,6 +115,107 @@ class StagehandStrategy(MemoryStrategy):
             dtype=dtype,
             inference_mode=False,
         )
+        self._file_backed_converted_params = 0
+        if self._config.file_backed_weights and self._config.checkpoint_path:
+            try:
+                converted = self._runtime.convert_registry_to_file_backed(self._config.checkpoint_path)
+                self._file_backed_converted_params = int(converted)
+                if converted > 0:
+                    log.info(
+                        "Stagehand file-backed enabled: converted %d params from %s",
+                        converted,
+                        self._config.checkpoint_path,
+                    )
+                else:
+                    log.warning(
+                        "Stagehand file-backed requested but converted 0 params from %s; "
+                        "continuing module-backed",
+                        self._config.checkpoint_path,
+                    )
+            except Exception as exc:
+                self._file_backed_converted_params = 0
+                log.warning(
+                    "Stagehand file-backed conversion failed (%s); continuing module-backed",
+                    exc,
+                )
+
+    def setup_with_pool(self, model: Any, pool: Any) -> None:
+        """Build StagehandRuntime reusing an existing PinnedPool.
+
+        This avoids re-allocating the large pinned memory pool during
+        dual-stage model swaps.
+        """
+        from serenity.stagehand import StagehandConfig, StagehandRuntime
+
+        transformer = getattr(model, "transformer", None)
+        if transformer is None:
+            raise RuntimeError("StagehandStrategy.setup_with_pool() requires model.transformer")
+
+        block_pattern = self._config.block_pattern or BLOCK_PATTERNS.get(
+            self._config.family, DEFAULT_BLOCK_PATTERN
+        )
+
+        dtype_map = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }
+        dtype = dtype_map.get(self._config.dtype, torch.bfloat16)
+
+        stagehand_config = StagehandConfig(
+            stagehand_enabled=True,
+            pinned_pool_mb=self._config.pinned_pool_mb,
+            pinned_slab_mb=self._config.pinned_slab_mb,
+            vram_high_watermark_mb=self._config.vram_high_watermark_mb,
+            vram_low_watermark_mb=self._config.vram_low_watermark_mb,
+            prefetch_window_blocks=self._config.prefetch_window_blocks,
+            max_inflight_transfers=self._config.max_inflight_transfers,
+            telemetry_enabled=self._config.telemetry_enabled,
+            telemetry_file=self._config.telemetry_file,
+        )
+
+        self._runtime = StagehandRuntime(
+            model=transformer,
+            config=stagehand_config,
+            block_pattern=block_pattern,
+            group="transformer",
+            dtype=dtype,
+            inference_mode=False,
+            pool=pool,
+        )
+        self._file_backed_converted_params = 0
+        if self._config.file_backed_weights and self._config.checkpoint_path:
+            try:
+                converted = self._runtime.convert_registry_to_file_backed(self._config.checkpoint_path)
+                self._file_backed_converted_params = int(converted)
+                if converted > 0:
+                    log.info(
+                        "Stagehand file-backed enabled: converted %d params from %s",
+                        converted,
+                        self._config.checkpoint_path,
+                    )
+                else:
+                    log.warning(
+                        "Stagehand file-backed requested but converted 0 params from %s; "
+                        "continuing module-backed",
+                        self._config.checkpoint_path,
+                    )
+            except Exception as exc:
+                self._file_backed_converted_params = 0
+                log.warning(
+                    "Stagehand file-backed conversion failed (%s); continuing module-backed",
+                    exc,
+                )
+
+    def shutdown_keep_pool(self) -> Any:
+        """Shutdown runtime but keep pool alive for reuse."""
+        if self._runtime is None:
+            return None
+        pool = self._runtime.shutdown_keep_pool()
+        self._runtime = None
+        self._step = 0
+        self._file_backed_converted_params = 0
+        return pool
 
     @contextmanager
     def forward_context(self) -> Generator[None, None, None]:
@@ -138,6 +245,7 @@ class StagehandStrategy(MemoryStrategy):
         if self._runtime is not None:
             self._runtime.shutdown()
             self._runtime = None
+        self._file_backed_converted_params = 0
 
     def estimate_vram_usage(self, batch_size: int, resolution: int) -> int:
         """Estimate peak VRAM in bytes based on watermark config."""
@@ -156,6 +264,11 @@ class StagehandStrategy(MemoryStrategy):
     def runtime(self) -> Any | None:
         """Access the underlying StagehandRuntime (for telemetry, stats)."""
         return self._runtime
+
+    @property
+    def file_backed_converted_params(self) -> int:
+        """Number of params converted to file-backed source in latest setup."""
+        return self._file_backed_converted_params
 
 
 __all__ = [

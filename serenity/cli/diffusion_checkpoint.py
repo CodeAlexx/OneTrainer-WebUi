@@ -16,6 +16,8 @@ __all__ = [
     "_save_training_state",
     "_resolve_resume_state_path",
     "_maybe_restore_training_state",
+    "_save_dual_stage_state",
+    "_load_dual_stage_state",
 ]
 
 
@@ -228,3 +230,57 @@ def _maybe_restore_training_state(
     next_step = max(1, step + 1)
     print(f"[native/diffusion] resumed training from state {resume_state_path} (next step={next_step})")
     return next_step
+
+
+def _save_dual_stage_state(
+    output_path: Path,
+    *,
+    step: int,
+    active_stage: str,
+    high_lora_path: Path | None,
+    low_lora_path: Path | None,
+    high_optimizer_path: Path | None,
+    low_optimizer_path: Path | None,
+) -> Path:
+    """Save dual-stage meta state tracking which stage is active and checkpoint paths."""
+    state: dict[str, Any] = {
+        "step": int(step),
+        "active_stage": str(active_stage),
+        "high_lora_path": str(high_lora_path) if high_lora_path is not None else None,
+        "low_lora_path": str(low_lora_path) if low_lora_path is not None else None,
+        "high_optimizer_path": str(high_optimizer_path) if high_optimizer_path is not None else None,
+        "low_optimizer_path": str(low_optimizer_path) if low_optimizer_path is not None else None,
+        "python_random_state": random.getstate(),
+        "torch_random_state": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        with suppress(Exception):
+            state["torch_cuda_random_state_all"] = torch.cuda.get_rng_state_all()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(state, output_path)
+    return output_path
+
+
+def _load_dual_stage_state(state_path: Path) -> dict[str, Any] | None:
+    """Load dual-stage meta state. Returns None if file does not exist."""
+    if not state_path.exists():
+        return None
+    state = torch.load(str(state_path), map_location="cpu", weights_only=False)
+    if not isinstance(state, dict):
+        return None
+
+    py_state = state.get("python_random_state")
+    if py_state is not None:
+        with suppress(Exception):
+            random.setstate(py_state)
+    torch_state = state.get("torch_random_state")
+    if torch_state is not None:
+        with suppress(Exception):
+            torch.set_rng_state(torch_state)
+    cuda_state = state.get("torch_cuda_random_state_all")
+    if torch.cuda.is_available() and cuda_state is not None:
+        with suppress(Exception):
+            torch.cuda.set_rng_state_all(cuda_state)
+
+    return state

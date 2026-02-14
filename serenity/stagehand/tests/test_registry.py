@@ -4,10 +4,12 @@ All tests are runnable WITHOUT a GPU (CUDA calls are mocked).
 """
 from __future__ import annotations
 
+from pathlib import Path
 from unittest import mock
 
 import pytest
 import torch
+from safetensors.torch import save_file
 from torch import nn
 
 from serenity.stagehand.budget import BudgetManager
@@ -24,6 +26,7 @@ from serenity.stagehand.residency import (
     ResidencyEntry,
     ResidencyMap,
 )
+from serenity.training.adapters.lora import apply_lora
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -145,6 +148,65 @@ class TestBlockRegistry:
         entry = reg.blocks_in_order()[0]
         # The weak reference should resolve while model is alive
         assert entry.module_ref() is not None
+
+    def test_convert_to_file_backed_handles_lora_orig_param_names(self, tmp_path: Path) -> None:
+        """LoRA-wrapped ``.orig`` params still map to base safetensors keys."""
+
+        class _LoRABlock(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.to_q = nn.Linear(8, 8, bias=False)
+                self.to_k = nn.Linear(8, 8, bias=False)
+                self.ff = nn.Linear(8, 8, bias=False)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return self.ff(self.to_q(x) + self.to_k(x))
+
+        class _LoRAModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.block = nn.ModuleList([_LoRABlock(), _LoRABlock()])
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                for blk in self.block:
+                    x = blk(x)
+                return x
+
+        model = _LoRAModel().cpu()
+        ckpt_path = tmp_path / "base.safetensors"
+        save_file(model.state_dict(), str(ckpt_path))
+
+        # Wrapping linears introduces ".orig.weight" names in named_parameters().
+        apply_lora(model, rank=2, alpha=2.0, target_modules=["to_q", "to_k", "ff"])
+
+        reg = BlockRegistry()
+        reg.build_from_model(model, block_pattern=r"^block\.\d+$", group="wan", dtype=torch.float32)
+        reg.validate(pool_capacity_bytes=1024 * 1024 * 1024)
+
+        converted = reg.convert_to_file_backed(str(ckpt_path))
+        assert converted > 0
+
+        entry = reg.get("block.0")
+        assert entry.file_backed
+        assert any(spec.param_name.endswith(".orig.weight") for spec in entry.file_param_specs)
+
+        block0 = entry.module_ref()
+        assert block0 is not None
+        assert block0.to_q.orig.weight.numel() == 0
+
+    def test_candidate_tensor_keys_maps_wan_aliases(self) -> None:
+        """WAN module names normalize to checkpoint key naming."""
+        keys = BlockRegistry._candidate_tensor_keys("blocks.0", "attn1.to_q.orig.weight")
+        assert "blocks.0.self_attn.q.weight" in keys
+
+        keys = BlockRegistry._candidate_tensor_keys("blocks.0", "attn2.to_out.0.orig.bias")
+        assert "blocks.0.cross_attn.o.bias" in keys
+
+        keys = BlockRegistry._candidate_tensor_keys("blocks.0", "ffn.net.0.proj.orig.weight")
+        assert "blocks.0.ffn.0.weight" in keys
+
+        keys = BlockRegistry._candidate_tensor_keys("blocks.0", "scale_shift_table")
+        assert "blocks.0.modulation" in keys
 
 
 # ── ResidencyMap + BlockState tests ──────────────────────────────────────

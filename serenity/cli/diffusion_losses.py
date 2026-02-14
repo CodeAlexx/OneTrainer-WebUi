@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 __all__ = [
     "_compute_vae_loss",
     "_sample_flow_timesteps",
+    "_sample_flow_timesteps_bounded",
     "_flow_add_noise",
     "_calculate_timestep_shift",
     "_qwen_pack_latents",
@@ -60,6 +61,31 @@ def _sample_flow_timesteps(
 ) -> torch.Tensor:
     u = torch.rand(batch_size, device=device)
     timestep = u * float(num_train_timesteps)
+
+    if abs(float(shift) - 1.0) > 1e-6:
+        numerator = float(num_train_timesteps) * float(shift) * timestep
+        denominator = (float(shift) - 1.0) * timestep + float(num_train_timesteps)
+        timestep = numerator / denominator
+
+    return torch.clamp(timestep.long(), 0, num_train_timesteps - 1)
+
+
+def _sample_flow_timesteps_bounded(
+    batch_size: int,
+    num_train_timesteps: int,
+    device: torch.device,
+    shift: float,
+    t_min: int,
+    t_max: int,
+) -> torch.Tensor:
+    """Sample flow timesteps restricted to [t_min, t_max) before shift."""
+    t_min = max(0, t_min)
+    t_max = min(num_train_timesteps, t_max)
+    if t_max <= t_min:
+        t_max = t_min + 1
+
+    u = torch.rand(batch_size, device=device)
+    timestep = float(t_min) + u * float(t_max - t_min)
 
     if abs(float(shift) - 1.0) > 1e-6:
         numerator = float(num_train_timesteps) * float(shift) * timestep
@@ -133,7 +159,14 @@ def _compute_loss(
                 int(latents.shape[-1]),
             )
 
-        timesteps = _sample_flow_timesteps(batch_size, num_train_timesteps, latents.device, shift)
+        timestep_bounds = config.get("_timestep_bounds")
+        if timestep_bounds is not None and family == "wan":
+            t_min, t_max = int(timestep_bounds[0]), int(timestep_bounds[1])
+            timesteps = _sample_flow_timesteps_bounded(
+                batch_size, num_train_timesteps, latents.device, shift, t_min, t_max,
+            )
+        else:
+            timesteps = _sample_flow_timesteps(batch_size, num_train_timesteps, latents.device, shift)
         noise = torch.randn_like(latents)
         noisy_latents, _ = _flow_add_noise(latents, noise, timesteps, num_train_timesteps)
         flow_target = noise - latents

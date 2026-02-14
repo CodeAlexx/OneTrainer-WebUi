@@ -97,6 +97,11 @@ DEFAULT_TARGETS: dict[str, list[str]] = {
     "hi_dream_full": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
     "chroma_1": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
     "ltx2": ["to_q", "to_k", "to_v", "to_out.0", "ff.net.0.proj", "ff.net.2"],
+    "wan": [
+        "attn1.to_q", "attn1.to_k", "attn1.to_v", "attn1.to_out.0",
+        "attn2.to_q", "attn2.to_k", "attn2.to_v", "attn2.to_out.0",
+        "ffn.net.0.proj", "ffn.net.2",
+    ],
     "wuerstchen_2": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
     "stable_cascade_1": ["attn.to_q", "attn.to_k", "attn.to_v", "ff.net.0.proj", "ff.net.2"],
 }

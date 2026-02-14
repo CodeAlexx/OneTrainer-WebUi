@@ -11,20 +11,24 @@ import torch
 from serenity.core.interfaces import ModelType
 from serenity.models.base import BaseModelImpl
 
-# WAN 2.2 14B has 40 transformer blocks (~700 MB each in BF16).
-# LoRA target modules follow the standard attention + MLP pattern.
+# WAN 2.1/2.2 14B has 40 transformer blocks (~700 MB each in BF16).
+# Diffusers uses attn1 (self-attention), attn2 (cross-attention), ffn.net (feed-forward).
 WAN_TRANSFORMER_LORA_TARGETS: tuple[str, ...] = (
-    "attn.to_q",
-    "attn.to_k",
-    "attn.to_v",
-    "attn.to_out.0",
-    "ffn.0",
-    "ffn.2",
+    "attn1.to_q",
+    "attn1.to_k",
+    "attn1.to_v",
+    "attn1.to_out.0",
+    "attn2.to_q",
+    "attn2.to_k",
+    "attn2.to_v",
+    "attn2.to_out.0",
+    "ffn.net.0.proj",
+    "ffn.net.2",
 )
 
 WAN_LAYER_PRESETS: dict[str, list[str]] = {
-    "attn-mlp": ["attn", "ffn"],
-    "attn-only": ["attn"],
+    "attn-mlp": ["attn1", "attn2", "ffn.net"],
+    "attn-only": ["attn1", "attn2"],
     "blocks": ["blocks"],
     "full": [],
 }
@@ -97,9 +101,10 @@ class WanModel(BaseModelImpl):
     train_module_attr = "transformer"
     flow_objective = True
 
-    def __init__(self, *, wan_stage: str | None = None) -> None:
+    def __init__(self, *, wan_stage: str | None = None, is_vace: bool = False) -> None:
         super().__init__(model_type=ModelType.WAN)
         self.wan_stage = wan_stage
+        self.is_vace = is_vace
 
     def load_pipeline(
         self,
@@ -120,12 +125,40 @@ class WanModel(BaseModelImpl):
         if not model_file.exists():
             raise FileNotFoundError(f"WAN transformer weights not found: {model_file}")
 
-        print(f"[wan] loading transformer from {model_file}")
-        transformer = WanTransformer3DModel.from_single_file(
-            str(model_file),
-            torch_dtype=dtype,
-        )
+        # Detect VACE architecture by checking for vace_blocks keys.
+        is_vace = self.is_vace
+        if not is_vace:
+            from safetensors import safe_open
+            with safe_open(str(model_file), framework="pt") as f:
+                is_vace = any(k.startswith("vace_blocks.") for k in f.keys())
+        self.is_vace = is_vace
+
+        if is_vace:
+            from diffusers import WanVACETransformer3DModel
+            print(f"[wan] loading VACE transformer from {model_file}")
+            transformer = WanVACETransformer3DModel.from_single_file(
+                str(model_file),
+                torch_dtype=dtype,
+            )
+        else:
+            print(f"[wan] loading transformer from {model_file}")
+            transformer = WanTransformer3DModel.from_single_file(
+                str(model_file),
+                torch_dtype=dtype,
+            )
         transformer.to("cpu")
+        # from_single_file() calls accelerate.dispatch_model() which installs
+        # AlignDevicesHook on every module. These hooks intercept .to() and
+        # parameter access, preventing stagehand from managing block placement.
+        # Strip all dispatch hooks and the device_map attribute.
+        try:
+            from accelerate.hooks import remove_hook_from_module
+            for module in transformer.modules():
+                remove_hook_from_module(module)
+        except ImportError:
+            pass
+        if hasattr(transformer, "hf_device_map"):
+            del transformer.hf_device_map
 
         # --- Load VAE ---
         vae_path = _resolve_wan_vae_path(
@@ -157,16 +190,13 @@ class WanModel(BaseModelImpl):
         if te_path:
             te_file = Path(te_path)
             if te_file.is_file() and te_file.suffix == ".safetensors":
-                # Load from single file - need to find the config and tokenizer
-                # UMT5-XXL uses google/umt5-xxl config
+                # Load config from HF cache (just config.json, not weights), then load local weights
                 print(f"[wan] loading UMT5 text encoder from {te_file}")
-                text_encoder = UMT5EncoderModel.from_pretrained(
-                    "google/umt5-xxl",
-                    torch_dtype=dtype,
-                    local_files_only=False,
-                )
-                # Load single-file weights on top
+                from transformers import AutoConfig
                 from safetensors.torch import load_file
+
+                config_obj = AutoConfig.from_pretrained("google/umt5-xxl")
+                text_encoder = UMT5EncoderModel(config_obj).to(dtype=dtype)
                 state_dict = load_file(str(te_file))
                 text_encoder.load_state_dict(state_dict, strict=False)
                 text_encoder.to("cpu")
@@ -195,13 +225,23 @@ class WanModel(BaseModelImpl):
         scheduler = FlowMatchEulerDiscreteScheduler(shift=flow_shift)
 
         # --- Assemble pipeline ---
-        pipeline = WanPipeline(
-            tokenizer=tokenizer,
-            text_encoder=text_encoder,
-            vae=vae,
-            transformer=transformer,
-            scheduler=scheduler,
-        )
+        if is_vace:
+            from diffusers import WanVACEPipeline
+            pipeline = WanVACEPipeline(
+                tokenizer=tokenizer,
+                text_encoder=text_encoder,
+                vae=vae,
+                transformer=transformer,
+                scheduler=scheduler,
+            )
+        else:
+            pipeline = WanPipeline(
+                tokenizer=tokenizer,
+                text_encoder=text_encoder,
+                vae=vae,
+                transformer=transformer,
+                scheduler=scheduler,
+            )
         pipeline.to("cpu")
         return pipeline
 
@@ -228,11 +268,11 @@ class WanModel(BaseModelImpl):
         if latents_mean is not None and latents_std is not None:
             mean = torch.tensor(latents_mean, device=latents.device, dtype=latents.dtype)
             std = torch.tensor(latents_std, device=latents.device, dtype=latents.dtype)
-            # Reshape for broadcasting: (1, C, 1, 1, 1)
-            while mean.dim() < latents.dim():
-                mean = mean.unsqueeze(-1)
-            while std.dim() < latents.dim():
-                std = std.unsqueeze(-1)
+            # Reshape for broadcasting: (1, C, 1, 1, 1) to match (B, C, T, H, W)
+            shape = [1] * latents.dim()
+            shape[1] = len(latents_mean)  # channel dim
+            mean = mean.view(*shape)
+            std = std.view(*shape)
             latents = (latents - mean) / std
 
         return latents
@@ -279,13 +319,9 @@ class WanModel(BaseModelImpl):
 
     def cache_prompt_device(self, pipeline: Any, train_device: torch.device) -> torch.device:
         del pipeline
-        if train_device.type == "cuda":
-            return torch.device("cpu")
         return train_device
 
     def move_text_encoders_to_device(self, pipeline: Any, device: torch.device) -> None:
-        if device.type == "cuda":
-            return
         text_encoder = getattr(pipeline, "text_encoder", None)
         if text_encoder is not None:
             text_encoder.to(device)

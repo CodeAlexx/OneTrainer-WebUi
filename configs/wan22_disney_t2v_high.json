@@ -10,11 +10,13 @@
         "strategy": "stagehand",
         "gradient_checkpointing": "on",
         "stagehand": {
-            "pinned_pool_mb": 8192,
-            "pinned_slab_mb": 512,
-            "vram_high_watermark_mb": 20000,
-            "vram_low_watermark_mb": 16000,
-            "prefetch_window_blocks": 2
+            "pinned_pool_mb": 3072,
+            "pinned_slab_mb": 1024,
+            "vram_high_watermark_mb": 3000,
+            "vram_low_watermark_mb": 2000,
+            "prefetch_window_blocks": 1,
+            "max_inflight_transfers": 1,
+            "file_backed_weights": true
         }
     },
     "data": {

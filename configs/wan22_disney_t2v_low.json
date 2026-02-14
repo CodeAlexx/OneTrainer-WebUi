@@ -10,11 +10,13 @@
         "strategy": "stagehand",
         "gradient_checkpointing": "on",
         "stagehand": {
-            "pinned_pool_mb": 8192,
-            "pinned_slab_mb": 512,
-            "vram_high_watermark_mb": 20000,
-            "vram_low_watermark_mb": 16000,
-            "prefetch_window_blocks": 2
+            "pinned_pool_mb": 3072,
+            "pinned_slab_mb": 1024,
+            "vram_high_watermark_mb": 3000,
+            "vram_low_watermark_mb": 2000,
+            "prefetch_window_blocks": 1,
+            "max_inflight_transfers": 1,
+            "file_backed_weights": true
         }
     },
     "data": {
@@ -26,10 +28,10 @@
     "training_method": "lora",
     "adapter": {"rank": 16, "alpha": 16},
     "timestep_shift": 5.0,
-    "max_steps": 500,
+    "max_steps": 2000,
     "learning_rate": 1e-4,
     "gradient_accumulation_steps": 4,
-    "save_every": 100,
+    "save_every": 500,
     "output_dir": "output/wan22_disney_t2v_low",
     "seed": 42,
     "train_device": "cuda",

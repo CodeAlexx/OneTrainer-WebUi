@@ -96,6 +96,7 @@ class StagehandRuntime:
         group: str = "transformer",
         dtype: torch.dtype = torch.bfloat16,
         inference_mode: bool = False,
+        pool: PinnedPool | None = None,
     ) -> None:
         self._model = model
         self._config = config
@@ -107,12 +108,15 @@ class StagehandRuntime:
             model, block_pattern=block_pattern, group=group, dtype=dtype,
         )
 
-        # 2. Create pool and validate registry against pool capacity.
-        self._pool = PinnedPool(
-            total_mb=config.pinned_pool_mb,
-            slab_mb=config.pinned_slab_mb,
-            alignment=config.pinned_slab_alignment,
-        )
+        # 2. Create pool (or reuse existing) and validate registry against pool capacity.
+        if pool is not None:
+            self._pool = pool
+        else:
+            self._pool = PinnedPool(
+                total_mb=config.pinned_pool_mb,
+                slab_mb=config.pinned_slab_mb,
+                alignment=config.pinned_slab_alignment,
+            )
         self._registry.validate(pool_capacity_bytes=self._pool.num_slabs * self._pool.slab_bytes)
 
         # 3. Create residency map, budget manager, guards, telemetry.
@@ -190,6 +194,17 @@ class StagehandRuntime:
             reserved_mb=self._budget.vram_reserved_mb(),
         )
         self._scheduler.end_step()
+
+    def convert_registry_to_file_backed(self, safetensors_path: str) -> int:
+        """Convert registered blocks to file-backed mode from *safetensors_path*."""
+        converted = self._registry.convert_to_file_backed(safetensors_path)
+        self._scheduler.refresh_registry_snapshot()
+        log.info(
+            "StagehandRuntime: converted %d params to file-backed source (%s)",
+            converted,
+            safetensors_path,
+        )
+        return converted
 
     # ── forward/backward hooks ────────────────────────────────────────
 
@@ -282,8 +297,23 @@ class StagehandRuntime:
     def shutdown(self) -> None:
         """Clean shutdown: drain transfers, release pool, close telemetry."""
         self._engine.drain()
+        self._scheduler.close()
         self._pool.shutdown()
         self._telemetry.close()
+
+    def shutdown_keep_pool(self) -> PinnedPool:
+        """Shut down runtime but return the pool for reuse by another runtime.
+
+        Drains in-flight transfers and closes telemetry, but does NOT
+        shut down the pinned pool.  The caller is responsible for either
+        passing the pool to a new ``StagehandRuntime`` or calling
+        ``pool.shutdown()`` when done.
+        """
+        self._engine.drain()
+        self._scheduler.close()
+        self._telemetry.close()
+        pool = self._pool
+        return pool
 
     # ── properties ────────────────────────────────────────────────────
 
